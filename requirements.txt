@@ -9,6 +9,7 @@ yfinance>=0.2.40
 vaderSentiment>=3.3.2
 tenacity>=8.2
 tqdm>=4.65
+tabulate>=0.9
 
 # --- Dev / test (optional) ---
 pytest>=7.4
