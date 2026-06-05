@@ -75,6 +75,7 @@ class SentimentConfig:
     max_age_days: int = 30
     recency_halflife_days: float = 7.0
     min_articles_for_confidence: int = 3
+    low_confidence_threshold: float = 0.3
 
 
 @dataclass

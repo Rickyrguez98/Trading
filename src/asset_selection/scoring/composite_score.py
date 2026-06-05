@@ -128,8 +128,17 @@ def compute_composite_scores(
 # Flags + reasons
 # ---------------------------------------------------------------------------
 
-def flag_rows(df: pd.DataFrame, composite_cfg: CompositeConfig) -> pd.DataFrame:
-    """Add ``flags`` (list[str]) and ``reason`` (str) columns to ``df``."""
+def flag_rows(
+    df: pd.DataFrame,
+    composite_cfg: CompositeConfig,
+    low_sentiment_confidence_threshold: float = 0.3,
+) -> pd.DataFrame:
+    """Add ``flags`` (list[str]) and ``reason`` (str) columns to ``df``.
+
+    ``low_sentiment_confidence_threshold`` is the confidence (0..1) below
+    which we emit a ``LOW_SENTIMENT_CONFIDENCE`` flag, given there was at
+    least one article (no news fires NO_NEWS instead).
+    """
     if df.empty:
         df["flags"] = []
         df["reason"] = ""
@@ -148,6 +157,7 @@ def flag_rows(df: pd.DataFrame, composite_cfg: CompositeConfig) -> pd.DataFrame:
         s_score = float(row.get("sentiment_score", 50.0))
         article_count = int(row.get("article_count", 0) or 0)
         missing_metric_count = int(row.get("missing_metric_count", 0) or 0)
+        sentiment_confidence = float(row.get("sentiment_confidence", 0.0) or 0.0)
 
         if (
             s_score >= speculative_cfg.get("sentiment_min", 65)
@@ -161,6 +171,9 @@ def flag_rows(df: pd.DataFrame, composite_cfg: CompositeConfig) -> pd.DataFrame:
             row_flags.append("STRONG_FUNDAMENTALS_BAD_SENTIMENT")
         if article_count == 0:
             row_flags.append("NO_NEWS")
+        elif sentiment_confidence < low_sentiment_confidence_threshold:
+            # Some news, but not enough volume/diversity to trust the signal.
+            row_flags.append("LOW_SENTIMENT_CONFIDENCE")
         if missing_metric_count >= 5:
             row_flags.append("THIN_FUNDAMENTALS")
         if pd.isna(row.get("market_cap")):
