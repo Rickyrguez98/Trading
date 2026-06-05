@@ -1,0 +1,15 @@
+# Core runtime dependencies.
+# Install with: pip install -r requirements.txt
+pandas>=1.5
+numpy>=1.23
+requests>=2.28
+pyyaml>=6.0
+python-dotenv>=1.0
+yfinance>=0.2.40
+vaderSentiment>=3.3.2
+tenacity>=8.2
+tqdm>=4.65
+
+# --- Dev / test (optional) ---
+pytest>=7.4
+pytest-cov>=4.1

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asset-selection"
+version = "0.1.0"
+description = "Research prototype: free-data Asset Selection Algorithm for U.S.-listed equities."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Trading Research" }]
+keywords = ["quant", "equities", "asset-selection", "research"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "requests>=2.28",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "yfinance>=0.2.40",
+    "vaderSentiment>=3.3.2",
+    "tenacity>=8.2",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.7",
+]
+finbert = [
+    # Optional: heavy. Install only if you want FinBERT-based sentiment.
+    "torch>=2.1",
+    "transformers>=4.40",
+]
+
+[project.scripts]
+asset-selection = "asset_selection.pipelines.run_asset_selection:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501"]

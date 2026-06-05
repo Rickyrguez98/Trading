@@ -1,0 +1,138 @@
+"""Final ranking + human-readable report formatting."""
+from __future__ import annotations
+
+from typing import List
+
+import pandas as pd
+
+
+_DISPLAY_COLUMNS: List[str] = [
+    "rank",
+    "ticker",
+    "company_name",
+    "sector",
+    "industry",
+    "market_cap",
+    "avg_dollar_volume",
+    "volatility_pct",
+    "sentiment_score",
+    "article_count",
+    "fundamentals_score",
+    "growth_score",
+    "quality_score",
+    "valuation_score",
+    "balance_sheet_score",
+    "cash_flow_score",
+    "risk_penalty",
+    "final_score",
+    "flags",
+    "reason",
+    "missing_fields",
+]
+
+
+def rank_candidates(df: pd.DataFrame, top_n: int = 25) -> pd.DataFrame:
+    """Sort by ``final_score`` desc; tie-break with fundamentals then sentiment.
+
+    Returns the full sorted DataFrame (not just the top N) so the CSV stays
+    complete. The Markdown report formatter uses ``top_n`` separately.
+    """
+    if df.empty:
+        return df
+    sort_cols = [c for c in ("final_score", "fundamentals_score", "sentiment_score") if c in df.columns]
+    ranked = df.sort_values(sort_cols, ascending=False).reset_index(drop=True)
+    ranked.insert(0, "rank", ranked.index + 1)
+    cols = [c for c in _DISPLAY_COLUMNS if c in ranked.columns]
+    other_cols = [c for c in ranked.columns if c not in cols]
+    return ranked[cols + other_cols]
+
+
+def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
+    """Render the top-N rows as a self-contained Markdown report."""
+    if df.empty:
+        return "# Asset Selection — Top Candidates\n\n_No candidates produced._\n"
+
+    head = df.head(top_n).copy()
+    # Pretty-print the things people will actually read.
+    head["market_cap"] = head["market_cap"].apply(_humanize_money)
+    head["avg_dollar_volume"] = head["avg_dollar_volume"].apply(_humanize_money)
+    for col in (
+        "final_score",
+        "fundamentals_score",
+        "sentiment_score",
+        "growth_score",
+        "quality_score",
+        "valuation_score",
+        "risk_penalty",
+    ):
+        if col in head.columns:
+            head[col] = head[col].apply(_fmt_pct)
+
+    if "flags" in head.columns:
+        head["flags"] = head["flags"].apply(lambda v: ", ".join(v) if isinstance(v, list) else (v or ""))
+    if "missing_fields" in head.columns:
+        head["missing_fields"] = head["missing_fields"].apply(
+            lambda v: ", ".join(v) if isinstance(v, list) else (v or "")
+        )
+
+    columns_in_order = [
+        "rank",
+        "ticker",
+        "company_name",
+        "sector",
+        "market_cap",
+        "final_score",
+        "fundamentals_score",
+        "sentiment_score",
+        "growth_score",
+        "valuation_score",
+        "risk_penalty",
+        "article_count",
+        "flags",
+    ]
+    cols = [c for c in columns_in_order if c in head.columns]
+
+    md = ["# Asset Selection — Top Candidates", ""]
+    md.append(f"_Top {min(top_n, len(head))} of {len(df)} ranked candidates._")
+    md.append("")
+    md.append("> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.")
+    md.append("")
+    md.append(head[cols].to_markdown(index=False))
+    md.append("")
+    md.append("## Flag legend")
+    md.append("")
+    md.append("- **SPECULATIVE_HYPE** — strong sentiment but weak fundamentals.")
+    md.append("- **STRONG_FUNDAMENTALS_BAD_SENTIMENT** — quality business, negative recent news.")
+    md.append("- **NO_NEWS** — no recent articles available; sentiment score is neutral by default.")
+    md.append("- **THIN_FUNDAMENTALS** — many missing fundamental fields; score is less reliable.")
+    md.append("- **MISSING_MARKET_CAP** — could not read market cap; size/liquidity filters degraded.")
+    return "\n".join(md) + "\n"
+
+
+def _humanize_money(v) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if x != x:  # NaN
+        return ""
+    abs_x = abs(x)
+    if abs_x >= 1e12:
+        return f"${x/1e12:.2f}T"
+    if abs_x >= 1e9:
+        return f"${x/1e9:.2f}B"
+    if abs_x >= 1e6:
+        return f"${x/1e6:.2f}M"
+    if abs_x >= 1e3:
+        return f"${x/1e3:.2f}K"
+    return f"${x:.0f}"
+
+
+def _fmt_pct(v) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if x != x:
+        return ""
+    return f"{x:.1f}"
