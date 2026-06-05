@@ -76,33 +76,146 @@ Optional API keys go in `.env` — none are required for the default pipeline.
 
 ## How to run
 
-The CLI entry point:
+The pipeline has three modes, selected by `--universe`:
+
+### Full universe (default)
 
 ```bash
 python -m asset_selection.pipelines.run_asset_selection \
-    --config configs/default_config.yaml \
-    --limit 50 \
-    --top 20
+    --config configs/default_config.yaml --top 20
 ```
 
-Useful flags:
+Runs the entire cleaned U.S. common-stock universe (~4 700 names across
+NASDAQ + NYSE + NYSE American + NYSE Arca + BATS + IEX) through the staged
+funnel — see [docs/FULL_UNIVERSE_PIPELINE.md](docs/FULL_UNIVERSE_PIPELINE.md).
+This is the right mode for a real ranking. It takes a while because
+yfinance is rate-limited; the staged funnel keeps news fetches bounded.
 
-| Flag                  | Meaning                                                     |
-|-----------------------|-------------------------------------------------------------|
-| `--config PATH`       | Path to YAML config (defaults to `configs/default_config.yaml`). |
-| `--limit N`           | Cap the number of tickers processed (good for smoke tests). |
-| `--top N`             | Number of top-ranked tickers to write to the Markdown report. |
-| `--refresh-cache`     | Ignore cached provider responses and re-fetch.              |
-| `--no-cache`          | Disable cache entirely for this run.                        |
-| `--tickers AAPL MSFT` | Run only on the given tickers (skips universe build).       |
-| `--output-dir PATH`   | Override the default `reports/` directory.                  |
-| `--log-level LEVEL`   | DEBUG / INFO / WARNING / ERROR.                             |
+### Sample (fast testing)
+
+```bash
+python -m asset_selection.pipelines.run_asset_selection \
+    --config configs/default_config.yaml --universe sample --limit 50 --top 10
+```
+
+`--limit` only applies in sample mode; the rest of the funnel still runs.
+Use this for iterating on weights, debugging providers, or sanity
+checks — typically completes in 1–2 minutes.
+
+### Custom shortlist
+
+```bash
+python -m asset_selection.pipelines.run_asset_selection \
+    --tickers AAPL MSFT GOOGL NVDA --top 4
+```
+
+`--tickers` implies `--universe custom`. Stage 1 is short-circuited;
+the funnel still runs prices → fundamentals → news → composite over
+exactly the tickers you named.
+
+### All flags
+
+| Flag                                 | Meaning |
+|--------------------------------------|---------|
+| `--config PATH`                      | Path to YAML config (default `configs/default_config.yaml`). |
+| `--universe full \| sample \| custom`| Universe mode. Defaults to the YAML's `run.mode`, which is `full`. |
+| `--limit N`                          | **Sample mode only.** Cap stage-1 universe at N. Ignored in full/custom mode (warning logged). |
+| `--tickers AAPL MSFT …`              | Custom mode shortcut. Always overrides `--universe`. |
+| `--top N`                            | Top-N for the Markdown report. |
+| `--refresh-cache`                    | Invalidate cached provider responses before running. |
+| `--no-cache`                         | Disable cache entirely for this run. |
+| `--output-dir PATH`                  | Override the default `reports/` directory. |
+| `--log-level LEVEL`                  | DEBUG / INFO / WARNING / ERROR. |
 
 After it finishes, look at:
 
+- `data/processed/universe_clean.csv` — the cleaned stage-1 universe.
 - `data/processed/asset_selection_results.csv` — full ranking with all metrics.
 - `reports/top_candidates.md` — human-readable top-N report.
-- `reports/asset_selection_summary.json` — machine-readable run summary.
+- `reports/asset_selection_summary.json` — machine-readable run summary, including stages and exchange breakdown.
+- `reports/universe_summary.json` — universe-only report (stage stats + exchange counts), produced even when the pipeline aborts.
+
+## Universe and staged filtering
+
+### What's in the universe
+
+The default ticker universe comes from NASDAQ Trader's two symbol
+directories (`nasdaqlisted.txt` + `otherlisted.txt`). Despite the
+"NASDAQ" in the name, the second file covers **every major U.S.
+exchange**:
+
+| Exchange       | Coverage |
+|----------------|----------|
+| NASDAQ         | NASDAQ-listed common stocks |
+| NYSE           | New York Stock Exchange |
+| NYSE American  | (formerly AMEX) |
+| NYSE Arca      | mostly ETFs |
+| BATS / Cboe    | mostly ETFs |
+| IEX            | small handful |
+
+After the cleaner removes ETFs / warrants / units / preferreds / rights
+/ test issues, you typically end up with **~4 700 common stocks**.
+
+You can narrow this with `universe.exchanges` in the YAML — empty (the
+default) keeps all of them; `[NASDAQ, NYSE]` keeps just those two.
+Aliases are recognised: `AMEX` ≡ `NYSE American`, `ARCA` ≡ `NYSE Arca`,
+`CBOE` ≡ `BATS`.
+
+You can also flip per-asset-type include knobs
+(`universe.include_etfs`, `include_funds`, `include_warrants`,
+`include_units`, `include_preferred`, `include_rights`,
+`include_test_issues`, `include_notes`) — all default to `false`
+(exclude). Legacy `exclude_*` keys are honoured for backward
+compatibility.
+
+### Why a staged funnel
+
+Free APIs have rate limits. Pulling fundamentals **and** news **and**
+prices for ~4 700 tickers in one loop would take hours and would burn
+through yfinance's news endpoint long before anything useful happened.
+
+So the pipeline reduces the universe in five explicit stages, and
+**news/sentiment is only collected for the post-fundamentals
+shortlist**:
+
+```
+Stage 1: cleaned universe        ~4 700
+Stage 2: liquidity prescreen     ↓ top-K by avg_dollar_volume = 500
+Stage 3: fundamentals prescreen  ↓ top-K by fundamentals_score = 150
+Stage 4: news + sentiment        ↓ runs only on those 150
+Stage 5: composite + rank        ↓ top-N (default 25) in the Markdown report
+```
+
+Each stage's `top_k` lives in `pipeline.*` in the YAML; set any to
+`null` to disable that cap. The full per-stage in/out counts, dropped
+reasons, provider failure counts, and timings land in
+`reports/universe_summary.json`.
+
+### How to interpret the universe report
+
+`reports/universe_summary.json` looks like:
+
+```json
+{
+  "mode": "full",
+  "exchange_breakdown": { "NASDAQ": 2936, "NYSE": 1582, "NYSE American": 209, ... },
+  "stages": [
+    { "name": "1_universe",      "input_count": 12799, "output_count": 4735, "dropped": {} },
+    { "name": "2_prices",        "input_count": 4735,  "output_count": 500,
+      "dropped": {"below_min_dollar_volume": 1820, "insufficient_price_history": 12} },
+    { "name": "3_fundamentals",  "input_count": 500,   "output_count": 150,
+      "dropped": {"below_min_market_cap": 87}, "provider_failures": 14 },
+    { "name": "4_sentiment",     "input_count": 150,   "output_count": 150,
+      "provider_failures": 9 },
+    { "name": "5_compose_and_rank","input_count": 150, "output_count": 150 }
+  ]
+}
+```
+
+`provider_failures` is how many tickers got a provider error at that
+stage (cached as missing); the pipeline never crashes on a single
+failed call. If you see a lot of failures, your run is correct but the
+data behind those tickers will be marked missing in the output.
 
 ## Methodology
 
