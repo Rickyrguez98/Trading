@@ -83,7 +83,9 @@ def _mock_prices(ticker: str, lookback_days: int = 90) -> PriceSnapshot:
         "MSFT": (420.0, 25_000_000, 0.22, 0.22),
         "GOOGL": (170.0, 35_000_000, -0.12, 0.30),  # negative -> WEAK_PRICE_TREND
     }
-    last, vol, ret, sigma = profiles.get(ticker, (None, None, None, None))
+    # Synthetic valid defaults for unknown tickers so they still pass the
+    # liquidity floor and volatility-history check.
+    last, vol, ret, sigma = profiles.get(ticker, (100.0, 5_000_000, 0.10, 0.25))
     return PriceSnapshot(
         ticker=ticker,
         last_close=last,
@@ -233,3 +235,199 @@ def test_pipeline_does_not_crash_when_all_news_empty(temp_workdir: Path):
         assert c["sentiment_article_count"] == 0
         # Default fill: 50 (neutral) when no news is available.
         assert c["sentiment_score"] == 50.0
+
+
+# ---------------------------------------------------------------------------
+# Staged-pipeline behaviour
+# ---------------------------------------------------------------------------
+
+def test_summary_includes_stage_stats_and_exchange_breakdown(temp_workdir: Path):
+    """The new staged pipeline must surface per-stage in/out counts and an
+    exchange breakdown in the JSON summary, plus a universe_summary.json."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
+         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "AAPL", "MSFT", "GOOGL",
+            "--top", "3", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    assert js["mode"] == "custom"
+    stage_names = [s["name"] for s in js["stages"]]
+    assert stage_names == [
+        "1_universe", "2_prices", "3_fundamentals",
+        "4_sentiment", "5_compose_and_rank",
+    ]
+    # Each stage carries an output_count and a dropped dict.
+    for s in js["stages"]:
+        assert "output_count" in s
+        assert "dropped" in s
+        assert "duration_seconds" in s
+
+    uni_summary = json.loads(
+        (temp_workdir / "reports" / "universe_summary.json").read_text()
+    )
+    assert uni_summary["mode"] == "custom"
+    assert [s["name"] for s in uni_summary["stages"]] == stage_names
+
+
+def test_news_runs_only_after_fundamentals_prescreen(temp_workdir: Path):
+    """Stage 4 (news/sentiment) must NOT be called for tickers dropped in
+    stage 3 (fundamentals)."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    # One ticker has a tiny market cap and will be dropped at stage 3.
+    class _BigCapFund:
+        def __init__(self, **k): pass
+        def fetch(self, ticker):
+            tiny = ticker == "TINY"
+            return Fundamentals(
+                ticker=ticker, company_name=f"{ticker} Co",
+                market_cap=(1e6 if tiny else 5e10), sector="Tech",
+                revenue_growth=0.1, earnings_growth=0.1, fcf_growth=0.1,
+                roe=0.2, roa=0.1, operating_margin=0.2, net_margin=0.1,
+                debt_to_equity=80.0, current_ratio=1.5,
+                free_cash_flow_yield=0.03, operating_cash_flow_margin=0.15,
+                pe_ratio=20.0, forward_pe=18.0, peg_ratio=1.5,
+                price_to_sales=5.0, price_to_book=6.0, source="mock",
+            )
+
+    news_calls: List[str] = []
+
+    class _SpyNews:
+        def __init__(self, **k): pass
+        def fetch(self, ticker, max_age_days=30):
+            news_calls.append(ticker)
+            return []
+
+    with patch.object(r, "get_fundamentals_provider", return_value=_BigCapFund), \
+         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
+         patch.object(r, "get_news_provider", return_value=_SpyNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "AAPL", "TINY", "MSFT",
+            "--top", "3", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+
+    # TINY was dropped at stage 3 -> news must NOT have been called for it.
+    assert "TINY" not in news_calls, (
+        "Stage 4 was called for a ticker that should have been dropped at "
+        "stage 3, defeating the free-API protection."
+    )
+    assert set(news_calls) == {"AAPL", "MSFT"}
+
+
+def test_sample_mode_respects_limit(temp_workdir: Path):
+    """In sample mode, --limit must actually cap the stage-1 universe."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    # Use a custom universe trick: monkeypatch build_universe to return a
+    # synthetic 10-row universe so we can prove --limit reduces it to 3.
+    import pandas as pd
+
+    def _fake_build_universe(*_args, **_kwargs):
+        return pd.DataFrame({
+            "ticker": [f"T{i}" for i in range(10)],
+            "company_name": [f"T{i} Co" for i in range(10)],
+            "exchange": ["NASDAQ"] * 10,
+            "asset_type": ["common"] * 10,
+            "is_etf": [False] * 10,
+            "is_test_issue": [False] * 10,
+            "source": ["nasdaq_trader"] * 10,
+        })
+
+    with patch.object(r, "build_universe", side_effect=_fake_build_universe), \
+         patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
+         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--universe", "sample", "--limit", "3",
+            "--top", "3", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    assert js["mode"] == "sample"
+    assert js["sample_limit"] == 3
+    s1 = js["stages"][0]
+    assert s1["name"] == "1_universe"
+    assert s1["output_count"] == 3, (
+        f"Sample limit should cap to 3, got {s1['output_count']}"
+    )
+
+
+def test_full_mode_does_not_silently_cap_at_50(temp_workdir: Path):
+    """The headline regression: --universe full must NOT cap at 50/500.
+    Stage 1 should keep the entire cleaned universe."""
+    from asset_selection.pipelines import run_asset_selection as r
+    import pandas as pd
+
+    def _big_universe(*_a, **_k):
+        return pd.DataFrame({
+            "ticker": [f"T{i:04d}" for i in range(800)],
+            "company_name": [f"T{i:04d} Co" for i in range(800)],
+            "exchange": ["NASDAQ"] * 800,
+            "asset_type": ["common"] * 800,
+            "is_etf": [False] * 800,
+            "is_test_issue": [False] * 800,
+            "source": ["nasdaq_trader"] * 800,
+        })
+
+    # Use prices/fundamentals that return None / NaN volatility so stage 2
+    # drops them via 'insufficient_price_history' -- we only care that
+    # stage 1 itself doesn't cap.
+    class _NoOpPrices:
+        def __init__(self, **k): pass
+        def fetch(self, ticker, lookback_days=90):
+            return PriceSnapshot(
+                ticker=ticker, last_close=100.0,
+                avg_daily_volume=2_000_000, avg_dollar_volume=2e8,
+                return_pct=0.1, volatility_pct=0.25,
+                lookback_days=lookback_days, source="mock",
+            )
+
+    with patch.object(r, "build_universe", side_effect=_big_universe), \
+         patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch.object(r, "get_prices_provider", return_value=_NoOpPrices), \
+         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--universe", "full",
+            "--top", "5", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    assert js["mode"] == "full"
+    s1 = next(s for s in js["stages"] if s["name"] == "1_universe")
+    assert s1["output_count"] == 800, (
+        f"Full mode must keep the full 800-row cleaned universe; got {s1['output_count']}."
+    )
+    # Stage 2 then ranks by liquidity and keeps after_prices_top_k (500 by default).
+    s2 = next(s for s in js["stages"] if s["name"] == "2_prices")
+    assert s2["input_count"] == 800
+    assert s2["output_count"] <= 800  # top-K cap applies here, not in stage 1
+
+
+def test_custom_mode_uses_provided_tickers(temp_workdir: Path):
+    from asset_selection.pipelines import run_asset_selection as r
+
+    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
+         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "NVDA", "AMD",
+            "--top", "2", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    assert js["mode"] == "custom"
+    assert {c["ticker"] for c in js["candidates"]} == {"NVDA", "AMD"}

@@ -64,3 +64,59 @@ def test_clean_universe_respects_disabled_filters():
 def test_clean_universe_handles_empty():
     out = clean_universe(pd.DataFrame(), UniverseConfig())
     assert out.empty
+
+
+def test_clean_universe_keeps_multiple_exchanges_by_default():
+    """The default config must keep tickers from every exchange present in
+    the source data, not just NASDAQ."""
+    df = pd.DataFrame([
+        {"ticker": "AAPL", "company_name": "Apple Inc.",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "JPM", "company_name": "JPMorgan Chase & Co.",
+         "exchange": "NYSE", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "IMO", "company_name": "Imperial Oil",
+         "exchange": "NYSE American", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+    ])
+    cleaned = clean_universe(df, UniverseConfig())
+    exchanges = set(cleaned["exchange"])
+    assert exchanges == {"NASDAQ", "NYSE", "NYSE American"}
+
+
+def test_clean_universe_exchange_whitelist_restricts_to_subset():
+    df = pd.DataFrame([
+        {"ticker": "AAPL", "company_name": "Apple Inc.",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "JPM", "company_name": "JPMorgan Chase & Co.",
+         "exchange": "NYSE", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "IMO", "company_name": "Imperial Oil",
+         "exchange": "NYSE American", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+    ])
+    cfg = UniverseConfig(exchanges=["NYSE"])
+    cleaned = clean_universe(df, cfg)
+    assert set(cleaned["ticker"]) == {"JPM"}
+
+
+def test_clean_universe_exchange_alias_amex_resolves_to_nyse_american():
+    df = pd.DataFrame([
+        {"ticker": "IMO", "company_name": "Imperial Oil",
+         "exchange": "NYSE American", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "AAPL", "company_name": "Apple Inc.",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+    ])
+    cfg = UniverseConfig(exchanges=["AMEX"])
+    cleaned = clean_universe(df, cfg)
+    assert set(cleaned["ticker"]) == {"IMO"}
+
+
+def test_clean_universe_include_etfs_toggle_keeps_etfs():
+    df = pd.DataFrame([
+        {"ticker": "AAPL", "company_name": "Apple Inc.",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "SPY", "company_name": "SPDR S&P 500 ETF Trust",
+         "exchange": "NYSE Arca", "asset_type": "etf", "is_etf": True, "is_test_issue": False},
+    ])
+    # New include_etfs=True keeps SPY (and we have to drop legacy exclude_etfs)
+    cfg = UniverseConfig(include_etfs=True)
+    cleaned = clean_universe(df, cfg)
+    assert "SPY" in set(cleaned["ticker"])
+    assert "AAPL" in set(cleaned["ticker"])
