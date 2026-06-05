@@ -1,0 +1,124 @@
+# Asset Selection — default configuration
+# All weights, thresholds, and provider choices live here so the pipeline
+# stays declarative and reproducible.
+
+run:
+  # Maximum tickers to process in one run. Use --limit on the CLI to override.
+  max_tickers: 500
+  # Number of top-ranked tickers written to the Markdown report.
+  top_n: 25
+  # Where the pipeline writes its CSV/JSON/MD outputs.
+  output_dir: reports
+  processed_dir: data/processed
+
+universe:
+  # Primary source -> first fallback -> second fallback.
+  sources: [nasdaq_trader, sec_company_tickers]
+  exclude_etfs: true
+  exclude_warrants: true
+  exclude_units: true
+  exclude_preferred: true
+  exclude_rights: true
+  exclude_test_issues: true
+  # Minimum length of ticker symbol (filters out obvious garbage).
+  min_ticker_length: 1
+  max_ticker_length: 5
+
+providers:
+  fundamentals: yfinance      # yfinance | finnhub (future) | fmp (future)
+  prices: yfinance            # yfinance | alphavantage (future)
+  news: yfinance              # yfinance | newsapi (future) | marketaux (future)
+
+cache:
+  enabled: true
+  dir: data/cache
+  # Per-provider TTL in seconds. Fundamentals change slowly; news changes fast.
+  ttl_seconds:
+    fundamentals: 86400       # 24h
+    prices: 43200             # 12h
+    news: 3600                # 1h
+    universe: 604800          # 7d
+
+rate_limits:
+  # Minimum seconds between calls per provider, to be polite with free APIs.
+  yfinance: 0.4
+
+prices:
+  lookback_days: 90
+  # Liquidity filter: minimum 20-day average dollar volume.
+  min_avg_dollar_volume: 1000000
+  # Minimum market cap in USD (penny-stock filter).
+  min_market_cap: 100000000
+
+sentiment:
+  model: vader                # vader | finbert (optional, requires extras)
+  # Articles older than this are ignored.
+  max_age_days: 30
+  # Exponential half-life (in days) for recency weighting.
+  recency_halflife_days: 7
+  # Minimum number of articles before sentiment is considered confident.
+  min_articles_for_confidence: 3
+
+scoring:
+  # Winsorize each metric at these percentiles before z-scoring.
+  winsor_lower_pct: 0.02
+  winsor_upper_pct: 0.98
+  # Missing-data penalty as a fraction of the pillar score (per missing field).
+  missing_penalty_per_field: 0.05
+
+  # Per-pillar metric weights. Within a pillar, weights are renormalized over
+  # whichever metrics are non-missing for the given ticker.
+  growth:
+    revenue_growth: 0.35
+    earnings_growth: 0.35
+    fcf_growth: 0.30
+  quality:
+    roe: 0.30
+    roa: 0.20
+    operating_margin: 0.25
+    net_margin: 0.25
+  valuation:
+    # Lower is better for these; the scorer inverts internally.
+    pe_ratio: 0.30
+    forward_pe: 0.25
+    peg_ratio: 0.20
+    price_to_sales: 0.15
+    price_to_book: 0.10
+  balance_sheet:
+    debt_to_equity: 0.60      # inverted (less is better)
+    current_ratio: 0.40
+  cash_flow:
+    free_cash_flow_yield: 0.60
+    operating_cash_flow_margin: 0.40
+
+  # Pillar weights inside the fundamentals_score aggregator.
+  pillars:
+    growth: 0.25
+    quality: 0.25
+    valuation: 0.20
+    balance_sheet: 0.15
+    cash_flow: 0.15
+
+composite:
+  # Final-score weights. Fundamentals dominate; sentiment is influential but
+  # capped. risk_penalty is subtracted.
+  weights:
+    fundamentals: 0.50
+    growth: 0.15
+    quality: 0.10
+    valuation: 0.10
+    sentiment: 0.15
+    risk: 0.20                # subtracted
+
+  # Flag thresholds (all on 0..100 scale).
+  speculative_hype:
+    sentiment_min: 65
+    fundamentals_max: 40
+  strong_fundamentals_bad_sentiment:
+    fundamentals_min: 65
+    sentiment_max: 35
+
+logging:
+  level: INFO
+  log_to_file: false
+  file: logs/asset_selection.log

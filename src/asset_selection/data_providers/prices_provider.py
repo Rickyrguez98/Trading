@@ -1,0 +1,101 @@
+"""Prices via yfinance for liquidity filters and basic context.
+
+We do not use prices for portfolio construction yet — just average dollar
+volume, recent return, and a volatility proxy.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from typing import Any, Dict
+
+import numpy as np
+import pandas as pd
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from ..utils.validation import coerce_float
+from .base import PriceSnapshot, PricesProvider
+
+logger = logging.getLogger(__name__)
+
+
+class YFinancePricesProvider(PricesProvider):
+    name = "yfinance"
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
+    def _download_history(self, ticker: str, lookback_days: int) -> pd.DataFrame:
+        import yfinance as yf
+
+        self.rate_limiter.acquire()
+        # period= accepts strings like '3mo'; we pass days->period mapping.
+        period = self._period_for(lookback_days)
+        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        return df
+
+    @staticmethod
+    def _period_for(lookback_days: int) -> str:
+        if lookback_days <= 30:
+            return "1mo"
+        if lookback_days <= 90:
+            return "3mo"
+        if lookback_days <= 180:
+            return "6mo"
+        if lookback_days <= 365:
+            return "1y"
+        return "2y"
+
+    def fetch(self, ticker: str, lookback_days: int = 90) -> PriceSnapshot:
+        ticker = ticker.strip().upper()
+        cache_id = f"{ticker}:{lookback_days}"
+        cached = self._cache_get(cache_id)
+        if cached is not None:
+            return PriceSnapshot(**cached)
+
+        try:
+            hist = self._download_history(ticker, lookback_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("yfinance price fetch failed for %s: %s", ticker, exc)
+            hist = pd.DataFrame()
+
+        snap = PriceSnapshot(ticker=ticker, lookback_days=lookback_days, source=self.name)
+
+        if hist.empty or "Close" not in hist.columns:
+            self._cache_set(cache_id, snap.__dict__)
+            return snap
+
+        closes = hist["Close"].dropna()
+        volumes = hist.get("Volume", pd.Series(dtype=float)).fillna(0)
+
+        if not closes.empty:
+            snap.last_close = coerce_float(closes.iloc[-1])
+            if len(closes) > 1:
+                first = closes.iloc[0]
+                if first and first > 0:
+                    snap.return_pct = float((closes.iloc[-1] / first) - 1.0)
+                daily_ret = closes.pct_change().dropna()
+                if len(daily_ret) >= 5:
+                    stdev = float(daily_ret.std())
+                    if math.isfinite(stdev):
+                        snap.volatility_pct = stdev * math.sqrt(252)
+
+        if not volumes.empty:
+            avg_vol = float(volumes.tail(20).mean()) if len(volumes) >= 20 else float(volumes.mean())
+            snap.avg_daily_volume = avg_vol
+            if snap.last_close is not None:
+                snap.avg_dollar_volume = avg_vol * snap.last_close
+
+        # Coerce NaNs to None so the rest of the system sees true missing.
+        for fld in ("last_close", "avg_daily_volume", "avg_dollar_volume",
+                    "return_pct", "volatility_pct"):
+            v = getattr(snap, fld)
+            if v is None or (isinstance(v, float) and not math.isfinite(v)):
+                setattr(snap, fld, None)
+
+        self._cache_set(cache_id, snap.__dict__)
+        return snap
+
+
+def snapshot_to_dict(s: PriceSnapshot) -> Dict[str, Any]:
+    return {k: v for k, v in s.__dict__.items()}

@@ -1,0 +1,161 @@
+"""Common interfaces for all data providers.
+
+Every concrete provider receives a ``Cache`` and a ``RateLimiter`` at
+construction time so the pipeline can wire them with the right config without
+the provider having to know how caching or pacing work.
+"""
+from __future__ import annotations
+
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from ..utils.cache import Cache
+from ..utils.rate_limiter import RateLimiter
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Records (provider-agnostic schemas)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Fundamentals:
+    """Per-ticker fundamentals snapshot.
+
+    All numeric fields are ``Optional[float]`` — None means the provider did
+    not return that field. The scoring layer treats None as missing data and
+    penalizes it, rather than silently imputing zero.
+    """
+    ticker: str
+
+    # Identity
+    company_name: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    exchange: Optional[str] = None
+
+    # Size & market
+    market_cap: Optional[float] = None
+    shares_outstanding: Optional[float] = None
+
+    # Growth
+    revenue_growth: Optional[float] = None
+    earnings_growth: Optional[float] = None
+    net_income_growth: Optional[float] = None
+    fcf_growth: Optional[float] = None
+
+    # Profitability
+    operating_margin: Optional[float] = None
+    net_margin: Optional[float] = None
+    roe: Optional[float] = None
+    roa: Optional[float] = None
+
+    # Balance sheet
+    debt_to_equity: Optional[float] = None
+    current_ratio: Optional[float] = None
+
+    # Cash flow
+    free_cash_flow: Optional[float] = None
+    operating_cash_flow: Optional[float] = None
+    free_cash_flow_yield: Optional[float] = None
+    operating_cash_flow_margin: Optional[float] = None
+
+    # Valuation
+    pe_ratio: Optional[float] = None
+    forward_pe: Optional[float] = None
+    peg_ratio: Optional[float] = None
+    price_to_sales: Optional[float] = None
+    price_to_book: Optional[float] = None
+
+    # Metadata
+    as_of: Optional[str] = None  # ISO timestamp from provider, if available
+    source: Optional[str] = None
+    missing_fields: List[str] = field(default_factory=list)
+
+
+@dataclass
+class PriceSnapshot:
+    ticker: str
+    last_close: Optional[float] = None
+    avg_daily_volume: Optional[float] = None  # shares
+    avg_dollar_volume: Optional[float] = None
+    return_pct: Optional[float] = None        # over lookback window
+    volatility_pct: Optional[float] = None    # annualized stdev of daily returns
+    lookback_days: Optional[int] = None
+    source: Optional[str] = None
+
+
+@dataclass
+class NewsItem:
+    ticker: str
+    headline: str
+    summary: Optional[str] = None
+    source: Optional[str] = None
+    url: Optional[str] = None
+    published_at: Optional[str] = None        # ISO-8601 UTC
+    retrieved_at: Optional[str] = None        # ISO-8601 UTC
+
+
+# ---------------------------------------------------------------------------
+# Abstract providers
+# ---------------------------------------------------------------------------
+
+class DataProvider(ABC):
+    """Base class for every provider. Holds wiring; subclasses implement fetch."""
+
+    name: str = "base"
+    cache_namespace: str = "base"
+    cache_ttl_seconds: int = 3600
+
+    def __init__(
+        self,
+        cache: Optional[Cache] = None,
+        rate_limiter: Optional[RateLimiter] = None,
+    ) -> None:
+        self.cache = cache or Cache(enabled=False)
+        self.rate_limiter = rate_limiter or RateLimiter(0.0)
+
+    # ------------------------------------------------------------------
+    def _cache_get(self, identifier: str) -> Optional[Any]:
+        return self.cache.get(self.cache_namespace, identifier, ttl=self.cache_ttl_seconds)
+
+    def _cache_set(self, identifier: str, payload: Any) -> None:
+        self.cache.set(self.cache_namespace, identifier, payload)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+class FundamentalsProvider(DataProvider):
+    cache_namespace = "fundamentals"
+
+    @abstractmethod
+    def fetch(self, ticker: str) -> Fundamentals:
+        """Return a Fundamentals record; never raise on missing fields."""
+
+
+class PricesProvider(DataProvider):
+    cache_namespace = "prices"
+
+    @abstractmethod
+    def fetch(self, ticker: str, lookback_days: int = 90) -> PriceSnapshot:
+        """Return a PriceSnapshot with liquidity metrics."""
+
+
+class NewsProvider(DataProvider):
+    cache_namespace = "news"
+
+    @abstractmethod
+    def fetch(self, ticker: str, max_age_days: int = 30) -> List[NewsItem]:
+        """Return a list of NewsItem. Empty list is a valid response."""
+
+
+def fundamentals_to_dict(f: Fundamentals) -> Dict[str, Any]:
+    """Flatten a Fundamentals dataclass to a dict (for DataFrame ingestion)."""
+    return {k: v for k, v in f.__dict__.items()}
