@@ -298,6 +298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         results,
         config.composite,
         low_sentiment_confidence_threshold=config.sentiment.low_confidence_threshold,
+        weak_return_threshold=config.prices.weak_return_threshold,
     )
 
     # ------------------------------------------------------------------
@@ -365,6 +366,8 @@ def _build_summary(ranked: pd.DataFrame, config: AppConfig) -> dict:
             "industry": row.get("industry"),
             "market_cap": _safe_num(row.get("market_cap")),
             "avg_dollar_volume": _safe_num(row.get("avg_dollar_volume")),
+            "last_close": _safe_num(row.get("last_close")),
+            "return_pct": _safe_num(row.get("return_pct")),
             "volatility_pct": _safe_num(row.get("volatility_pct")),
             "sentiment_score": _safe_num(row.get("sentiment_score")),
             "sentiment_article_count": int(row.get("article_count", 0) or 0),

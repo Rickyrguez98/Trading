@@ -49,6 +49,12 @@ prices:
   min_avg_dollar_volume: 1000000
   # Minimum market cap in USD (penny-stock filter).
   min_market_cap: 100000000
+  # Momentum / trend handling within the risk model.
+  # If return_pct over the lookback is below this threshold, the ticker is
+  # marked with WEAK_PRICE_TREND and given a fixed price-trend penalty.
+  weak_return_threshold: -0.10
+  # Strength of the cross-sectional momentum penalty (0..100 contribution).
+  momentum_penalty_strength: 20.0
 
 sentiment:
   model: vader                # vader | finbert (optional, requires extras)
