@@ -294,7 +294,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Risk penalty + composite
     results["risk_penalty"] = compute_risk_penalty(results, config.prices)
     results["final_score"] = compute_composite_scores(results, config.composite)
-    results = flag_rows(results, config.composite)
+    results = flag_rows(
+        results,
+        config.composite,
+        low_sentiment_confidence_threshold=config.sentiment.low_confidence_threshold,
+    )
 
     # ------------------------------------------------------------------
     # Output
@@ -364,6 +368,10 @@ def _build_summary(ranked: pd.DataFrame, config: AppConfig) -> dict:
             "volatility_pct": _safe_num(row.get("volatility_pct")),
             "sentiment_score": _safe_num(row.get("sentiment_score")),
             "sentiment_article_count": int(row.get("article_count", 0) or 0),
+            "sentiment_positive_ratio": _safe_num(row.get("positive_ratio")),
+            "sentiment_negative_ratio": _safe_num(row.get("negative_ratio")),
+            "sentiment_confidence": _safe_num(row.get("sentiment_confidence")),
+            "sentiment_source_diversity": int(row.get("source_diversity", 0) or 0),
             "fundamentals_score": _safe_num(row.get("fundamentals_score")),
             "growth_score": _safe_num(row.get("growth_score")),
             "quality_score": _safe_num(row.get("quality_score")),

@@ -54,8 +54,10 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
 
     head = df.head(top_n).copy()
     # Pretty-print the things people will actually read.
-    head["market_cap"] = head["market_cap"].apply(_humanize_money)
-    head["avg_dollar_volume"] = head["avg_dollar_volume"].apply(_humanize_money)
+    if "market_cap" in head.columns:
+        head["market_cap"] = head["market_cap"].apply(_humanize_money)
+    if "avg_dollar_volume" in head.columns:
+        head["avg_dollar_volume"] = head["avg_dollar_volume"].apply(_humanize_money)
     for col in (
         "final_score",
         "fundamentals_score",
@@ -67,6 +69,12 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
     ):
         if col in head.columns:
             head[col] = head[col].apply(_fmt_pct)
+    if "return_pct" in head.columns:
+        head["return_pct"] = head["return_pct"].apply(_fmt_signed_pct)
+    if "volatility_pct" in head.columns:
+        head["volatility_pct"] = head["volatility_pct"].apply(_fmt_signed_pct)
+    if "sentiment_confidence" in head.columns:
+        head["sentiment_confidence"] = head["sentiment_confidence"].apply(_fmt_confidence)
 
     if "flags" in head.columns:
         head["flags"] = head["flags"].apply(lambda v: ", ".join(v) if isinstance(v, list) else (v or ""))
@@ -86,8 +94,11 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
         "sentiment_score",
         "growth_score",
         "valuation_score",
+        "return_pct",
+        "volatility_pct",
         "risk_penalty",
         "article_count",
+        "sentiment_confidence",
         "flags",
     ]
     cols = [c for c in columns_in_order if c in head.columns]
@@ -104,6 +115,8 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
     md.append("- **SPECULATIVE_HYPE** — strong sentiment but weak fundamentals.")
     md.append("- **STRONG_FUNDAMENTALS_BAD_SENTIMENT** — quality business, negative recent news.")
     md.append("- **NO_NEWS** — no recent articles available; sentiment score is neutral by default.")
+    md.append("- **LOW_SENTIMENT_CONFIDENCE** — few articles or low source diversity; treat sentiment as noisy.")
+    md.append("- **WEAK_PRICE_TREND** — recent return is in the bottom of the cross-section; treat with caution.")
     md.append("- **THIN_FUNDAMENTALS** — many missing fundamental fields; score is less reliable.")
     md.append("- **MISSING_MARKET_CAP** — could not read market cap; size/liquidity filters degraded.")
     return "\n".join(md) + "\n"
@@ -136,3 +149,24 @@ def _fmt_pct(v) -> str:
     if x != x:
         return ""
     return f"{x:.1f}"
+
+
+def _fmt_signed_pct(v) -> str:
+    """Format a fractional return (0.12) as a signed percentage (+12.0%)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if x != x:
+        return ""
+    return f"{x*100:+.1f}%"
+
+
+def _fmt_confidence(v) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if x != x:
+        return ""
+    return f"{x:.2f}"
