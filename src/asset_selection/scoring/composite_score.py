@@ -15,11 +15,16 @@ risk_penalty (0..100, higher = more penalty) bundles:
     - low liquidity (avg dollar volume below threshold)
     - small market cap below threshold
     - high realized volatility (vs peers)
+    - **weak price trend** (recent return below configured threshold and
+      a cross-sectional momentum component)
     - high missing-data count
 
-We also produce two soft flags per row:
-    - SPECULATIVE_HYPE                 (good sentiment, weak fundamentals)
+We also produce soft flags per row:
+    - SPECULATIVE_HYPE                  (good sentiment, weak fundamentals)
     - STRONG_FUNDAMENTALS_BAD_SENTIMENT (worth a second look)
+    - WEAK_PRICE_TREND                  (recent return below config threshold)
+    - LOW_SENTIMENT_CONFIDENCE          (few articles / low source diversity)
+    - NO_NEWS, THIN_FUNDAMENTALS, MISSING_MARKET_CAP (data-quality)
 """
 from __future__ import annotations
 
@@ -56,8 +61,8 @@ def compute_risk_penalty(
     penalty = pd.Series(0.0, index=df.index)
 
     # Liquidity penalty
-    adv = pd.to_numeric(df.get("avg_dollar_volume"), errors="coerce")
-    if adv is not None:
+    if "avg_dollar_volume" in df.columns:
+        adv = pd.to_numeric(df["avg_dollar_volume"], errors="coerce")
         below = adv.fillna(0) < prices_cfg.min_avg_dollar_volume
         penalty += below.astype(float) * 30.0
         # Soft penalty as a ratio for those above threshold but still thin
@@ -65,18 +70,40 @@ def compute_risk_penalty(
         penalty += ratio.fillna(0) * 10.0
 
     # Market-cap penalty
-    mc = pd.to_numeric(df.get("market_cap"), errors="coerce")
-    if mc is not None:
+    if "market_cap" in df.columns:
+        mc = pd.to_numeric(df["market_cap"], errors="coerce")
         below_mc = mc.fillna(0) < prices_cfg.min_market_cap
         penalty += below_mc.astype(float) * 25.0
 
     # Volatility penalty: penalize tickers whose vol is in the top quartile.
-    vol = pd.to_numeric(df.get("volatility_pct"), errors="coerce")
-    if vol is not None and vol.notna().any():
-        q75 = vol.quantile(0.75)
-        if math.isfinite(q75) and q75 > 0:
-            excess = ((vol - q75) / q75).clip(lower=0.0).fillna(0.0)
-            penalty += excess * 15.0
+    if "volatility_pct" in df.columns:
+        vol = pd.to_numeric(df["volatility_pct"], errors="coerce")
+        if vol.notna().any():
+            q75 = vol.quantile(0.75)
+            if math.isfinite(q75) and q75 > 0:
+                excess = ((vol - q75) / q75).clip(lower=0.0).fillna(0.0)
+                penalty += excess * 15.0
+
+    # Price-trend / momentum penalty: combine an absolute threshold (every
+    # ticker whose return is below weak_return_threshold gets a fixed hit)
+    # with a cross-sectional ramp (penalty grows as we approach the bottom
+    # quintile of returns). The penalty stays bounded.
+    if "return_pct" in df.columns:
+        ret = pd.to_numeric(df["return_pct"], errors="coerce")
+        if ret.notna().any():
+            weak_thr = float(prices_cfg.weak_return_threshold)
+            strength = max(0.0, float(prices_cfg.momentum_penalty_strength))
+            below_threshold = (ret.fillna(0.0) < weak_thr)
+            penalty += below_threshold.astype(float) * (0.5 * strength)
+
+            # Cross-sectional: where do we sit in the universe?
+            q20 = ret.quantile(0.20)
+            if math.isfinite(q20):
+                # Linear ramp: 0 at q20, max at the worst observed return.
+                worst = ret.min()
+                span = max(q20 - worst, 1e-6)
+                ramp = ((q20 - ret) / span).clip(lower=0.0, upper=1.0).fillna(0.0)
+                penalty += ramp * (0.5 * strength)
 
     # Missing data penalty
     miss = pd.to_numeric(df.get("missing_metric_count"), errors="coerce").fillna(0)
@@ -132,12 +159,16 @@ def flag_rows(
     df: pd.DataFrame,
     composite_cfg: CompositeConfig,
     low_sentiment_confidence_threshold: float = 0.3,
+    weak_return_threshold: float = -0.10,
 ) -> pd.DataFrame:
     """Add ``flags`` (list[str]) and ``reason`` (str) columns to ``df``.
 
     ``low_sentiment_confidence_threshold`` is the confidence (0..1) below
     which we emit a ``LOW_SENTIMENT_CONFIDENCE`` flag, given there was at
     least one article (no news fires NO_NEWS instead).
+
+    ``weak_return_threshold`` is the fractional return (e.g. -0.10 for -10%)
+    below which we emit a ``WEAK_PRICE_TREND`` flag.
     """
     if df.empty:
         df["flags"] = []
@@ -158,6 +189,7 @@ def flag_rows(
         article_count = int(row.get("article_count", 0) or 0)
         missing_metric_count = int(row.get("missing_metric_count", 0) or 0)
         sentiment_confidence = float(row.get("sentiment_confidence", 0.0) or 0.0)
+        return_pct = row.get("return_pct")
 
         if (
             s_score >= speculative_cfg.get("sentiment_min", 65)
@@ -174,6 +206,12 @@ def flag_rows(
         elif sentiment_confidence < low_sentiment_confidence_threshold:
             # Some news, but not enough volume/diversity to trust the signal.
             row_flags.append("LOW_SENTIMENT_CONFIDENCE")
+        try:
+            r = float(return_pct) if return_pct is not None else None
+        except (TypeError, ValueError):
+            r = None
+        if r is not None and r == r and r < weak_return_threshold:
+            row_flags.append("WEAK_PRICE_TREND")
         if missing_metric_count >= 5:
             row_flags.append("THIN_FUNDAMENTALS")
         if pd.isna(row.get("market_cap")):
@@ -198,6 +236,13 @@ def _build_reason(row: pd.Series, flags: List[str]) -> str:
         pieces.append(f"growth={float(row['growth_score']):.1f}")
     if "valuation_score" in row:
         pieces.append(f"valuation={float(row['valuation_score']):.1f}")
+    r = row.get("return_pct")
+    try:
+        r_val = float(r) if r is not None else None
+    except (TypeError, ValueError):
+        r_val = None
+    if r_val is not None and r_val == r_val:
+        pieces.append(f"return={r_val*100:+.1f}%")
     risk = float(row.get("risk_penalty", 0.0))
     if risk > 0:
         pieces.append(f"risk_penalty={risk:.1f}")

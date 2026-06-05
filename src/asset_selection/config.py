@@ -67,6 +67,8 @@ class PricesConfig:
     lookback_days: int = 90
     min_avg_dollar_volume: float = 1_000_000.0
     min_market_cap: float = 100_000_000.0
+    weak_return_threshold: float = -0.10
+    momentum_penalty_strength: float = 20.0
 
 
 @dataclass
