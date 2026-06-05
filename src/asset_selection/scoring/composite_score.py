@@ -180,6 +180,8 @@ def flag_rows(
 
     flags_per_row: List[List[str]] = []
     reasons: List[str] = []
+    top_driver_pillars: List[str] = []
+    top_drag_pillars: List[str] = []
 
     for _, row in df.iterrows():
         row_flags: List[str] = []
@@ -219,11 +221,54 @@ def flag_rows(
 
         flags_per_row.append(row_flags)
         reasons.append(_build_reason(row, row_flags))
+        driver, drag = _pillar_drivers(row)
+        top_driver_pillars.append(driver[0] if driver and driver[0] else "")
+        top_drag_pillars.append(drag[0] if drag and drag[0] else "")
 
     df = df.copy()
     df["flags"] = flags_per_row
     df["reason"] = reasons
+    df["top_driver_pillar"] = top_driver_pillars
+    df["top_drag_pillar"] = top_drag_pillars
     return df
+
+
+_PILLAR_COLUMNS = (
+    ("growth", "growth_score"),
+    ("quality", "quality_score"),
+    ("valuation", "valuation_score"),
+    ("balance_sheet", "balance_sheet_score"),
+    ("cash_flow", "cash_flow_score"),
+)
+
+
+def _pillar_drivers(row: pd.Series) -> tuple:
+    """Identify the pillar that most lifted the score and the one that most hurt.
+
+    Returns ``(top_driver, top_drag)`` as ``(name, score)`` tuples or
+    ``(None, None)`` if no pillar columns are present. We compare each
+    pillar's deviation from the neutral midpoint of 50.
+    """
+    deltas = []
+    for name, col in _PILLAR_COLUMNS:
+        if col not in row.index:
+            continue
+        try:
+            v = float(row[col])
+        except (TypeError, ValueError):
+            continue
+        if v != v:
+            continue
+        deltas.append((name, v, v - 50.0))
+    if not deltas:
+        return (None, None)
+    driver = max(deltas, key=lambda t: t[2])
+    drag = min(deltas, key=lambda t: t[2])
+    # Only call it a "driver" if it actually helped (positive delta);
+    # likewise only a "drag" if it actually hurt.
+    top_driver = (driver[0], driver[1]) if driver[2] > 0 else (None, None)
+    top_drag = (drag[0], drag[1]) if drag[2] < 0 else (None, None)
+    return (top_driver, top_drag)
 
 
 def _build_reason(row: pd.Series, flags: List[str]) -> str:
@@ -232,10 +277,13 @@ def _build_reason(row: pd.Series, flags: List[str]) -> str:
     s_score = float(row.get("sentiment_score", 50.0))
     pieces.append(f"fundamentals={f_score:.1f}")
     pieces.append(f"sentiment={s_score:.1f}")
-    if "growth_score" in row:
-        pieces.append(f"growth={float(row['growth_score']):.1f}")
-    if "valuation_score" in row:
-        pieces.append(f"valuation={float(row['valuation_score']):.1f}")
+
+    driver, drag = _pillar_drivers(row)
+    if driver[0]:
+        pieces.append(f"top_driver={driver[0]}({driver[1]:.1f})")
+    if drag[0]:
+        pieces.append(f"top_drag={drag[0]}({drag[1]:.1f})")
+
     r = row.get("return_pct")
     try:
         r_val = float(r) if r is not None else None

@@ -14,20 +14,28 @@ _DISPLAY_COLUMNS: List[str] = [
     "industry",
     "market_cap",
     "avg_dollar_volume",
+    "return_pct",
     "volatility_pct",
     "sentiment_score",
     "article_count",
+    "sentiment_confidence",
+    "positive_ratio",
+    "negative_ratio",
+    "source_diversity",
     "fundamentals_score",
     "growth_score",
     "quality_score",
     "valuation_score",
     "balance_sheet_score",
     "cash_flow_score",
+    "top_driver_pillar",
+    "top_drag_pillar",
     "risk_penalty",
     "final_score",
     "flags",
     "reason",
     "missing_fields",
+    "missing_metric_count",
 ]
 
 
@@ -99,6 +107,8 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
         "risk_penalty",
         "article_count",
         "sentiment_confidence",
+        "top_driver_pillar",
+        "top_drag_pillar",
         "flags",
     ]
     cols = [c for c in columns_in_order if c in head.columns]
