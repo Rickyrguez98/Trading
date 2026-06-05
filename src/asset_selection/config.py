@@ -31,14 +31,44 @@ class RunConfig:
 @dataclass
 class UniverseConfig:
     sources: List[str] = field(default_factory=lambda: ["nasdaq_trader", "sec_company_tickers"])
-    exclude_etfs: bool = True
-    exclude_warrants: bool = True
-    exclude_units: bool = True
-    exclude_preferred: bool = True
-    exclude_rights: bool = True
-    exclude_test_issues: bool = True
+
+    # New: exchange whitelist + asset-type include flags.
+    # An empty `exchanges` list keeps every exchange seen in the source data.
+    # `include_*` toggles default to False (exclude) for fund-like and
+    # non-common-stock asset types.
+    exchanges: List[str] = field(default_factory=list)
+    include_etfs: bool = False
+    include_funds: bool = False
+    include_warrants: bool = False
+    include_units: bool = False
+    include_preferred: bool = False
+    include_rights: bool = False
+    include_test_issues: bool = False
+    include_notes: bool = False
+
+    # Legacy aliases. If a user's YAML uses the old `exclude_*` form we honour
+    # it (e.g. `exclude_etfs: false` == `include_etfs: true`). New code reads
+    # only the `include_*` form via `effective_include`.
+    exclude_etfs: Optional[bool] = None
+    exclude_warrants: Optional[bool] = None
+    exclude_units: Optional[bool] = None
+    exclude_preferred: Optional[bool] = None
+    exclude_rights: Optional[bool] = None
+    exclude_test_issues: Optional[bool] = None
+
     min_ticker_length: int = 1
     max_ticker_length: int = 5
+
+    def effective_include(self, asset_kind: str) -> bool:
+        """Return whether ``asset_kind`` (e.g. 'etfs', 'warrants') is included.
+
+        Honours the legacy ``exclude_*`` form when present; otherwise uses
+        the new ``include_*`` form.
+        """
+        legacy = getattr(self, f"exclude_{asset_kind}", None)
+        if legacy is not None:
+            return not bool(legacy)
+        return bool(getattr(self, f"include_{asset_kind}", False))
 
 
 @dataclass
