@@ -104,19 +104,118 @@ After it finishes, look at:
 - `reports/top_candidates.md` — human-readable top-N report.
 - `reports/asset_selection_summary.json` — machine-readable run summary.
 
+## Methodology
+
+This section is the source of truth for *what the pipeline actually does*.
+The code is the ultimate authority; this is the explained-to-a-human view.
+
+### 1. How sentiment is used
+- The news provider (`yfinance` by default) pulls recent headlines and
+  summaries for each ticker. Articles older than `sentiment.max_age_days`
+  are dropped.
+- VADER (default) or FinBERT (optional, `pip install '.[finbert]'`) scores
+  each remaining article on `[-1, +1]`.
+- Per ticker we compute:
+  - **average compound** sentiment,
+  - **recency-weighted compound** via an exponential half-life
+    (`sentiment.recency_halflife_days`),
+  - **positive / negative / neutral ratios**,
+  - **source diversity** (distinct publishers),
+  - a **confidence** proxy that grows with article count and source diversity.
+- The aggregated `sentiment_score` enters the composite at
+  `composite.weights.sentiment` (default **0.15** — intentionally smaller
+  than fundamentals). Low confidence below
+  `sentiment.low_confidence_threshold` raises the `LOW_SENTIMENT_CONFIDENCE`
+  flag; zero articles raise `NO_NEWS` instead.
+
+### 2. How historical prices are used
+- The price provider (`yfinance` by default) downloads `lookback_days` of
+  history per ticker.
+- Per ticker we derive:
+  - `last_close`,
+  - `avg_daily_volume` and `avg_dollar_volume` (20-day),
+  - `return_pct` over the lookback,
+  - an annualized **volatility** proxy from daily returns.
+- These contribute to the **risk penalty** in three ways:
+  1. **Liquidity filter** — names below `prices.min_avg_dollar_volume` get
+     a flat penalty plus a soft ramp.
+  2. **Volatility ramp** — names above the universe's 75th-percentile vol
+     get a proportional penalty.
+  3. **Momentum** — names whose `return_pct < prices.weak_return_threshold`
+     get a flat hit *and* a cross-sectional ramp that grows toward the
+     worst-observed return. The `WEAK_PRICE_TREND` flag fires in this case.
+- Names below `prices.min_market_cap` also pay a flat penalty (penny-stock
+  filter).
+
+### 3. How fundamentals are used
+- The fundamentals provider returns a typed record per ticker; every numeric
+  field is `Optional[float]`. Missing values become `None`, never zero.
+- Five pillars are computed cross-sectionally:
+  - **growth** (revenue, earnings, FCF growth)
+  - **quality** (ROE, ROA, op-margin, net-margin)
+  - **valuation** (P/E, fwd P/E, PEG, P/S, P/B — inverted so cheaper scores higher)
+  - **balance sheet** (D/E inverted + current ratio)
+  - **cash flow** (FCF yield, OCF margin)
+- For each metric we winsorize (`scoring.winsor_lower_pct` /
+  `winsor_upper_pct`), z-score against the universe, invert "lower is better"
+  metrics, then map to `[0, 100]` via `50 + 15·z` clipped.
+- Pillar weights renormalize over the *present* metrics for the ticker, so a
+  single missing field doesn't crash a pillar — but a per-missing-field
+  penalty (`scoring.missing_penalty_per_field`) is applied. Tickers with 5+
+  missing tracked fields also fire the `THIN_FUNDAMENTALS` flag.
+- Pillars combine into `fundamentals_score` via `scoring.pillars` weights.
+
+### 4. How the final score is calculated
+
+```
+final_score =
+    w_fundamentals · fundamentals_score
+  + w_growth       · growth_score
+  + w_quality      · quality_score
+  + w_valuation    · valuation_score
+  + w_sentiment    · sentiment_score
+  − w_risk         · risk_penalty
+```
+
+All weights live under `composite.weights` in
+[`configs/default_config.yaml`](configs/default_config.yaml). Defaults make
+fundamentals + pillar weights dominate sentiment (asserted by the test
+`test_fundamentals_dominate_sentiment_at_default_weights`). The final score
+is clipped to `[0, 100]` and ties break by `fundamentals_score` then
+`sentiment_score`.
+
+### 5. Flags
+
+| Flag                                 | Meaning |
+|--------------------------------------|---------|
+| `SPECULATIVE_HYPE`                   | Strong sentiment but weak fundamentals — treat with caution. |
+| `STRONG_FUNDAMENTALS_BAD_SENTIMENT`  | Quality business with bad recent news — worth a closer look, not an auto-reject. |
+| `NO_NEWS`                            | No recent articles available; sentiment defaulted to neutral. |
+| `LOW_SENTIMENT_CONFIDENCE`           | Some news, but few articles or low source diversity. |
+| `WEAK_PRICE_TREND`                   | Recent return below the configured weak-return threshold. |
+| `THIN_FUNDAMENTALS`                  | 5+ tracked fundamental fields missing. |
+| `MISSING_MARKET_CAP`                 | Couldn't read market cap; size/liquidity filters degraded. |
+
 ## How to interpret the output
 
-Every row carries **transparent sub-scores** so you can see *why* a ticker
-ranked where it did:
+Every row carries **transparent sub-scores** plus the *driver* and *drag*
+pillar so you can see *why* a ticker ranked where it did:
 
 - `fundamentals_score` — blended pillar score [0, 100].
-- `growth_score`, `quality_score`, `valuation_score` — pillar sub-scores.
-- `sentiment_score` — recency-weighted news sentiment.
-- `risk_penalty` — deducted for low liquidity, missing data, high volatility.
+- `growth_score`, `quality_score`, `valuation_score`, `balance_sheet_score`,
+  `cash_flow_score` — pillar sub-scores.
+- `sentiment_score`, `article_count`, `sentiment_confidence`,
+  `positive_ratio`, `negative_ratio`, `source_diversity` — sentiment block.
+- `last_close`, `return_pct`, `volatility_pct`, `avg_dollar_volume`,
+  `market_cap` — price / liquidity block.
+- `risk_penalty` — combined liquidity / momentum / vol / missing-data hit.
+- `top_driver_pillar` / `top_drag_pillar` — the pillar that most lifted /
+  hurt the score above / below neutral 50.
 - `final_score` — weighted composite (see config).
-- `flags` — e.g. `SPECULATIVE_HYPE` (good sentiment, weak fundamentals) or
-  `STRONG_FUNDAMENTALS_BAD_SENTIMENT` (worth a second look).
-- `missing_fields` — explicit list of missing data points so nothing is hidden.
+- `reason` — single-line, human-readable summary of the row.
+- `flags` — list of warning flags (see the table above).
+- `missing_fields` / `missing_metric_count` — explicit accounting of what
+  data was unavailable.
 
 **A high final score is a starting point for research, not a recommendation.**
 
