@@ -146,3 +146,66 @@ This makes it impossible to tell, from the report alone, whether the
 - **Iterating on weights / scoring** → `--universe sample --limit 50`
   for fast feedback.
 - **Specific shortlist** → `--tickers AAPL MSFT …` for one-off checks.
+
+---
+
+## Pass 2 — what was fixed in this cycle
+
+Each gap from §3 below now points to the commit that closed it.
+
+### F1 — Silent 500-cap removed
+**Closed by:** `fix: remove default top 50 universe cap; add --universe mode`.
+- `RunConfig.max_tickers` is now `Optional[int] = None` and is honoured
+  only in sample mode.
+- New `--universe full|sample|custom` flag explicitly resolves the mode.
+- Full mode no longer applies a flat `.head()` chop; reduction happens
+  inside the staged funnel.
+
+### F2 — Multi-exchange coverage made visible
+**Closed by:** `audit: document current universe limitation` (this doc)
+  + `fix: remove default top 50 universe cap` (the JSON summary now
+  carries `exchange_breakdown`).
+- Verified empirically: NASDAQ 5495 + NYSE 2926 + NYSE Arca 2657 +
+  BATS 1398 + NYSE American 319 + IEX 3.
+- README and `docs/FULL_UNIVERSE_PIPELINE.md` now both say so.
+
+### F3 — Exchange whitelist + include knobs
+**Closed by:** `fix: expand ticker universe across US exchanges`.
+- `UniverseConfig.exchanges: list[str]` (empty = all).
+- `include_etfs / include_funds / include_warrants / include_units /
+  include_preferred / include_rights / include_test_issues /
+  include_notes` toggles, all default `false`.
+- Legacy `exclude_*` keys still honoured via `effective_include`.
+- Alias-aware: `AMEX ≡ NYSE American`, `ARCA ≡ NYSE Arca`, `CBOE ≡ BATS`.
+
+### F4 — Staged funnel
+**Closed by:** `fix: remove default top 50 universe cap`.
+- Five named stages (`1_universe`, `2_prices`, `3_fundamentals`,
+  `4_sentiment`, `5_compose_and_rank`), each with its own `top_k` knob,
+  `StageStats`, and per-drop-reason counters.
+- News/sentiment runs **only** on the post-fundamentals shortlist —
+  enforced by the test `test_news_runs_only_after_fundamentals_prescreen`,
+  which wires a spy news provider and asserts the dropped ticker is
+  never queried.
+
+### F5 — `--universe` CLI mode
+**Closed by:** same commit as F1. Help text explains that `--limit` is
+ignored outside sample mode and that full mode may take longer.
+
+### F6 — Reduction stats in the output
+**Closed by:** same commit as F1 + tests.
+- New `reports/universe_summary.json` with `mode`, `exchange_breakdown`,
+  and a `stages` array; written even when the pipeline aborts.
+- `reports/asset_selection_summary.json` also gained `mode`,
+  `sample_limit`, `exchange_breakdown`, `stages`, and
+  `total_runtime_seconds`.
+
+## Test coverage
+
+- Baseline before this cycle: **28 tests**.
+- After this cycle: **37 tests** (9 new), all passing.
+- The load-bearing regression guards are:
+  - `test_full_mode_does_not_silently_cap_at_50` — would catch any
+    future reintroduction of a flat universe cap in stage 1.
+  - `test_news_runs_only_after_fundamentals_prescreen` — would catch
+    any future refactor that re-couples the per-ticker provider loop.
