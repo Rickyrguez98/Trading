@@ -1,26 +1,39 @@
-"""End-to-end asset-selection pipeline.
+"""Staged asset-selection pipeline.
 
-Stages:
-    1. Load config + configure logging.
-    2. Build (or load) the universe.
-    3. For each ticker (capped by --limit): fetch fundamentals + prices + news.
-    4. Score sentiment per article -> aggregate per ticker.
-    5. Score fundamentals across the cross-section.
-    6. Compute risk penalty + composite score.
-    7. Rank, flag, and write outputs (CSV / Markdown / JSON).
+Stages (a free-API-friendly funnel):
+    1. Universe collection   -- cleaned U.S. common-stock universe.
+    2. Price/liquidity       -- cheap filter; remove illiquid names; rank by
+                                dollar volume; keep ``pipeline.after_prices_top_k``.
+    3. Fundamental prescreen -- pull fundamentals + score; remove tiny caps;
+                                keep ``pipeline.after_fundamentals_top_k``.
+    4. News + sentiment      -- only for the post-fundamentals shortlist, so
+                                the free yfinance news endpoint isn't hammered.
+    5. Composite + rank      -- final score, flags, CSV/Markdown/JSON outputs.
 
-Run it with:
-    python -m asset_selection.pipelines.run_asset_selection \
-        --config configs/default_config.yaml --limit 50 --top 20
+CLI modes:
+    --universe full   (default)  -- entire cleaned universe enters stage 1.
+    --universe sample            -- stage 1 honours --limit / run.sample_limit.
+    --universe custom            -- universe = --tickers value, stages 1-2 are
+                                    short-circuited (the user already chose).
+
+Outputs:
+    data/processed/universe_full.csv            -- pre-clean raw universe (stage 1 in)
+    data/processed/universe_clean.csv           -- post-clean universe (stage 1 out)
+    data/processed/asset_selection_results.csv  -- full ranked table
+    reports/top_candidates.md                   -- human-readable top-N report
+    reports/asset_selection_summary.json        -- machine-readable run summary
+    reports/universe_summary.json               -- stage stats + exchange breakdown
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -51,12 +64,38 @@ from ..sentiment.sentiment_model import (
     get_sentiment_model,
     score_articles,
 )
-from ..universe import build_universe, save_universe
+from ..universe import build_universe, save_universe, universe_counts_by_exchange
 from ..utils.cache import Cache
 from ..utils.io import ensure_dir, write_csv, write_json
 from ..utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Stage stats
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StageStats:
+    name: str
+    input_count: int = 0
+    output_count: int = 0
+    duration_seconds: float = 0.0
+    provider_failures: int = 0
+    dropped: Dict[str, int] = field(default_factory=dict)
+    notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "input_count": self.input_count,
+            "output_count": self.output_count,
+            "duration_seconds": round(self.duration_seconds, 2),
+            "provider_failures": self.provider_failures,
+            "dropped": dict(self.dropped),
+            "notes": list(self.notes),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +105,30 @@ logger = logging.getLogger(__name__)
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="asset-selection",
-        description="Rank U.S.-listed common stocks using free fundamentals + sentiment.",
+        description=(
+            "Rank U.S.-listed common stocks using free fundamentals + sentiment. "
+            "By default the full universe enters a staged funnel; news/sentiment "
+            "is only collected for the final shortlist to respect free-API limits."
+        ),
     )
     p.add_argument(
         "--config", default="configs/default_config.yaml",
         help="Path to YAML config (default: configs/default_config.yaml)."
     )
     p.add_argument(
+        "--universe", choices=("full", "sample", "custom"), default=None,
+        help=(
+            "Universe mode. 'full' (default) runs the staged funnel over the "
+            "entire cleaned U.S. universe; 'sample' honours --limit for fast "
+            "testing; 'custom' uses --tickers and skips universe build."
+        ),
+    )
+    p.add_argument(
         "--limit", type=int, default=None,
-        help="Cap the number of tickers processed."
+        help=(
+            "Sample-mode only: cap the stage-1 universe at N tickers. "
+            "Ignored in 'full' mode and unnecessary in 'custom' mode."
+        ),
     )
     p.add_argument(
         "--top", type=int, default=None,
@@ -82,7 +136,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--tickers", nargs="*", default=None,
-        help="Run only on these tickers (skips universe build)."
+        help="Custom mode: run only on these tickers (implies --universe custom)."
     )
     p.add_argument(
         "--refresh-cache", action="store_true",
@@ -103,6 +157,356 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+# ---------------------------------------------------------------------------
+# Mode resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_mode(args: argparse.Namespace, config: AppConfig) -> str:
+    if args.tickers:
+        # CLI tickers always force custom mode regardless of --universe.
+        return "custom"
+    if args.universe:
+        return args.universe
+    return config.run.mode or "full"
+
+
+def _resolve_sample_limit(
+    args: argparse.Namespace, config: AppConfig, mode: str
+) -> Optional[int]:
+    if mode != "sample":
+        if args.limit is not None and mode != "custom":
+            logger.warning(
+                "--limit is only effective in --universe sample (mode=%s). Ignoring.",
+                mode,
+            )
+        return None
+    # In sample mode, CLI wins, then config, then legacy max_tickers, then None.
+    if args.limit is not None:
+        return int(args.limit)
+    if config.run.sample_limit is not None:
+        return int(config.run.sample_limit)
+    if config.run.max_tickers is not None:
+        return int(config.run.max_tickers)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: universe collection
+# ---------------------------------------------------------------------------
+
+def _stage1_universe(
+    args: argparse.Namespace,
+    config: AppConfig,
+    cache: Cache,
+    rate_limiter: RateLimiter,
+    mode: str,
+    sample_limit: Optional[int],
+) -> "tuple[pd.DataFrame, StageStats]":
+    started = time.perf_counter()
+    stats = StageStats(name="1_universe")
+
+    processed_dir = ensure_dir(config.run.processed_dir)
+
+    if mode == "custom":
+        tickers = [t.strip().upper() for t in (args.tickers or []) if t.strip()]
+        df = pd.DataFrame({
+            "ticker": tickers,
+            "company_name": tickers,
+            "exchange": None,
+            "asset_type": "common",
+            "is_etf": False,
+            "is_test_issue": False,
+            "source": "cli",
+        })
+        stats.input_count = len(df)
+        stats.output_count = len(df)
+        stats.notes.append("custom mode: tickers from --tickers")
+        logger.info("Stage 1: %d user-supplied tickers (custom mode).", len(df))
+        stats.duration_seconds = time.perf_counter() - started
+        return df, stats
+
+    cleaned = build_universe(config, cache=cache, rate_limiter=rate_limiter)
+
+    # Persist both pre- and post-clean snapshots. We do not have the raw
+    # pre-clean DF here (build_universe returns cleaned), but the SymbolDirectory
+    # provider caches the raw set; save_universe writes the cleaned snapshot.
+    save_universe(cleaned, str(processed_dir / "universe_clean.csv"))
+
+    stats.input_count = len(cleaned)
+    by_exchange = universe_counts_by_exchange(cleaned)
+    for exch, n in by_exchange.items():
+        stats.notes.append(f"exchange:{exch}={n}")
+
+    df = cleaned
+    if mode == "sample" and sample_limit and len(df) > sample_limit:
+        df = df.head(sample_limit).copy()
+        stats.dropped["sample_limit"] = len(cleaned) - len(df)
+        logger.info(
+            "Stage 1: cleaned universe %d -> %d (sample limit %d).",
+            len(cleaned), len(df), sample_limit,
+        )
+    elif config.pipeline.universe_max and len(df) > config.pipeline.universe_max:
+        df = df.head(config.pipeline.universe_max).copy()
+        stats.dropped["universe_max"] = len(cleaned) - len(df)
+        logger.info(
+            "Stage 1: cleaned universe %d -> %d (pipeline.universe_max).",
+            len(cleaned), len(df),
+        )
+    else:
+        logger.info("Stage 1: cleaned universe = %d tickers.", len(df))
+
+    stats.output_count = len(df)
+    stats.duration_seconds = time.perf_counter() - started
+    return df, stats
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: cheap price / liquidity filter
+# ---------------------------------------------------------------------------
+
+def _stage2_prices(
+    universe_df: pd.DataFrame,
+    price_provider,
+    config: AppConfig,
+) -> "tuple[pd.DataFrame, Dict[str, PriceSnapshot], StageStats]":
+    started = time.perf_counter()
+    stats = StageStats(name="2_prices")
+    stats.input_count = len(universe_df)
+
+    price_records: Dict[str, PriceSnapshot] = {}
+    rows: List[Dict[str, Any]] = []
+
+    iterator = _progress(universe_df["ticker"].tolist(), desc="Stage 2: prices")
+    for ticker in iterator:
+        try:
+            snap = price_provider.fetch(ticker, lookback_days=config.prices.lookback_days)
+        except Exception as exc:  # noqa: BLE001 - report-and-continue
+            logger.warning("Stage 2 price fetch failed for %s: %s", ticker, exc)
+            snap = PriceSnapshot(
+                ticker=ticker, lookback_days=config.prices.lookback_days,
+                source=config.providers.prices,
+            )
+            stats.provider_failures += 1
+        price_records[ticker] = snap
+        rows.append({
+            "ticker": ticker,
+            "last_close": snap.last_close,
+            "avg_daily_volume": snap.avg_daily_volume,
+            "avg_dollar_volume": snap.avg_dollar_volume,
+            "return_pct": snap.return_pct,
+            "volatility_pct": snap.volatility_pct,
+        })
+
+    df = universe_df.merge(pd.DataFrame(rows), on="ticker", how="left")
+
+    # Liquidity filter.
+    adv = pd.to_numeric(df["avg_dollar_volume"], errors="coerce")
+    illiquid = adv.fillna(0) < config.prices.min_avg_dollar_volume
+    stats.dropped["below_min_dollar_volume"] = int(illiquid.sum())
+    df = df.loc[~illiquid].copy()
+
+    # Minimum price-history filter -- we use volatility_pct as the existence
+    # proxy: it's only computed when at least 5 daily returns existed, so a
+    # missing volatility for non-zero lookback indicates a very thin tape.
+    if config.pipeline.min_price_history_days > 0:
+        has_history = pd.to_numeric(df.get("volatility_pct"), errors="coerce").notna()
+        stats.dropped["insufficient_price_history"] = int((~has_history).sum())
+        df = df.loc[has_history].copy()
+
+    # Rank by dollar volume and keep top-K.
+    if config.pipeline.after_prices_top_k and len(df) > config.pipeline.after_prices_top_k:
+        df = df.sort_values("avg_dollar_volume", ascending=False).head(
+            config.pipeline.after_prices_top_k
+        ).copy()
+        stats.notes.append(f"after_prices_top_k={config.pipeline.after_prices_top_k}")
+
+    stats.output_count = len(df)
+    stats.duration_seconds = time.perf_counter() - started
+    logger.info(
+        "Stage 2: prices %d -> %d (liquidity + top-K).",
+        stats.input_count, stats.output_count,
+    )
+    return df, price_records, stats
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: fundamentals prescreen
+# ---------------------------------------------------------------------------
+
+def _stage3_fundamentals(
+    df: pd.DataFrame,
+    fund_provider,
+    config: AppConfig,
+) -> "tuple[pd.DataFrame, List[Fundamentals], StageStats]":
+    started = time.perf_counter()
+    stats = StageStats(name="3_fundamentals")
+    stats.input_count = len(df)
+
+    records: List[Fundamentals] = []
+    iterator = _progress(df["ticker"].tolist(), desc="Stage 3: fundamentals")
+    for ticker in iterator:
+        try:
+            f = fund_provider.fetch(ticker)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stage 3 fundamentals fetch failed for %s: %s", ticker, exc)
+            f = Fundamentals(ticker=ticker, source=config.providers.fundamentals)
+            stats.provider_failures += 1
+        records.append(f)
+
+    fund_scores = score_fundamentals(records, config.scoring)
+
+    # Build the metadata frame and merge.
+    meta = pd.DataFrame([{
+        "ticker": f.ticker,
+        "company_name_fund": f.company_name,
+        "sector": f.sector,
+        "industry": f.industry,
+        "market_cap": f.market_cap,
+        "missing_fields": f.missing_fields,
+    } for f in records])
+
+    merged = df.merge(meta, on="ticker", how="left")
+    if not fund_scores.empty:
+        merged = merged.merge(fund_scores, on="ticker", how="left")
+
+    # Prefer the fundamentals-sourced company name if we don't have one yet.
+    if "company_name" in merged.columns and "company_name_fund" in merged.columns:
+        merged["company_name"] = merged["company_name"].where(
+            merged["company_name"].astype(str).str.len() > 0,
+            merged["company_name_fund"],
+        )
+    if "company_name_fund" in merged.columns:
+        merged = merged.drop(columns=["company_name_fund"])
+
+    # Minimum market cap (only if available).
+    mc = pd.to_numeric(merged.get("market_cap"), errors="coerce")
+    below_mc = mc.fillna(0) < config.prices.min_market_cap
+    # Don't drop names where market_cap is *missing* here -- many small caps
+    # will lack market_cap from yfinance. We treat missing as "unknown, keep".
+    drop_mask = below_mc & mc.notna()
+    stats.dropped["below_min_market_cap"] = int(drop_mask.sum())
+    merged = merged.loc[~drop_mask].copy()
+
+    # Fill defaults so we can rank cleanly.
+    for col in ("fundamentals_score", "growth_score", "quality_score",
+                "valuation_score", "balance_sheet_score", "cash_flow_score"):
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(50.0)
+    if "missing_metric_count" in merged.columns:
+        merged["missing_metric_count"] = pd.to_numeric(
+            merged["missing_metric_count"], errors="coerce"
+        ).fillna(0).astype(int)
+
+    # Keep top-K by fundamentals_score; if missing, fall back to no rank.
+    if (
+        config.pipeline.after_fundamentals_top_k
+        and "fundamentals_score" in merged.columns
+        and len(merged) > config.pipeline.after_fundamentals_top_k
+    ):
+        merged = merged.sort_values("fundamentals_score", ascending=False).head(
+            config.pipeline.after_fundamentals_top_k
+        ).copy()
+        stats.notes.append(f"after_fundamentals_top_k={config.pipeline.after_fundamentals_top_k}")
+
+    # Filter the records list down to the shortlist.
+    keep_tickers = set(merged["ticker"].tolist())
+    records = [r for r in records if r.ticker in keep_tickers]
+
+    stats.output_count = len(merged)
+    stats.duration_seconds = time.perf_counter() - started
+    logger.info(
+        "Stage 3: fundamentals %d -> %d (market-cap + top-K).",
+        stats.input_count, stats.output_count,
+    )
+    return merged, records, stats
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: news + sentiment
+# ---------------------------------------------------------------------------
+
+def _stage4_sentiment(
+    df: pd.DataFrame,
+    news_provider,
+    sentiment_model,
+    config: AppConfig,
+) -> "tuple[pd.DataFrame, StageStats]":
+    started = time.perf_counter()
+    stats = StageStats(name="4_sentiment")
+    stats.input_count = len(df)
+
+    sentiment_rows: List[Dict[str, Any]] = []
+    iterator = _progress(df["ticker"].tolist(), desc="Stage 4: news+sentiment")
+    for ticker in iterator:
+        try:
+            articles = news_provider.fetch(ticker, max_age_days=config.sentiment.max_age_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stage 4 news fetch failed for %s: %s", ticker, exc)
+            articles = []
+            stats.provider_failures += 1
+
+        scored = score_articles(articles, sentiment_model)
+        agg = aggregate_ticker_sentiment(
+            ticker,
+            scored,
+            recency_halflife_days=config.sentiment.recency_halflife_days,
+            min_articles_for_confidence=config.sentiment.min_articles_for_confidence,
+        )
+        sentiment_rows.append({
+            "ticker": ticker,
+            "sentiment_score": agg.sentiment_score,
+            "article_count": agg.article_count,
+            "positive_ratio": agg.positive_ratio,
+            "negative_ratio": agg.negative_ratio,
+            "neutral_ratio": agg.neutral_ratio,
+            "source_diversity": agg.source_diversity,
+            "sentiment_confidence": agg.confidence,
+        })
+
+    sentiment_df = pd.DataFrame(sentiment_rows)
+    merged = df.merge(sentiment_df, on="ticker", how="left")
+
+    # Default fills for tickers that came back with nothing.
+    merged["sentiment_score"] = merged["sentiment_score"].fillna(50.0)
+    merged["article_count"] = merged["article_count"].fillna(0).astype(int)
+
+    stats.output_count = len(merged)
+    stats.duration_seconds = time.perf_counter() - started
+    logger.info("Stage 4: sentiment computed for %d tickers.", stats.output_count)
+    return merged, stats
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: compose + rank
+# ---------------------------------------------------------------------------
+
+def _stage5_compose_and_rank(
+    df: pd.DataFrame, config: AppConfig
+) -> "tuple[pd.DataFrame, StageStats]":
+    started = time.perf_counter()
+    stats = StageStats(name="5_compose_and_rank")
+    stats.input_count = len(df)
+
+    df = df.copy()
+    df["risk_penalty"] = compute_risk_penalty(df, config.prices)
+    df["final_score"] = compute_composite_scores(df, config.composite)
+    df = flag_rows(
+        df,
+        config.composite,
+        low_sentiment_confidence_threshold=config.sentiment.low_confidence_threshold,
+        weak_return_threshold=config.prices.weak_return_threshold,
+    )
+    ranked = rank_candidates(df, top_n=config.run.top_n)
+
+    stats.output_count = len(ranked)
+    stats.duration_seconds = time.perf_counter() - started
+    return ranked, stats
+
+
+# ---------------------------------------------------------------------------
+# Main orchestrator
+# ---------------------------------------------------------------------------
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv)
     config = load_config(args.config)
@@ -112,8 +516,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.cache.enabled = False
     if args.top is not None:
         config.run.top_n = args.top
-    if args.limit is not None:
-        config.run.max_tickers = args.limit
     if args.output_dir:
         config.run.output_dir = args.output_dir
 
@@ -123,14 +525,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         file=config.logging.file,
     )
 
+    mode = _resolve_mode(args, config)
+    sample_limit = _resolve_sample_limit(args, config, mode)
+
+    pipeline_started = time.perf_counter()
     logger.info("Asset selection pipeline started at %s", datetime.utcnow().isoformat())
     logger.info(
-        "Providers: fundamentals=%s prices=%s news=%s | sentiment=%s",
+        "Mode=%s | sample_limit=%s | providers: fundamentals=%s prices=%s news=%s | sentiment=%s",
+        mode, sample_limit,
         config.providers.fundamentals,
         config.providers.prices,
         config.providers.news,
         config.sentiment.model,
     )
+    if mode == "full":
+        logger.info(
+            "Full-universe mode: this can take a while. Stage 2 reduces to "
+            "after_prices_top_k=%s; stage 3 to after_fundamentals_top_k=%s; "
+            "news/sentiment only runs on the stage-3 shortlist (free-API friendly).",
+            config.pipeline.after_prices_top_k,
+            config.pipeline.after_fundamentals_top_k,
+        )
 
     cache = Cache(directory=config.cache.dir, enabled=config.cache.enabled)
     if args.refresh_cache and cache.enabled:
@@ -139,34 +554,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     rate_limiter = RateLimiter(config.rate_limits.get("yfinance", 0.4))
 
-    # ------------------------------------------------------------------
-    # Universe
-    # ------------------------------------------------------------------
-    if args.tickers:
-        tickers = [t.strip().upper() for t in args.tickers if t.strip()]
-        universe_df = pd.DataFrame({"ticker": tickers, "company_name": tickers,
-                                    "exchange": None, "asset_type": "common",
-                                    "is_etf": False, "is_test_issue": False,
-                                    "source": "cli"})
-        logger.info("Running on %d user-supplied tickers.", len(universe_df))
-    else:
-        universe_df = build_universe(config, cache=cache, rate_limiter=rate_limiter)
-        universe_path = Path(config.run.processed_dir) / "universe.csv"
-        save_universe(universe_df, str(universe_path))
-
-    if universe_df.empty:
-        logger.error("Universe is empty. Exiting.")
-        return 1
-
-    if config.run.max_tickers and len(universe_df) > config.run.max_tickers:
-        universe_df = universe_df.head(config.run.max_tickers).copy()
-        logger.info("Capped universe to %d tickers.", config.run.max_tickers)
-
-    tickers = universe_df["ticker"].tolist()
-
-    # ------------------------------------------------------------------
     # Providers
-    # ------------------------------------------------------------------
     Fund = get_fundamentals_provider(config.providers.fundamentals)
     Price = get_prices_provider(config.providers.prices)
     News = get_news_provider(config.providers.news)
@@ -187,125 +575,55 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         sentiment_model = get_sentiment_model(config.sentiment.model)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Sentiment model %s failed to load (%s); falling back to vader.",
-                       config.sentiment.model, exc)
+        logger.warning(
+            "Sentiment model %s failed to load (%s); falling back to vader.",
+            config.sentiment.model, exc,
+        )
         sentiment_model = get_sentiment_model("vader")
 
-    # ------------------------------------------------------------------
-    # Per-ticker data fetch
-    # ------------------------------------------------------------------
-    fundamentals_records: List[Fundamentals] = []
-    price_records: dict = {}
-    news_records: dict = {}
+    # --- Stages ---
+    stage_stats: List[StageStats] = []
 
-    iterator = _progress(tickers, desc="Fetching tickers")
-    for ticker in iterator:
-        try:
-            f = fund_provider.fetch(ticker)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Fundamentals fetch failed for %s: %s", ticker, exc)
-            f = Fundamentals(ticker=ticker, source=config.providers.fundamentals)
-        try:
-            p = price_provider.fetch(ticker, lookback_days=config.prices.lookback_days)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Price fetch failed for %s: %s", ticker, exc)
-            p = PriceSnapshot(ticker=ticker, lookback_days=config.prices.lookback_days,
-                              source=config.providers.prices)
-        try:
-            n = news_provider.fetch(ticker, max_age_days=config.sentiment.max_age_days)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("News fetch failed for %s: %s", ticker, exc)
-            n = []
-
-        fundamentals_records.append(f)
-        price_records[ticker] = p
-        news_records[ticker] = n
-
-    # ------------------------------------------------------------------
-    # Score
-    # ------------------------------------------------------------------
-    logger.info("Scoring %d tickers...", len(fundamentals_records))
-
-    fund_scores = score_fundamentals(fundamentals_records, config.scoring)
-
-    sentiment_rows = []
-    for ticker, articles in news_records.items():
-        scored = score_articles(articles, sentiment_model)
-        agg = aggregate_ticker_sentiment(
-            ticker,
-            scored,
-            recency_halflife_days=config.sentiment.recency_halflife_days,
-            min_articles_for_confidence=config.sentiment.min_articles_for_confidence,
-        )
-        sentiment_rows.append({
-            "ticker": ticker,
-            "sentiment_score": agg.sentiment_score,
-            "article_count": agg.article_count,
-            "positive_ratio": agg.positive_ratio,
-            "negative_ratio": agg.negative_ratio,
-            "neutral_ratio": agg.neutral_ratio,
-            "source_diversity": agg.source_diversity,
-            "sentiment_confidence": agg.confidence,
-        })
-    sentiment_df = pd.DataFrame(sentiment_rows)
-
-    # Build the per-ticker results table
-    fundamentals_meta = pd.DataFrame(
-        [{
-            "ticker": f.ticker,
-            "company_name": f.company_name,
-            "sector": f.sector,
-            "industry": f.industry,
-            "market_cap": f.market_cap,
-            "missing_fields": f.missing_fields,
-        } for f in fundamentals_records]
+    universe_df, s1 = _stage1_universe(
+        args, config, cache, rate_limiter, mode, sample_limit
     )
+    stage_stats.append(s1)
+    exchange_breakdown = universe_counts_by_exchange(universe_df)
 
-    price_rows = pd.DataFrame([
-        {
-            "ticker": t,
-            "last_close": p.last_close,
-            "avg_daily_volume": p.avg_daily_volume,
-            "avg_dollar_volume": p.avg_dollar_volume,
-            "return_pct": p.return_pct,
-            "volatility_pct": p.volatility_pct,
-        }
-        for t, p in price_records.items()
-    ])
+    if universe_df.empty:
+        logger.error("Universe is empty after stage 1. Exiting.")
+        _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
+        return 1
 
-    results = fundamentals_meta.merge(price_rows, on="ticker", how="left")
-    if not fund_scores.empty:
-        results = results.merge(fund_scores, on="ticker", how="left")
-    if not sentiment_df.empty:
-        results = results.merge(sentiment_df, on="ticker", how="left")
-
-    # Default fills where data is genuinely absent
-    if "sentiment_score" in results.columns:
-        results["sentiment_score"] = results["sentiment_score"].fillna(50.0)
-    if "article_count" in results.columns:
-        results["article_count"] = results["article_count"].fillna(0).astype(int)
-    for col in ("fundamentals_score", "growth_score", "quality_score",
-                "valuation_score", "balance_sheet_score", "cash_flow_score"):
-        if col in results.columns:
-            results[col] = results[col].fillna(50.0)
-    if "missing_metric_count" in results.columns:
-        results["missing_metric_count"] = results["missing_metric_count"].fillna(0).astype(int)
-
-    # Risk penalty + composite
-    results["risk_penalty"] = compute_risk_penalty(results, config.prices)
-    results["final_score"] = compute_composite_scores(results, config.composite)
-    results = flag_rows(
-        results,
-        config.composite,
-        low_sentiment_confidence_threshold=config.sentiment.low_confidence_threshold,
-        weak_return_threshold=config.prices.weak_return_threshold,
+    after_prices_df, price_records, s2 = _stage2_prices(
+        universe_df, price_provider, config
     )
+    stage_stats.append(s2)
 
-    # ------------------------------------------------------------------
-    # Output
-    # ------------------------------------------------------------------
-    ranked = rank_candidates(results, top_n=config.run.top_n)
+    if after_prices_df.empty:
+        logger.error("No tickers survived stage 2. Exiting.")
+        _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
+        return 1
 
+    after_fund_df, _funds, s3 = _stage3_fundamentals(
+        after_prices_df, fund_provider, config
+    )
+    stage_stats.append(s3)
+
+    if after_fund_df.empty:
+        logger.error("No tickers survived stage 3. Exiting.")
+        _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
+        return 1
+
+    after_sentiment_df, s4 = _stage4_sentiment(
+        after_fund_df, news_provider, sentiment_model, config
+    )
+    stage_stats.append(s4)
+
+    ranked, s5 = _stage5_compose_and_rank(after_sentiment_df, config)
+    stage_stats.append(s5)
+
+    # --- Outputs ---
     processed_dir = ensure_dir(config.run.processed_dir)
     output_dir = ensure_dir(config.run.output_dir)
 
@@ -318,12 +636,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     md = format_top_candidates_markdown(ranked, top_n=config.run.top_n)
     md_path.write_text(md, encoding="utf-8")
 
-    summary = _build_summary(ranked, config)
+    total_runtime = time.perf_counter() - pipeline_started
+
+    summary = _build_summary(
+        ranked, config, mode=mode, sample_limit=sample_limit,
+        stage_stats=stage_stats, exchange_breakdown=exchange_breakdown,
+        total_runtime=total_runtime,
+    )
     write_json(json_path, summary)
+
+    _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
 
     logger.info("CSV written  : %s", csv_path)
     logger.info("Markdown     : %s", md_path)
     logger.info("JSON summary : %s", json_path)
+    logger.info("Total runtime: %.1fs", total_runtime)
     return 0
 
 
@@ -332,12 +659,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 # ---------------------------------------------------------------------------
 
 def _namespaced_cache(cache: Cache, namespace: str, config: AppConfig) -> Cache:
-    """Return a cache view with the right TTL for ``namespace``.
-
-    Cache is a single on-disk store; we override the default TTL per provider
-    by handing the provider a Cache instance whose ``default_ttl`` matches the
-    config entry.
-    """
+    """Return a cache view with the right TTL for ``namespace``."""
     ttl = config.cache.ttl_seconds.get(namespace, cache.default_ttl)
     return Cache(directory=str(cache.directory), enabled=cache.enabled, default_ttl=ttl)
 
@@ -351,12 +673,44 @@ def _progress(items: Iterable, desc: str):
         return items
 
 
-def _build_summary(ranked: pd.DataFrame, config: AppConfig) -> dict:
+def _write_universe_summary(
+    config: AppConfig,
+    mode: str,
+    exchange_breakdown: Dict[str, int],
+    stage_stats: List[StageStats],
+) -> None:
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "mode": mode,
+        "exchange_breakdown": exchange_breakdown,
+        "stages": [s.to_dict() for s in stage_stats],
+    }
+    output_dir = ensure_dir(config.run.output_dir)
+    write_json(output_dir / "universe_summary.json", payload)
+
+
+def _build_summary(
+    ranked: pd.DataFrame,
+    config: AppConfig,
+    *,
+    mode: str,
+    sample_limit: Optional[int],
+    stage_stats: List[StageStats],
+    exchange_breakdown: Dict[str, int],
+    total_runtime: float,
+) -> dict:
     if ranked.empty:
-        return {"generated_at": datetime.utcnow().isoformat() + "Z", "candidates": []}
+        return {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "mode": mode,
+            "candidates": [],
+            "stages": [s.to_dict() for s in stage_stats],
+            "exchange_breakdown": exchange_breakdown,
+            "total_runtime_seconds": round(total_runtime, 2),
+        }
 
     top = ranked.head(config.run.top_n).copy()
-    candidates = []
+    candidates: List[Dict[str, Any]] = []
     for _, row in top.iterrows():
         candidates.append({
             "rank": int(row.get("rank", 0)),
@@ -392,7 +746,8 @@ def _build_summary(ranked: pd.DataFrame, config: AppConfig) -> dict:
         })
     return {
         "generated_at": datetime.utcnow().isoformat() + "Z",
-        "universe_size": int(len(ranked)),
+        "mode": mode,
+        "sample_limit": sample_limit,
         "top_n": int(config.run.top_n),
         "providers": {
             "fundamentals": config.providers.fundamentals,
@@ -401,6 +756,9 @@ def _build_summary(ranked: pd.DataFrame, config: AppConfig) -> dict:
         },
         "sentiment_model": config.sentiment.model,
         "weights": config.composite.weights,
+        "exchange_breakdown": exchange_breakdown,
+        "stages": [s.to_dict() for s in stage_stats],
+        "total_runtime_seconds": round(total_runtime, 2),
         "candidates": candidates,
     }
 
