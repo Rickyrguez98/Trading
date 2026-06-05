@@ -89,3 +89,85 @@ def test_risk_penalty_increases_with_low_liquidity_and_missing_data():
     df = pd.DataFrame([healthy, fragile])
     pen = compute_risk_penalty(df, cfg.prices)
     assert pen.loc[1] > pen.loc[0]
+
+
+def test_negative_momentum_increases_risk_and_flags(tmp_path):
+    """Closes test gap from the audit: price history must influence the score."""
+    cfg = load_config("configs/default_config.yaml")
+    df = pd.DataFrame([
+        _row(ticker="UP", return_pct=0.20),
+        _row(ticker="FLAT", return_pct=0.0),
+        _row(ticker="DOWN", return_pct=-0.30),
+    ])
+    df["risk_penalty"] = compute_risk_penalty(df, cfg.prices)
+    flagged = flag_rows(
+        df, cfg.composite,
+        low_sentiment_confidence_threshold=cfg.sentiment.low_confidence_threshold,
+        weak_return_threshold=cfg.prices.weak_return_threshold,
+    ).set_index("ticker")
+
+    assert flagged.loc["DOWN", "risk_penalty"] > flagged.loc["UP", "risk_penalty"]
+    assert flagged.loc["DOWN", "risk_penalty"] > flagged.loc["FLAT", "risk_penalty"]
+    assert "WEAK_PRICE_TREND" in flagged.loc["DOWN", "flags"]
+    assert "WEAK_PRICE_TREND" not in flagged.loc["UP", "flags"]
+    assert "WEAK_PRICE_TREND" not in flagged.loc["FLAT", "flags"]
+
+
+def test_sentiment_difference_changes_final_ranking():
+    """Identical fundamentals + price; only sentiment differs -> rank flips."""
+    cfg = load_config("configs/default_config.yaml")
+    a = _row(ticker="POS_NEWS", sentiment_score=90, article_count=10)
+    b = _row(ticker="NEG_NEWS", sentiment_score=10, article_count=10)
+    df = pd.DataFrame([a, b])
+    df["risk_penalty"] = compute_risk_penalty(df, cfg.prices)
+    df["final_score"] = compute_composite_scores(df, cfg.composite)
+    s = df.set_index("ticker")["final_score"]
+    assert s["POS_NEWS"] > s["NEG_NEWS"], (
+        "Sentiment must influence final_score when all other inputs match."
+    )
+
+
+def test_low_sentiment_confidence_flag_fires():
+    cfg = load_config("configs/default_config.yaml")
+    df = pd.DataFrame([
+        _row(ticker="THIN", article_count=1, sentiment_confidence=0.1),
+        _row(ticker="DEEP", article_count=8, sentiment_confidence=0.9),
+    ])
+    df["risk_penalty"] = 0.0
+    flagged = flag_rows(
+        df, cfg.composite,
+        low_sentiment_confidence_threshold=cfg.sentiment.low_confidence_threshold,
+        weak_return_threshold=cfg.prices.weak_return_threshold,
+    ).set_index("ticker")
+    assert "LOW_SENTIMENT_CONFIDENCE" in flagged.loc["THIN", "flags"]
+    assert "LOW_SENTIMENT_CONFIDENCE" not in flagged.loc["DEEP", "flags"]
+
+
+def test_top_driver_and_drag_are_emitted():
+    cfg = load_config("configs/default_config.yaml")
+    df = pd.DataFrame([
+        _row(ticker="MIXED", growth_score=90, quality_score=60,
+             valuation_score=20, balance_sheet_score=50, cash_flow_score=55),
+    ])
+    df["risk_penalty"] = 0.0
+    flagged = flag_rows(df, cfg.composite).iloc[0]
+    assert flagged["top_driver_pillar"] == "growth"
+    assert flagged["top_drag_pillar"] == "valuation"
+    assert "top_driver=growth" in flagged["reason"]
+    assert "top_drag=valuation" in flagged["reason"]
+
+
+def test_ranking_explainable_every_top_row_has_reason_and_flag_list():
+    from asset_selection.scoring.ranking import rank_candidates
+
+    cfg = load_config("configs/default_config.yaml")
+    df = pd.DataFrame([
+        _row(ticker="A"), _row(ticker="B"), _row(ticker="C"),
+    ])
+    df["risk_penalty"] = compute_risk_penalty(df, cfg.prices)
+    df["final_score"] = compute_composite_scores(df, cfg.composite)
+    df = flag_rows(df, cfg.composite)
+    ranked = rank_candidates(df, top_n=3)
+    for _, row in ranked.iterrows():
+        assert isinstance(row["flags"], list), "flags must be a list"
+        assert isinstance(row["reason"], str) and row["reason"], "reason must be non-empty"
