@@ -169,5 +169,105 @@ See `docs/FUTURE_ROADMAP.md` for the longer plan.
 
 ---
 
-_Pass 2 of this document will be appended in a later commit once the gaps
-above are closed._
+---
+
+## Pass 2 — what was fixed in this review cycle
+
+Each item below references the gap ID from §3 and the commit that closed it.
+
+### G1 — Price history is now part of the selection logic
+**Closed by:** `fix: add historical price metrics to selection logic`.
+
+- `PricesConfig` gained `weak_return_threshold` (default `-0.10`) and
+  `momentum_penalty_strength` (default `20.0`).
+- `compute_risk_penalty` now adds a price-trend component combining a fixed
+  hit when `return_pct < weak_return_threshold` with a cross-sectional ramp
+  toward the worst-observed return. Both branches together are bounded by
+  `momentum_penalty_strength`.
+- `flag_rows` emits the new `WEAK_PRICE_TREND` flag, and the `reason` string
+  reports the recent return (e.g. `return=-12.3%`).
+- JSON summary now includes `last_close` and `return_pct` per candidate.
+- Test `test_negative_momentum_increases_risk_and_flags` enforces the
+  monotonic relationship between negative momentum and risk_penalty.
+
+### G2 — Sentiment confidence / ratios are now surfaced
+**Closed by:** `fix: strengthen sentiment analysis integration`.
+
+- `SentimentConfig.low_confidence_threshold` (default `0.3`) controls a new
+  `LOW_SENTIMENT_CONFIDENCE` flag, which fires when there is at least one
+  article but aggregated confidence is below the threshold. `NO_NEWS` keeps
+  precedence at zero articles.
+- JSON summary now carries `sentiment_positive_ratio`,
+  `sentiment_negative_ratio`, `sentiment_confidence`, and
+  `sentiment_source_diversity` per candidate.
+- Markdown report shows `sentiment_confidence` and the new flag in the legend.
+- Tests `test_low_sentiment_confidence_flag_fires` and
+  `test_sentiment_difference_changes_final_ranking` lock the behaviour in.
+
+### G3 — Ranking explains *which* fundamentals helped or hurt
+**Closed by:** `fix: improve fundamental scoring explainability`.
+
+- `flag_rows` computes `top_driver_pillar` and `top_drag_pillar` per row
+  based on each pillar's deviation from neutral 50. They become columns on
+  the ranked DataFrame and are embedded in the `reason` string.
+- A pillar is only labelled if it actually moved (driver > 50, drag < 50),
+  so an all-neutral row produces empty driver/drag strings rather than
+  misleading ones.
+- JSON summary now includes `balance_sheet_score`, `cash_flow_score`,
+  `top_driver_pillar`, `top_drag_pillar`, and `missing_metric_count`.
+- Test `test_top_driver_and_drag_are_emitted` enforces this.
+
+### G4 — Test coverage now matches the spec
+**Closed by:** `test: expand asset selection validation coverage`.
+
+Added tests:
+- `test_sentiment_difference_changes_final_ranking`
+- `test_negative_momentum_increases_risk_and_flags`
+- `test_low_sentiment_confidence_flag_fires`
+- `test_top_driver_and_drag_are_emitted`
+- `test_ranking_explainable_every_top_row_has_reason_and_flag_list`
+- `test_pipeline_runs_end_to_end_with_mocked_providers` (integration smoke)
+- `test_pipeline_does_not_crash_when_all_news_empty`
+
+The integration tests patch the provider *factories* and exercise the real
+`run_asset_selection.main` code path. They confirm the spec's
+required-fields schema for every top-N candidate and prove the pipeline
+degrades gracefully when news is empty for some or all tickers.
+
+Baseline before this cycle: **21 tests passing**.
+After this cycle: **28 tests passing** (`pytest -q` ≈ 0.83s).
+
+### G5 — Documentation now explains the methodology
+**Closed by:** `docs: document asset selection methodology and limitations`.
+
+- README gained explicit sections: *How sentiment is used*, *How historical
+  prices are used*, *How fundamentals are used*, *How the final score is
+  calculated*, and a *Flags* table.
+- The interpretation section now lists every field a row may carry,
+  including the new explainability and sentiment-detail fields.
+- This document was updated to its Pass 2 state above.
+
+### G6 — Schema dust (no action this cycle)
+- `Fundamentals.net_income_growth` remains in the schema and is not
+  populated by the yfinance provider. It is also not referenced by any
+  pillar config, so it is inert. We chose **not** to delete it: a future
+  Finnhub/FMP provider can populate it without a schema change. Documented
+  here as a known no-op.
+
+## Limitations that remain
+
+These are unchanged from §5 of the original audit and inherent to the
+free-data choice:
+
+- yfinance has no SLA — endpoint instability tolerated, not fixed.
+- VADER is finance-naïve — FinBERT extras are available as a drop-in.
+- Fundamentals are pulled as-of-now — point-in-time history is out of scope
+  until a backtesting milestone.
+- Universe filters are heuristic — will miss edge tickers.
+
+## Recommended next milestone
+
+Unchanged: **asset allocation**. The per-ticker `final_score`, sub-scores,
+risk_penalty, and now `top_driver_pillar` / `top_drag_pillar` give an
+allocator everything it needs (signal + risk hint + explainability) without
+any further refactor. See `docs/FUTURE_ROADMAP.md`.
