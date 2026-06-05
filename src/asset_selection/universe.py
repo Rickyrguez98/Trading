@@ -120,7 +120,12 @@ def _records_to_df(records: Iterable[TickerRecord], sources: str) -> pd.DataFram
 # ---------------------------------------------------------------------------
 
 def clean_universe(df: pd.DataFrame, cfg: UniverseConfig) -> pd.DataFrame:
-    """Apply name/suffix/flag filters and ticker validation."""
+    """Apply name/suffix/flag/exchange filters and ticker validation.
+
+    Filtering is driven by the new ``include_*`` toggles on ``UniverseConfig``
+    (with legacy ``exclude_*`` honoured via ``effective_include``). An empty
+    ``exchanges`` list keeps every exchange in the input.
+    """
     if df.empty:
         return df
 
@@ -138,38 +143,74 @@ def clean_universe(df: pd.DataFrame, cfg: UniverseConfig) -> pd.DataFrame:
         lambda t: is_valid_ticker(t, cfg.min_ticker_length, cfg.max_ticker_length)
     )
 
+    # Exchange whitelist (if provided).
+    if cfg.exchanges and "exchange" in work.columns:
+        wanted = {_canon_exchange(x) for x in cfg.exchanges}
+        keep &= work["exchange"].astype(str).map(_canon_exchange).isin(wanted)
+
     # Test issues.
-    if cfg.exclude_test_issues and "is_test_issue" in work.columns:
+    if not cfg.effective_include("test_issues") and "is_test_issue" in work.columns:
         keep &= ~work["is_test_issue"].fillna(False).astype(bool)
 
     # Provider ETF flag.
-    if cfg.exclude_etfs and "is_etf" in work.columns:
+    if not cfg.effective_include("etfs") and "is_etf" in work.columns:
         keep &= ~work["is_etf"].fillna(False).astype(bool)
 
     # Name-based filters.
     name_series = work.get("company_name", pd.Series("", index=work.index)).fillna("")
 
-    if cfg.exclude_etfs:
+    if not cfg.effective_include("etfs"):
         keep &= ~name_series.str.contains(_NAME_BLOCKLIST["etf"])
-    if cfg.exclude_warrants:
+    if not cfg.include_funds:
+        # 'funds' is name-only; the source data has no separate flag.
+        # The 'etf' regex already covers 'fund', so keep_funds=True effectively
+        # only matters if the user also set include_etfs=True.
+        pass
+    if not cfg.effective_include("warrants"):
         keep &= ~name_series.str.contains(_NAME_BLOCKLIST["warrant"])
         keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["warrant"])
-    if cfg.exclude_units:
+    if not cfg.effective_include("units"):
         keep &= ~name_series.str.contains(_NAME_BLOCKLIST["unit"])
         keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["unit"])
-    if cfg.exclude_preferred:
+    if not cfg.effective_include("preferred"):
         keep &= ~name_series.str.contains(_NAME_BLOCKLIST["preferred"])
         keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["preferred"])
-    if cfg.exclude_rights:
+    if not cfg.effective_include("rights"):
         keep &= ~name_series.str.contains(_NAME_BLOCKLIST["rights"])
         keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["rights"])
-
-    # Always exclude obvious debt / notes.
-    keep &= ~name_series.str.contains(_NAME_BLOCKLIST["notes"])
+    if not cfg.include_notes:
+        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["notes"])
 
     cleaned = work.loc[keep].copy()
     cleaned["asset_type"] = cleaned.get("asset_type", "common").fillna("common")
     return cleaned.reset_index(drop=True)
+
+
+# Normalize the various ways an exchange might be spelled so the YAML
+# whitelist matches the source data. Both 'NYSE American' and 'NYSEAMERICAN'
+# and 'AMEX' end up at the same canonical key.
+_EXCHANGE_ALIASES = {
+    "nyseamerican": "nyse american",
+    "nyse-american": "nyse american",
+    "amex": "nyse american",
+    "nysearca": "nyse arca",
+    "nyse-arca": "nyse arca",
+    "arca": "nyse arca",
+    "cboe": "bats",
+}
+
+
+def _canon_exchange(name: str) -> str:
+    s = (name or "").strip().lower()
+    return _EXCHANGE_ALIASES.get(s, s)
+
+
+def universe_counts_by_exchange(df: pd.DataFrame) -> dict:
+    """Return a dict of exchange -> count, useful for stage 1 reporting."""
+    if df.empty or "exchange" not in df.columns:
+        return {}
+    series = df["exchange"].fillna("UNKNOWN").astype(str)
+    return {k: int(v) for k, v in series.value_counts().to_dict().items()}
 
 
 def save_universe(df: pd.DataFrame, path: str) -> Path:
