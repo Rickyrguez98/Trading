@@ -42,7 +42,8 @@ def _articles(n: int, source_prefix: str = "WireA"):
 
 def test_score_articles_uses_provided_model():
     arts = _articles(3)
-    model = DummyModel([0.8, -0.5, 0.1])
+    # 0.04 is below the |0.05| neutral threshold -> labeled neutral.
+    model = DummyModel([0.8, -0.5, 0.04])
     scored = score_articles(arts, model)
     assert [s.label for s in scored] == ["positive", "negative", "neutral"]
 
