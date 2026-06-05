@@ -379,11 +379,16 @@ def _build_summary(ranked: pd.DataFrame, config: AppConfig) -> dict:
             "growth_score": _safe_num(row.get("growth_score")),
             "quality_score": _safe_num(row.get("quality_score")),
             "valuation_score": _safe_num(row.get("valuation_score")),
+            "balance_sheet_score": _safe_num(row.get("balance_sheet_score")),
+            "cash_flow_score": _safe_num(row.get("cash_flow_score")),
             "risk_penalty": _safe_num(row.get("risk_penalty")),
             "final_score": _safe_num(row.get("final_score")),
+            "top_driver_pillar": row.get("top_driver_pillar") or None,
+            "top_drag_pillar": row.get("top_drag_pillar") or None,
             "reason": row.get("reason"),
             "warning_flags": list(row.get("flags") or []),
             "missing_fields": list(row.get("missing_fields") or []),
+            "missing_metric_count": int(row.get("missing_metric_count", 0) or 0),
         })
     return {
         "generated_at": datetime.utcnow().isoformat() + "Z",
