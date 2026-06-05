@@ -28,12 +28,12 @@ logger = logging.getLogger(__name__)
 
 # Substring patterns inside the SECURITY NAME that signal non-common-stock.
 _NAME_BLOCKLIST = {
-    "etf": re.compile(r"\b(etf|exchange[- ]traded|trust|fund|index)\b", re.IGNORECASE),
-    "warrant": re.compile(r"\b(warrant|warrants|wts)\b", re.IGNORECASE),
-    "unit": re.compile(r"\b(unit|units)\b", re.IGNORECASE),
-    "preferred": re.compile(r"\b(preferred|pref|depositary)\b", re.IGNORECASE),
-    "rights": re.compile(r"\b(rights?)\b", re.IGNORECASE),
-    "notes": re.compile(r"\b(notes?|debenture|bond)\b", re.IGNORECASE),
+    "etf": re.compile(r"\b(?:etf|exchange[- ]traded|trust|fund|index)\b", re.IGNORECASE),
+    "warrant": re.compile(r"\b(?:warrant|warrants|wts)\b", re.IGNORECASE),
+    "unit": re.compile(r"\b(?:unit|units)\b", re.IGNORECASE),
+    "preferred": re.compile(r"\b(?:preferred|pref|depositary)\b", re.IGNORECASE),
+    "rights": re.compile(r"\b(?:rights?)\b", re.IGNORECASE),
+    "notes": re.compile(r"\b(?:notes?|debenture|bond)\b", re.IGNORECASE),
 }
 
 # Ticker suffix conventions used by NASDAQ:
@@ -41,10 +41,10 @@ _NAME_BLOCKLIST = {
 #   'U' / '.U' -> units; 'R' / '.R' / '^' -> rights.
 # We err on the side of *keeping* a symbol unless we have signal it's excluded.
 _SUFFIX_PATTERNS = {
-    "warrant": re.compile(r"(W$|\.WS|\+)"),
-    "preferred": re.compile(r"(\.PR|\-P[A-Z]?$|\$)"),
-    "unit": re.compile(r"(U$|\.U)"),
-    "rights": re.compile(r"(R$|\.R|\^)"),
+    "warrant": re.compile(r"(?:W$|\.WS|\+)"),
+    "preferred": re.compile(r"(?:\.PR|\-P[A-Z]?$|\$)"),
+    "unit": re.compile(r"(?:U$|\.U)"),
+    "rights": re.compile(r"(?:R$|\.R|\^)"),
 }
 
 
