@@ -3,23 +3,51 @@
 # stays declarative and reproducible.
 
 run:
-  # Maximum tickers to process in one run. Use --limit on the CLI to override.
-  max_tickers: 500
+  # Mode controls how the universe is built:
+  #   full   -> use the entire cleaned U.S. universe; reduce via the staged
+  #             funnel below (pipeline.*_top_k). No silent alphabetical cap.
+  #   sample -> honour `sample_limit` (or CLI --limit) for a fast test run.
+  #   custom -> the universe comes from the CLI's `--tickers` flag.
+  mode: full
+  # Only used in sample mode. Override on the CLI with `--limit N`.
+  sample_limit: null
   # Number of top-ranked tickers written to the Markdown report.
   top_n: 25
   # Where the pipeline writes its CSV/JSON/MD outputs.
   output_dir: reports
   processed_dir: data/processed
 
+# Staged-funnel limits. Set any value to null to skip that stage's cap.
+# A full-universe run typically goes 4700 -> 500 -> 150 -> rank.
+pipeline:
+  # Hard cap on the cleaned stage-1 universe. Null = keep everything.
+  universe_max: null
+  # Tickers kept after the cheap price/liquidity prescreen.
+  after_prices_top_k: 500
+  # Tickers kept after the fundamental prescreen. News/sentiment runs only
+  # on this set, which is what makes the pipeline compatible with the free
+  # yfinance news endpoint at scale.
+  after_fundamentals_top_k: 150
+  # Drop tickers whose lookback price history is shorter than this.
+  min_price_history_days: 30
+
 universe:
   # Primary source -> first fallback -> second fallback.
   sources: [nasdaq_trader, sec_company_tickers]
-  exclude_etfs: true
-  exclude_warrants: true
-  exclude_units: true
-  exclude_preferred: true
-  exclude_rights: true
-  exclude_test_issues: true
+  # Exchange whitelist. Empty list keeps every exchange present in the
+  # source files (NASDAQ + NYSE + NYSE American + NYSE Arca + BATS + IEX).
+  # Recognised aliases: AMEX <-> NYSE American; ARCA <-> NYSE Arca; CBOE <-> BATS.
+  exchanges: []
+  # Asset-type inclusion. Defaults exclude fund-like and non-common-stock
+  # instruments. Flip any to true to widen the universe.
+  include_etfs: false
+  include_funds: false
+  include_warrants: false
+  include_units: false
+  include_preferred: false
+  include_rights: false
+  include_test_issues: false
+  include_notes: false
   # Minimum length of ticker symbol (filters out obvious garbage).
   min_ticker_length: 1
   max_ticker_length: 5

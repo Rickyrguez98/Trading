@@ -22,10 +22,40 @@ _DEFAULT_CONFIG_PATH = Path("configs/default_config.yaml")
 
 @dataclass
 class RunConfig:
-    max_tickers: int = 500
+    # Mode: "full" (no implicit cap) | "sample" (honours sample_limit) | "custom".
+    mode: str = "full"
+    # Only used in sample mode. None in full mode -- the staged funnel caps
+    # the universe via `pipeline.after_*_top_k`, not a flat alphabetical chop.
+    sample_limit: Optional[int] = None
     top_n: int = 25
     output_dir: str = "reports"
     processed_dir: str = "data/processed"
+
+    # Legacy alias from earlier versions: a flat universe cap. Still read so
+    # old YAML configs don't break, but the staged pipeline ignores it in
+    # "full" mode. Mapped onto sample_limit when mode == 'sample'.
+    max_tickers: Optional[int] = None
+
+
+@dataclass
+class PipelineStagesConfig:
+    """How many tickers each stage of the funnel keeps.
+
+    None disables the cap for that stage (keep everything that passes the
+    stage's filters). In a full-universe run, the typical pattern is:
+        Stage 1 -> ~4700 cleaned commons (no cap)
+        Stage 2 -> after_prices_top_k ~ 500   (liquidity + price prescreen)
+        Stage 3 -> after_fundamentals_top_k ~ 150 (fundamental prescreen)
+        Stage 4 -> news/sentiment only for those 150
+        Stage 5 -> rank, top_n into the Markdown report
+    """
+    after_prices_top_k: Optional[int] = 500
+    after_fundamentals_top_k: Optional[int] = 150
+    # Minimum price history (number of daily closes) before a ticker is kept.
+    min_price_history_days: int = 30
+    # Stage-1 hard cap. Default None means keep the full cleaned universe.
+    # Useful for very large samples / regression runs.
+    universe_max: Optional[int] = None
 
 
 @dataclass
@@ -141,6 +171,7 @@ class LoggingConfig:
 class AppConfig:
     run: RunConfig = field(default_factory=RunConfig)
     universe: UniverseConfig = field(default_factory=UniverseConfig)
+    pipeline: PipelineStagesConfig = field(default_factory=PipelineStagesConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     rate_limits: Dict[str, float] = field(default_factory=lambda: {"yfinance": 0.4})
@@ -201,6 +232,7 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
     return AppConfig(
         run=RunConfig(**_filtered(RunConfig, section("run"))),
         universe=UniverseConfig(**_filtered(UniverseConfig, section("universe"))),
+        pipeline=PipelineStagesConfig(**_filtered(PipelineStagesConfig, section("pipeline"))),
         providers=ProvidersConfig(**_filtered(ProvidersConfig, section("providers"))),
         cache=CacheConfig(**_filtered(CacheConfig, section("cache"))),
         rate_limits=dict(section("rate_limits") or {"yfinance": 0.4}),
