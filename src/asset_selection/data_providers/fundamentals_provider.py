@@ -82,6 +82,9 @@ _TRACKED_FIELDS: List[str] = [
 class YFinanceFundamentalsProvider(FundamentalsProvider):
     name = "yfinance"
 
+    def cache_identifier(self, ticker: str) -> str:
+        return to_provider_symbol(ticker.strip().upper(), self.name)
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     def _fetch_info(self, provider_symbol: str) -> Dict[str, Any]:
         import yfinance as yf
@@ -160,5 +163,8 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
 
         out.missing_fields = [f for f in _TRACKED_FIELDS if getattr(out, f) is None]
 
-        self._cache_set(ticker, out.__dict__)
+        # Cache by the same key we read with (provider_symbol). Previously this
+        # wrote under the canonical ticker while reading under provider_symbol,
+        # so class shares (BRK.B written, BRK-B read) never hit the cache.
+        self._cache_set(cache_id, out.__dict__)
         return out
