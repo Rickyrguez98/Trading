@@ -75,6 +75,11 @@ class UniverseConfig:
     include_rights: bool = False
     include_test_issues: bool = False
     include_notes: bool = False
+    # Temporary / conditional instruments: "When-Issued" (WI) lines that trade
+    # before a corporate action settles, and other temporary/special tickers.
+    # Their price history is short and not comparable to seasoned common stock,
+    # so they are excluded by default.
+    include_when_issued: bool = False
 
     # Legacy aliases. If a user's YAML uses the old `exclude_*` form we honour
     # it (e.g. `exclude_etfs: false` == `include_etfs: true`). New code reads

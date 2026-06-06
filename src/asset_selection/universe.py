@@ -34,6 +34,12 @@ _NAME_BLOCKLIST = {
     "preferred": re.compile(r"\b(?:preferred|pref|depositary)\b", re.IGNORECASE),
     "rights": re.compile(r"\b(?:rights?)\b", re.IGNORECASE),
     "notes": re.compile(r"\b(?:notes?|debenture|bond)\b", re.IGNORECASE),
+    # "When-Issued" / "When Issued" / trailing " WI", plus temporary lines.
+    # These are conditional instruments with short, non-comparable history.
+    "when_issued": re.compile(
+        r"(?:\bwhen[\s-]?issued\b|\bwhen[\s-]?distributed\b|\bWI\b\s*$|\btemporary\b)",
+        re.IGNORECASE,
+    ),
 }
 
 # Ticker suffix conventions used by NASDAQ:
@@ -89,7 +95,16 @@ def build_universe(
         )
 
     df = _records_to_df(raw, sources=",".join(used_sources))
-    cleaned = clean_universe(df, config.universe)
+    cleaned, clean_stats = clean_universe_with_stats(df, config.universe)
+    # Stash removal-reason stats so stage 1 can report exactly what was removed
+    # and why (When-Issued, ETF, preferred, ...). `.attrs` survives copy/head.
+    cleaned.attrs["clean_stats"] = clean_stats
+    if clean_stats.get("removed"):
+        logger.info(
+            "Universe cleaning removed %d rows: %s",
+            clean_stats["raw"] - clean_stats["cleaned"],
+            ", ".join(f"{k}={v}" for k, v in clean_stats["removed"].items()),
+        )
     logger.info(
         "Universe: %d raw -> %d cleaned (sources=%s).", len(df), len(cleaned), used_sources
     )
@@ -125,9 +140,27 @@ def clean_universe(df: pd.DataFrame, cfg: UniverseConfig) -> pd.DataFrame:
     Filtering is driven by the new ``include_*`` toggles on ``UniverseConfig``
     (with legacy ``exclude_*`` honoured via ``effective_include``). An empty
     ``exchanges`` list keeps every exchange in the input.
+
+    This is the thin wrapper used by most callers; use
+    :func:`clean_universe_with_stats` when you need the per-reason removal
+    counts for reporting.
+    """
+    cleaned, _stats = clean_universe_with_stats(df, cfg)
+    return cleaned
+
+
+def clean_universe_with_stats(
+    df: pd.DataFrame, cfg: UniverseConfig
+) -> "tuple[pd.DataFrame, dict]":
+    """Like :func:`clean_universe`, but also return removal-reason counts.
+
+    Returns ``(cleaned_df, stats)`` where ``stats`` maps each removal reason
+    (e.g. ``"when_issued"``, ``"etf_flag"``, ``"exchange_not_whitelisted"``) to
+    the number of rows it removed. Each removed row is attributed to the first
+    reason that caught it, so the counts sum to ``raw_count - cleaned_count``.
     """
     if df.empty:
-        return df
+        return df, {"raw": 0, "cleaned": 0, "removed": {}}
 
     work = df.copy()
 
@@ -136,54 +169,74 @@ def clean_universe(df: pd.DataFrame, cfg: UniverseConfig) -> pd.DataFrame:
     if "company_name" in work.columns:
         work["company_name"] = work["company_name"].astype(str).str.strip()
 
+    name_series = work.get("company_name", pd.Series("", index=work.index)).fillna("")
+
     keep = pd.Series(True, index=work.index)
+    removed: dict = {}
+
+    def _drop(reason: str, mask: pd.Series) -> None:
+        """Attribute rows caught by ``mask`` (and still kept) to ``reason``."""
+        nonlocal keep
+        mask = mask.reindex(work.index).fillna(False).astype(bool)
+        newly = keep & mask
+        count = int(newly.sum())
+        if count:
+            removed[reason] = removed.get(reason, 0) + count
+        keep &= ~mask
 
     # Ticker symbol sanity.
-    keep &= work["ticker"].apply(
+    valid = work["ticker"].apply(
         lambda t: is_valid_ticker(t, cfg.min_ticker_length, cfg.max_ticker_length)
     )
+    _drop("invalid_ticker", ~valid)
 
     # Exchange whitelist (if provided).
     if cfg.exchanges and "exchange" in work.columns:
         wanted = {_canon_exchange(x) for x in cfg.exchanges}
-        keep &= work["exchange"].astype(str).map(_canon_exchange).isin(wanted)
+        in_wl = work["exchange"].astype(str).map(_canon_exchange).isin(wanted)
+        _drop("exchange_not_whitelisted", ~in_wl)
 
     # Test issues.
     if not cfg.effective_include("test_issues") and "is_test_issue" in work.columns:
-        keep &= ~work["is_test_issue"].fillna(False).astype(bool)
+        _drop("test_issue", work["is_test_issue"].fillna(False).astype(bool))
 
-    # Provider ETF flag.
-    if not cfg.effective_include("etfs") and "is_etf" in work.columns:
-        keep &= ~work["is_etf"].fillna(False).astype(bool)
-
-    # Name-based filters.
-    name_series = work.get("company_name", pd.Series("", index=work.index)).fillna("")
-
+    # Provider ETF flag + ETF/fund name.
     if not cfg.effective_include("etfs"):
-        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["etf"])
-    if not cfg.include_funds:
-        # 'funds' is name-only; the source data has no separate flag.
-        # The 'etf' regex already covers 'fund', so keep_funds=True effectively
-        # only matters if the user also set include_etfs=True.
-        pass
+        if "is_etf" in work.columns:
+            _drop("etf_flag", work["is_etf"].fillna(False).astype(bool))
+        _drop("etf_or_fund_name", name_series.str.contains(_NAME_BLOCKLIST["etf"]))
+
+    # When-Issued / temporary instruments. Done early and explicitly so a
+    # "Common Stock When-Issued" line (e.g. SNDK/CEG in the audited run) is
+    # excluded by default rather than ranked as ordinary common stock.
+    if not cfg.effective_include("when_issued"):
+        _drop("when_issued", name_series.str.contains(_NAME_BLOCKLIST["when_issued"]))
+
     if not cfg.effective_include("warrants"):
-        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["warrant"])
-        keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["warrant"])
+        _drop("warrant_name", name_series.str.contains(_NAME_BLOCKLIST["warrant"]))
+        _drop("warrant_suffix", work["ticker"].str.contains(_SUFFIX_PATTERNS["warrant"]))
     if not cfg.effective_include("units"):
-        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["unit"])
-        keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["unit"])
+        _drop("unit_name", name_series.str.contains(_NAME_BLOCKLIST["unit"]))
+        _drop("unit_suffix", work["ticker"].str.contains(_SUFFIX_PATTERNS["unit"]))
     if not cfg.effective_include("preferred"):
-        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["preferred"])
-        keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["preferred"])
+        _drop("preferred_name", name_series.str.contains(_NAME_BLOCKLIST["preferred"]))
+        _drop("preferred_suffix", work["ticker"].str.contains(_SUFFIX_PATTERNS["preferred"]))
     if not cfg.effective_include("rights"):
-        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["rights"])
-        keep &= ~work["ticker"].str.contains(_SUFFIX_PATTERNS["rights"])
+        _drop("rights_name", name_series.str.contains(_NAME_BLOCKLIST["rights"]))
+        _drop("rights_suffix", work["ticker"].str.contains(_SUFFIX_PATTERNS["rights"]))
     if not cfg.include_notes:
-        keep &= ~name_series.str.contains(_NAME_BLOCKLIST["notes"])
+        _drop("notes_name", name_series.str.contains(_NAME_BLOCKLIST["notes"]))
 
     cleaned = work.loc[keep].copy()
     cleaned["asset_type"] = cleaned.get("asset_type", "common").fillna("common")
-    return cleaned.reset_index(drop=True)
+    cleaned = cleaned.reset_index(drop=True)
+
+    stats = {
+        "raw": int(len(work)),
+        "cleaned": int(len(cleaned)),
+        "removed": dict(sorted(removed.items(), key=lambda kv: -kv[1])),
+    }
+    return cleaned, stats
 
 
 # Normalize the various ways an exchange might be spelled so the YAML
