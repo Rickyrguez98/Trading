@@ -67,7 +67,12 @@ from ..sentiment.sentiment_model import (
     score_articles,
 )
 from ..universe import build_universe, save_universe, universe_counts_by_exchange
-from ..validation import validate_outputs, write_validation_reports
+from ..validation import (
+    assess_coverage,
+    determine_run_status,
+    validate_outputs,
+    write_validation_reports,
+)
 from ..utils.cache import Cache
 from ..utils.io import ensure_dir, write_csv, write_json
 from ..utils.rate_limiter import RateLimiter
@@ -228,6 +233,23 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "yfinance'. A comma-separated list sets the fallback priority order "
             "(first is primary); a single name sets just that provider. Valid "
             "types: prices, fundamentals, news."
+        ),
+    )
+    p.add_argument(
+        "--allow-partial-ranking", dest="allow_partial_ranking",
+        action="store_true", default=None,
+        help=(
+            "Present a degraded-but-usable run as a PARTIAL ranking (with "
+            "warnings) instead of a diagnostic-only result. On by default; use "
+            "--no-partial-ranking to require full coverage."
+        ),
+    )
+    p.add_argument(
+        "--no-partial-ranking", dest="allow_partial_ranking",
+        action="store_false",
+        help=(
+            "Refuse to present a ranking when coverage is degraded; emit a "
+            "diagnostic-only result instead (exit 2)."
         ),
     )
     return p.parse_args(argv)
@@ -704,6 +726,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.robustness.use_cache_on_provider_failure = True
     if args.max_cache_age_days is not None:
         config.robustness.max_cache_age_days = float(args.max_cache_age_days)
+    if args.allow_partial_ranking is not None:
+        config.robustness.allow_partial_ranking = bool(args.allow_partial_ranking)
     _apply_provider_overrides(args, config)
 
     configure_logging(
@@ -801,6 +825,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 2 if systemic else 0
 
+    # --- Refuse to run a full funnel during a confirmed systemic outage ---
+    # If the benchmark mega-caps could not be fetched, re-ranking the survivors
+    # would be misleading (it's a provider outage, not a set of bad tickers).
+    # We emit a diagnostic summary and stop rather than burn API calls.
+    if (
+        health_report
+        and health_report.get("any_blocking_systemic_failure")
+        and config.robustness.stop_on_systemic_provider_failure
+    ):
+        coverage = assess_coverage([], None, config)
+        status = determine_run_status(coverage, health_report, config)
+        output_dir = ensure_dir(config.run.output_dir)
+        summary = {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "mode": mode,
+            "run_status": status["run_status"],
+            "ranking_validity": status["ranking_validity"],
+            "invalid_ranking_reasons": status["invalid_ranking_reasons"],
+            "recommendations_for_next_run": status["recommendations_for_next_run"],
+            "data_coverage_summary": coverage,
+            "provider_health_check_summary": health_report,
+            "candidates": [],
+            "stages": [],
+        }
+        write_json(output_dir / "asset_selection_summary.json", summary)
+        logger.error(
+            "Systemic provider failure on benchmark mega-caps -> %s. Refusing to "
+            "produce a ranking; wrote a diagnostic summary instead. Reasons: %s",
+            status["ranking_validity"],
+            "; ".join(status["invalid_ranking_reasons"]) or "(none)",
+        )
+        return status["return_code"]
+
     # --- Stages ---
     stage_stats: List[StageStats] = []
 
@@ -863,6 +920,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         stage_stats=stage_stats, exchange_breakdown=exchange_breakdown,
         total_runtime=total_runtime,
     )
+
+    # --- Ranking-validity gating: is this ranking trustworthy? ---
+    # Coverage + benchmark health decide whether the output is a VALID ranking,
+    # a PARTIAL one (with warnings), or merely DIAGNOSTIC/INVALID. This is what
+    # stops a systemic provider outage from masquerading as a clean ranking.
+    coverage = assess_coverage(stage_stats, ranked, config)
+    status = determine_run_status(coverage, health_report, config)
+    summary["run_status"] = status["run_status"]
+    summary["ranking_validity"] = status["ranking_validity"]
+    summary["invalid_ranking_reasons"] = status["invalid_ranking_reasons"]
+    summary["coverage_warnings"] = status["warnings"]
+    summary["recommendations_for_next_run"] = status["recommendations_for_next_run"]
+    summary["data_coverage_summary"] = coverage
+    if health_report is not None:
+        summary["provider_health_check_summary"] = health_report
     write_json(json_path, summary)
 
     _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
@@ -883,7 +955,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("Markdown     : %s", md_path)
     logger.info("JSON summary : %s", json_path)
     logger.info("Total runtime: %.1fs", total_runtime)
-    return 0
+    logger.info(
+        "Run status   : %s (ranking_validity=%s).%s",
+        status["run_status"], status["ranking_validity"],
+        ("" if status["is_trusted"] else
+         " Output is NOT a trusted ranking -- see invalid_ranking_reasons."),
+    )
+    if status["invalid_ranking_reasons"]:
+        for r in status["invalid_ranking_reasons"]:
+            logger.warning("  reason: %s", r)
+    return status["return_code"]
 
 
 # ---------------------------------------------------------------------------
