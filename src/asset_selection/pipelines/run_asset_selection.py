@@ -552,6 +552,7 @@ def _stage5_compose_and_rank(
         config.composite,
         low_sentiment_confidence_threshold=config.sentiment.low_confidence_threshold,
         weak_return_threshold=config.prices.weak_return_threshold,
+        risk_controls=config.risk_controls,
     )
     ranked = rank_candidates(df, top_n=config.run.top_n)
 
@@ -829,6 +830,7 @@ def _build_summary(
             "final_score": _safe_num(row.get("final_score")),
             "top_driver_pillar": row.get("top_driver_pillar") or None,
             "top_drag_pillar": row.get("top_drag_pillar") or None,
+            "selection_bucket": row.get("selection_bucket") or None,
             "reason": row.get("reason"),
             "warning_flags": list(row.get("flags") or []),
             "missing_fields": list(row.get("missing_fields") or []),

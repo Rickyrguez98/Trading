@@ -166,6 +166,30 @@ class CompositeConfig:
 
 
 @dataclass
+class RiskControlsConfig:
+    """Thresholds for volatility/risk flags and the ``selection_bucket`` label.
+
+    We never auto-remove a candidate for being volatile -- we *label* it so a
+    reader can tell a steady compounder from a 100%-vol momentum name. All
+    volatility values are annualized fractions (0.80 == 80%).
+    """
+    # Above this annualized volatility -> HIGH_VOLATILITY flag + speculative.
+    max_volatility_pct: float = 0.80
+    # Above this risk_penalty (0..100) -> speculative.
+    max_risk_penalty: float = 50.0
+    # SPECULATIVE_MOMENTUM fires when BOTH return and volatility clear these
+    # gates (a big run-up on a very noisy tape).
+    speculative_return_pct: float = 0.50
+    speculative_volatility_pct: float = 0.60
+    # high_quality_core requires strong fundamentals, contained vol, low risk.
+    core_min_fundamentals: float = 58.0
+    core_max_volatility_pct: float = 0.45
+    core_max_risk_penalty: float = 12.0
+    # Below this fundamentals score (and not already speculative) -> watchlist.
+    watchlist_max_fundamentals: float = 50.0
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     log_to_file: bool = False
@@ -184,6 +208,7 @@ class AppConfig:
     sentiment: SentimentConfig = field(default_factory=SentimentConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     composite: CompositeConfig = field(default_factory=CompositeConfig)
+    risk_controls: RiskControlsConfig = field(default_factory=RiskControlsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @property
@@ -245,6 +270,7 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
         sentiment=SentimentConfig(**_filtered(SentimentConfig, section("sentiment"))),
         scoring=ScoringConfig(**_filtered(ScoringConfig, section("scoring"))),
         composite=CompositeConfig(**_filtered(CompositeConfig, section("composite"))),
+        risk_controls=RiskControlsConfig(**_filtered(RiskControlsConfig, section("risk_controls"))),
         logging=LoggingConfig(**_filtered(LoggingConfig, section("logging"))),
     )
 

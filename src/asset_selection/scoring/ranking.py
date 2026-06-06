@@ -32,6 +32,7 @@ _DISPLAY_COLUMNS: List[str] = [
     "top_drag_pillar",
     "risk_penalty",
     "final_score",
+    "selection_bucket",
     "flags",
     "reason",
     "missing_fields",
@@ -105,6 +106,7 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
         "return_pct",
         "volatility_pct",
         "risk_penalty",
+        "selection_bucket",
         "article_count",
         "sentiment_confidence",
         "top_driver_pillar",
@@ -129,6 +131,15 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
     md.append("- **WEAK_PRICE_TREND** — recent return is in the bottom of the cross-section; treat with caution.")
     md.append("- **THIN_FUNDAMENTALS** — many missing fundamental fields; score is less reliable.")
     md.append("- **MISSING_MARKET_CAP** — could not read market cap; size/liquidity filters degraded.")
+    md.append("- **HIGH_VOLATILITY** — annualized volatility above the configured ceiling; size positions accordingly.")
+    md.append("- **SPECULATIVE_MOMENTUM** — large run-up on a very noisy tape; reward may be chasing risk.")
+    md.append("")
+    md.append("## Selection buckets")
+    md.append("")
+    md.append("- **high_quality_core_candidate** — strong fundamentals, contained volatility, low risk penalty, non-negative trend.")
+    md.append("- **growth_candidate** — decent fundamentals with elevated (but not extreme) volatility.")
+    md.append("- **speculative_candidate** — high volatility, speculative momentum/hype, or high risk penalty. Labeled, not removed.")
+    md.append("- **watchlist_only** — weak trend, thin/poor fundamentals, or missing market cap; needs more review before sizing.")
     return "\n".join(md) + "\n"
 
 
