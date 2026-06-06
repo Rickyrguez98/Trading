@@ -35,7 +35,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from ..config import CompositeConfig, PricesConfig
+from ..config import CompositeConfig, PricesConfig, RiskControlsConfig
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,9 @@ def flag_rows(
     composite_cfg: CompositeConfig,
     low_sentiment_confidence_threshold: float = 0.3,
     weak_return_threshold: float = -0.10,
+    risk_controls: "RiskControlsConfig | None" = None,
 ) -> pd.DataFrame:
-    """Add ``flags`` (list[str]) and ``reason`` (str) columns to ``df``.
+    """Add ``flags`` (list[str]), ``reason``, and ``selection_bucket`` columns.
 
     ``low_sentiment_confidence_threshold`` is the confidence (0..1) below
     which we emit a ``LOW_SENTIMENT_CONFIDENCE`` flag, given there was at
@@ -169,10 +170,17 @@ def flag_rows(
 
     ``weak_return_threshold`` is the fractional return (e.g. -0.10 for -10%)
     below which we emit a ``WEAK_PRICE_TREND`` flag.
+
+    ``risk_controls`` drives the new ``HIGH_VOLATILITY`` / ``SPECULATIVE_MOMENTUM``
+    flags and the ``selection_bucket`` label. Volatile names are labeled, never
+    dropped here.
     """
+    rc = risk_controls or RiskControlsConfig()
+
     if df.empty:
         df["flags"] = []
         df["reason"] = ""
+        df["selection_bucket"] = ""
         return df
 
     speculative_cfg = composite_cfg.speculative_hype or {}
@@ -182,6 +190,7 @@ def flag_rows(
     reasons: List[str] = []
     top_driver_pillars: List[str] = []
     top_drag_pillars: List[str] = []
+    buckets: List[str] = []
 
     for _, row in df.iterrows():
         row_flags: List[str] = []
@@ -192,6 +201,9 @@ def flag_rows(
         missing_metric_count = int(row.get("missing_metric_count", 0) or 0)
         sentiment_confidence = float(row.get("sentiment_confidence", 0.0) or 0.0)
         return_pct = row.get("return_pct")
+        risk_penalty = float(row.get("risk_penalty", 0.0) or 0.0)
+        vol = _coerce(row.get("volatility_pct"))
+        r = _coerce(return_pct)
 
         if (
             s_score >= speculative_cfg.get("sentiment_min", 65)
@@ -208,18 +220,24 @@ def flag_rows(
         elif sentiment_confidence < low_sentiment_confidence_threshold:
             # Some news, but not enough volume/diversity to trust the signal.
             row_flags.append("LOW_SENTIMENT_CONFIDENCE")
-        try:
-            r = float(return_pct) if return_pct is not None else None
-        except (TypeError, ValueError):
-            r = None
-        if r is not None and r == r and r < weak_return_threshold:
+        if r is not None and r < weak_return_threshold:
             row_flags.append("WEAK_PRICE_TREND")
         if missing_metric_count >= 5:
             row_flags.append("THIN_FUNDAMENTALS")
         if pd.isna(row.get("market_cap")):
             row_flags.append("MISSING_MARKET_CAP")
+        # New risk-control flags.
+        if vol is not None and vol > rc.max_volatility_pct:
+            row_flags.append("HIGH_VOLATILITY")
+        if (
+            r is not None and vol is not None
+            and r >= rc.speculative_return_pct
+            and vol >= rc.speculative_volatility_pct
+        ):
+            row_flags.append("SPECULATIVE_MOMENTUM")
 
         flags_per_row.append(row_flags)
+        buckets.append(_selection_bucket(f_score, vol, r, risk_penalty, row_flags, rc))
         reasons.append(_build_reason(row, row_flags))
         driver, drag = _pillar_drivers(row)
         top_driver_pillars.append(driver[0] if driver and driver[0] else "")
@@ -227,10 +245,62 @@ def flag_rows(
 
     df = df.copy()
     df["flags"] = flags_per_row
+    df["selection_bucket"] = buckets
     df["reason"] = reasons
     df["top_driver_pillar"] = top_driver_pillars
     df["top_drag_pillar"] = top_drag_pillars
     return df
+
+
+def _coerce(v) -> "float | None":
+    try:
+        x = float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+    if x is None or x != x:  # None or NaN
+        return None
+    return x
+
+
+def _selection_bucket(
+    f_score: float,
+    vol: "float | None",
+    r: "float | None",
+    risk_penalty: float,
+    flags: List[str],
+    rc: RiskControlsConfig,
+) -> str:
+    """Bucket a candidate so volatile/speculative names are visibly separated
+    from steady core names. Evaluated by priority: speculative first (riskiest),
+    then watchlist (quality/data concern), then core, then growth.
+    """
+    speculative = (
+        "HIGH_VOLATILITY" in flags
+        or "SPECULATIVE_MOMENTUM" in flags
+        or "SPECULATIVE_HYPE" in flags
+        or risk_penalty > rc.max_risk_penalty
+        or (vol is not None and vol > rc.max_volatility_pct)
+    )
+    if speculative:
+        return "speculative_candidate"
+
+    if (
+        "WEAK_PRICE_TREND" in flags
+        or "THIN_FUNDAMENTALS" in flags
+        or "MISSING_MARKET_CAP" in flags
+        or f_score < rc.watchlist_max_fundamentals
+    ):
+        return "watchlist_only"
+
+    if (
+        f_score >= rc.core_min_fundamentals
+        and (vol is None or vol <= rc.core_max_volatility_pct)
+        and risk_penalty <= rc.core_max_risk_penalty
+        and (r is None or r >= 0.0)
+    ):
+        return "high_quality_core_candidate"
+
+    return "growth_candidate"
 
 
 _PILLAR_COLUMNS = (
@@ -261,7 +331,8 @@ def _pillar_drivers(row: pd.Series) -> tuple:
             continue
         deltas.append((name, v, v - 50.0))
     if not deltas:
-        return (None, None)
+        # Keep a consistent shape so callers can always do driver[0]/drag[0].
+        return ((None, None), (None, None))
     driver = max(deltas, key=lambda t: t[2])
     drag = min(deltas, key=lambda t: t[2])
     # Only call it a "driver" if it actually helped (positive delta);

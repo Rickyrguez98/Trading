@@ -158,6 +158,20 @@ composite:
     fundamentals_min: 65
     sentiment_max: 35
 
+# Risk-control thresholds. These do NOT remove candidates -- they drive the
+# HIGH_VOLATILITY / SPECULATIVE_MOMENTUM flags and the selection_bucket label
+# so a steady compounder is visibly separated from a 100%-vol momentum name.
+# Volatility values are annualized fractions (0.80 == 80%).
+risk_controls:
+  max_volatility_pct: 0.80        # above -> HIGH_VOLATILITY + speculative bucket
+  max_risk_penalty: 50.0          # above -> speculative bucket
+  speculative_return_pct: 0.50    # return gate for SPECULATIVE_MOMENTUM
+  speculative_volatility_pct: 0.60  # vol gate for SPECULATIVE_MOMENTUM
+  core_min_fundamentals: 58.0     # high_quality_core needs at least this
+  core_max_volatility_pct: 0.45   # ...and vol no higher than this
+  core_max_risk_penalty: 12.0     # ...and risk_penalty no higher than this
+  watchlist_max_fundamentals: 50.0  # below this (if not speculative) -> watchlist
+
 logging:
   level: INFO
   log_to_file: false
