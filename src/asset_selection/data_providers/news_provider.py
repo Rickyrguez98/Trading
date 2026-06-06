@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class YFinanceNewsProvider(NewsProvider):
     name = "yfinance"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     def _download(self, provider_symbol: str) -> List[Dict[str, Any]]:
         import yfinance as yf
 
@@ -38,14 +38,14 @@ class YFinanceNewsProvider(NewsProvider):
         if cached is not None:
             return [NewsItem(**row) for row in cached]
 
-        try:
-            raw = self._download(provider_symbol)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "yfinance news fetch failed for %s (as %s): %s",
-                ticker, provider_symbol, exc,
-            )
-            raw = []
+        # NOTE: we deliberately do NOT swallow download errors here. A raised
+        # exception means the *provider* failed (blocked/rate-limited/parse
+        # error) and must be distinguishable from a genuinely empty news list
+        # (the call succeeded, the name simply has no recent coverage). The
+        # caller (stage 4) catches and classifies the exception via
+        # errors.classify_exception so a systemic news outage is visible rather
+        # than masquerading as "no news".
+        raw = self._download(provider_symbol)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         items: List[NewsItem] = []

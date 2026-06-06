@@ -12,11 +12,21 @@ from typing import Any, Dict, List
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from dataclasses import fields as _dc_fields
+
 from ..utils.validation import coerce_float
+from . import errors as err
 from .base import Fundamentals, FundamentalsProvider
-from .symbols import likely_no_data_reason, to_provider_symbol
+from .symbols import likely_no_data_reason, to_provider_symbol, was_remapped
 
 logger = logging.getLogger(__name__)
+
+_FUND_FIELDS = {f.name for f in _dc_fields(Fundamentals)}
+
+
+def _compat(cached: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only keys the current ``Fundamentals`` schema knows about."""
+    return {k: v for k, v in cached.items() if k in _FUND_FIELDS}
 
 
 # Mapping from yfinance ``info`` keys to our schema. Listed only the keys that
@@ -72,7 +82,7 @@ _TRACKED_FIELDS: List[str] = [
 class YFinanceFundamentalsProvider(FundamentalsProvider):
     name = "yfinance"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     def _fetch_info(self, provider_symbol: str) -> Dict[str, Any]:
         import yfinance as yf
 
@@ -93,11 +103,13 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
         cached = self._cache_get(cache_id)
         if cached is not None:
             cached.setdefault("provider_symbol", provider_symbol)
-            return Fundamentals(**cached)
+            out = Fundamentals(**_compat(cached))
+            out.data_source = "fresh_cache"
+            return out
 
         out = Fundamentals(
             ticker=ticker, source=self.name, as_of=self._now_iso(),
-            provider_symbol=provider_symbol,
+            provider_symbol=provider_symbol, data_source="live",
         )
 
         try:
@@ -110,11 +122,16 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
             info = {}
             out.status = "error"
             out.error = f"{type(exc).__name__}: {exc}"
+            out.error_type = err.classify_exception(exc)
+            out.data_source = "unavailable"
 
         if not info and out.status != "error":
             # Successful call, empty payload: honest "empty", not "delisted".
             out.status = "empty"
             out.error = likely_no_data_reason(ticker, provider_symbol)
+            out.error_type = err.classify_empty(
+                "fundamentals", remapped=was_remapped(ticker, self.name)
+            )
 
         # Identity / metadata fields (strings; left as-is or None).
         for src, dst in _INFO_MAP.items():

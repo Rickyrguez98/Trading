@@ -13,17 +13,31 @@ import numpy as np
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from dataclasses import fields as _dc_fields
+
 from ..utils.validation import coerce_float
+from . import errors as err
 from .base import PriceSnapshot, PricesProvider
-from .symbols import likely_no_data_reason, to_provider_symbol
+from .symbols import likely_no_data_reason, to_provider_symbol, was_remapped
 
 logger = logging.getLogger(__name__)
+
+_PRICE_FIELDS = {f.name for f in _dc_fields(PriceSnapshot)}
+
+
+def _compat(cached: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only keys the current ``PriceSnapshot`` schema knows about.
+
+    Lets a cache entry written by an older OR newer build reconstruct cleanly:
+    unknown keys are dropped, missing keys fall back to dataclass defaults.
+    """
+    return {k: v for k, v in cached.items() if k in _PRICE_FIELDS}
 
 
 class YFinancePricesProvider(PricesProvider):
     name = "yfinance"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     def _download_history(self, provider_symbol: str, lookback_days: int) -> pd.DataFrame:
         import yfinance as yf
 
@@ -56,11 +70,14 @@ class YFinancePricesProvider(PricesProvider):
         cached = self._cache_get(cache_id)
         if cached is not None:
             cached.setdefault("provider_symbol", provider_symbol)
-            return PriceSnapshot(**cached)
+            snap = PriceSnapshot(**_compat(cached))
+            # A cache hit is within TTL by construction -> fresh cache.
+            snap.data_source = "fresh_cache"
+            return snap
 
         snap = PriceSnapshot(
             ticker=ticker, lookback_days=lookback_days, source=self.name,
-            provider_symbol=provider_symbol,
+            provider_symbol=provider_symbol, data_source="live",
         )
 
         try:
@@ -72,6 +89,8 @@ class YFinancePricesProvider(PricesProvider):
             )
             snap.status = "error"
             snap.error = f"{type(exc).__name__}: {exc}"
+            snap.error_type = err.classify_exception(exc)
+            snap.data_source = "unavailable"
             self._cache_set(cache_id, snap.__dict__)
             return snap
 
@@ -79,9 +98,12 @@ class YFinancePricesProvider(PricesProvider):
             # The call succeeded but returned nothing usable. This is NOT an
             # exception and NOT the same as a genuinely-illiquid name we later
             # drop on the liquidity filter -- we record it as "empty" with an
-            # honest, non-committal reason.
+            # honest, non-committal reason and a NO_PRICE_DATA error type.
             snap.status = "empty"
             snap.error = likely_no_data_reason(ticker, provider_symbol)
+            snap.error_type = err.classify_empty(
+                "price", remapped=was_remapped(ticker, self.name)
+            )
             self._cache_set(cache_id, snap.__dict__)
             return snap
 
