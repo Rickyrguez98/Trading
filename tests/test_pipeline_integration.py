@@ -312,6 +312,9 @@ def test_news_runs_only_after_fundamentals_prescreen(temp_workdir: Path):
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "TINY", "MSFT",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
+            # Isolate stage-4 gating: the pre-run health check legitimately
+            # probes benchmark tickers and would otherwise pollute the spy.
+            "--no-provider-health-check",
         ])
     assert rc == 0
 
