@@ -35,6 +35,11 @@ class ArticleSentiment:
     label: str                       # 'positive' | 'neutral' | 'negative'
     source: Optional[str] = None
     published_at: Optional[str] = None
+    url: Optional[str] = None
+    retrieved_at: Optional[str] = None
+    is_duplicate: bool = False       # same headline/url already seen for this ticker
+    is_stale: bool = False           # older than the configured staleness window
+    age_days: Optional[float] = None
 
 
 @dataclass
@@ -45,11 +50,17 @@ class TickerSentiment:
     average_compound: float = 0.0
     recency_weighted_compound: float = 0.0
     article_count: int = 0
+    unique_article_count: int = 0
+    duplicate_count: int = 0
+    stale_count: int = 0
+    fresh_ratio: float = 0.0         # share of non-stale articles
+    unique_ratio: float = 0.0        # share of non-duplicate articles
     positive_ratio: float = 0.0
     negative_ratio: float = 0.0
     neutral_ratio: float = 0.0
     source_diversity: int = 0
     confidence: float = 0.0          # 0..1
+    model_name: str = "vader"
     articles: List[ArticleSentiment] = field(default_factory=list)
 
 
@@ -163,9 +174,22 @@ def score_articles(
                 label=_label(compound),
                 source=art.source,
                 published_at=art.published_at,
+                url=art.url,
+                retrieved_at=art.retrieved_at,
             )
         )
     return scored
+
+
+def _dedup_key(art: ArticleSentiment) -> str:
+    """Identity used for duplicate detection.
+
+    Wire stories are frequently re-published verbatim across aggregators, so we
+    key on the normalized URL when present, otherwise the normalized headline.
+    """
+    if art.url:
+        return "url:" + art.url.strip().lower().rstrip("/")
+    return "head:" + " ".join((art.headline or "").lower().split())
 
 
 def aggregate_ticker_sentiment(
@@ -174,26 +198,52 @@ def aggregate_ticker_sentiment(
     *,
     recency_halflife_days: float = 7.0,
     min_articles_for_confidence: int = 3,
+    confidence_full_article_count: int = 25,
+    confidence_full_source_count: int = 5,
+    stale_after_days: float = 14.0,
+    model_confidence_factor: float = 0.85,
+    model_name: str = "vader",
     now: Optional[datetime] = None,
 ) -> TickerSentiment:
     """Roll up article-level scores into a single TickerSentiment record.
 
     sentiment_score = 50 + 50 * recency_weighted_compound, clipped to [0,100].
-    confidence is in [0,1] and reflects article count + source diversity.
+
+    Confidence is in [0,1] and is deliberately hard to max out. It blends five
+    signals so a ticker can't look "certain" off a thin, stale, duplicated feed:
+
+      * article volume   -- UNIQUE articles vs ``confidence_full_article_count``
+      * source diversity -- distinct sources vs ``confidence_full_source_count``
+      * freshness        -- share of articles inside ``stale_after_days``
+      * de-duplication   -- share of articles that aren't repeats
+      * model quality    -- ``model_confidence_factor`` ceiling (lexicon < FinBERT)
+
+    The old model saturated at 3 articles from any source, so 10 near-identical
+    yfinance headlines scored 1.0. That is the bug this addresses.
     """
     if not scored:
-        return TickerSentiment(ticker=ticker, articles=[])
+        return TickerSentiment(ticker=ticker, model_name=model_name, articles=[])
 
     now = now or datetime.now(timezone.utc)
 
-    # Recency weights via exponential decay (older -> smaller).
+    # Mark duplicates (first occurrence kept, later repeats flagged) and stale
+    # articles, and stamp each article's age in days for downstream reporting.
+    seen: set = set()
     weights: List[float] = []
     for art in scored:
+        key = _dedup_key(art)
+        art.is_duplicate = key in seen
+        seen.add(key)
+
         published_at = _parse_iso(art.published_at) if art.published_at else None
         if published_at is None:
+            art.age_days = None
+            art.is_stale = False
             weights.append(0.5)  # neutral weight for undated articles
             continue
         age_days = max((now - published_at).total_seconds() / 86400.0, 0.0)
+        art.age_days = age_days
+        art.is_stale = age_days > stale_after_days
         # half-life decay: w = 0.5 ** (age / halflife)
         decay = math.pow(0.5, age_days / max(recency_halflife_days, 0.01))
         weights.append(decay)
@@ -207,12 +257,29 @@ def aggregate_ticker_sentiment(
     neu = sum(1 for a in scored if a.label == "neutral")
     n = len(scored)
 
-    sources = {a.source for a in scored if a.source}
+    unique = [a for a in scored if not a.is_duplicate]
+    unique_n = len(unique)
+    duplicate_count = n - unique_n
+    stale_count = sum(1 for a in scored if a.is_stale)
+    fresh_ratio = (n - stale_count) / n
+    unique_ratio = unique_n / n
+    # Diversity counts only the sources of NON-duplicate articles.
+    sources = {a.source for a in unique if a.source}
 
-    # Confidence: saturates with article count and source diversity.
-    article_factor = min(n / max(min_articles_for_confidence, 1), 1.0)
-    diversity_factor = min(len(sources) / 3.0, 1.0)
-    confidence = 0.5 * article_factor + 0.5 * diversity_factor
+    # --- Confidence: a weighted blend, capped by model quality. -------------
+    article_factor = min(unique_n / max(confidence_full_article_count, 1), 1.0)
+    diversity_factor = min(len(sources) / max(confidence_full_source_count, 1), 1.0)
+    raw_confidence = (
+        0.40 * article_factor
+        + 0.25 * diversity_factor
+        + 0.20 * fresh_ratio
+        + 0.15 * unique_ratio
+    )
+    # Below the minimum article floor, damp confidence proportionally so a
+    # single article can never look like a trustworthy consensus.
+    if unique_n < min_articles_for_confidence:
+        raw_confidence *= unique_n / max(min_articles_for_confidence, 1)
+    confidence = max(0.0, min(1.0, raw_confidence * model_confidence_factor))
 
     sentiment_0_100 = max(0.0, min(100.0, 50.0 + 50.0 * recency_weighted))
 
@@ -222,11 +289,17 @@ def aggregate_ticker_sentiment(
         average_compound=avg_compound,
         recency_weighted_compound=recency_weighted,
         article_count=n,
+        unique_article_count=unique_n,
+        duplicate_count=duplicate_count,
+        stale_count=stale_count,
+        fresh_ratio=fresh_ratio,
+        unique_ratio=unique_ratio,
         positive_ratio=pos / n,
         negative_ratio=neg / n,
         neutral_ratio=neu / n,
         source_diversity=len(sources),
         confidence=confidence,
+        model_name=model_name,
         articles=list(scored),
     )
 

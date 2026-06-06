@@ -492,11 +492,18 @@ def _stage4_sentiment(
     stats = StageStats(name="4_sentiment")
     stats.input_count = len(df)
 
+    scfg = config.sentiment
+    model_factor = (
+        scfg.finbert_confidence_factor
+        if scfg.model == "finbert"
+        else scfg.vader_confidence_factor
+    )
+
     sentiment_rows: List[Dict[str, Any]] = []
     iterator = _progress(df["ticker"].tolist(), desc="Stage 4: news+sentiment")
     for ticker in iterator:
         try:
-            articles = news_provider.fetch(ticker, max_age_days=config.sentiment.max_age_days)
+            articles = news_provider.fetch(ticker, max_age_days=scfg.max_age_days)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Stage 4 news fetch raised for %s: %s", ticker, exc)
             articles = []
@@ -506,18 +513,30 @@ def _stage4_sentiment(
         agg = aggregate_ticker_sentiment(
             ticker,
             scored,
-            recency_halflife_days=config.sentiment.recency_halflife_days,
-            min_articles_for_confidence=config.sentiment.min_articles_for_confidence,
+            recency_halflife_days=scfg.recency_halflife_days,
+            min_articles_for_confidence=scfg.min_articles_for_confidence,
+            confidence_full_article_count=scfg.confidence_full_article_count,
+            confidence_full_source_count=scfg.confidence_full_source_count,
+            stale_after_days=scfg.stale_after_days,
+            model_confidence_factor=model_factor,
+            model_name=scfg.model,
         )
         sentiment_rows.append({
             "ticker": ticker,
             "sentiment_score": agg.sentiment_score,
             "article_count": agg.article_count,
+            "unique_article_count": agg.unique_article_count,
+            "duplicate_count": agg.duplicate_count,
+            "stale_count": agg.stale_count,
+            "fresh_ratio": agg.fresh_ratio,
+            "unique_ratio": agg.unique_ratio,
             "positive_ratio": agg.positive_ratio,
             "negative_ratio": agg.negative_ratio,
             "neutral_ratio": agg.neutral_ratio,
             "source_diversity": agg.source_diversity,
             "sentiment_confidence": agg.confidence,
+            "sentiment_model": agg.model_name,
+            "news_titles": [a.headline for a in agg.articles[:10]],
         })
 
     sentiment_df = pd.DataFrame(sentiment_rows)
@@ -526,6 +545,19 @@ def _stage4_sentiment(
     # Default fills for tickers that came back with nothing.
     merged["sentiment_score"] = merged["sentiment_score"].fillna(50.0)
     merged["article_count"] = merged["article_count"].fillna(0).astype(int)
+    for col, default in (
+        ("unique_article_count", 0),
+        ("duplicate_count", 0),
+        ("stale_count", 0),
+        ("source_diversity", 0),
+    ):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(default).astype(int)
+    for col, default in (("fresh_ratio", 0.0), ("unique_ratio", 0.0)):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(default)
+    if "sentiment_confidence" in merged.columns:
+        merged["sentiment_confidence"] = merged["sentiment_confidence"].fillna(0.0)
 
     stats.output_count = len(merged)
     stats.duration_seconds = time.perf_counter() - started
@@ -816,10 +848,16 @@ def _build_summary(
             "volatility_pct": _safe_num(row.get("volatility_pct")),
             "sentiment_score": _safe_num(row.get("sentiment_score")),
             "sentiment_article_count": int(row.get("article_count", 0) or 0),
+            "sentiment_unique_article_count": int(row.get("unique_article_count", 0) or 0),
+            "sentiment_duplicate_count": int(row.get("duplicate_count", 0) or 0),
+            "sentiment_stale_count": int(row.get("stale_count", 0) or 0),
+            "sentiment_fresh_ratio": _safe_num(row.get("fresh_ratio")),
+            "sentiment_unique_ratio": _safe_num(row.get("unique_ratio")),
             "sentiment_positive_ratio": _safe_num(row.get("positive_ratio")),
             "sentiment_negative_ratio": _safe_num(row.get("negative_ratio")),
             "sentiment_confidence": _safe_num(row.get("sentiment_confidence")),
             "sentiment_source_diversity": int(row.get("source_diversity", 0) or 0),
+            "sentiment_model": row.get("sentiment_model") or config.sentiment.model,
             "fundamentals_score": _safe_num(row.get("fundamentals_score")),
             "growth_score": _safe_num(row.get("growth_score")),
             "quality_score": _safe_num(row.get("quality_score")),

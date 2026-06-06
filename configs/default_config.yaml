@@ -98,6 +98,19 @@ sentiment:
   min_articles_for_confidence: 3
   # Confidence below this fires the LOW_SENTIMENT_CONFIDENCE flag (0..1).
   low_confidence_threshold: 0.3
+  # Confidence model (see SentimentConfig). The old model saturated at 3
+  # articles, so the common yfinance case (10 near-duplicate headlines from a
+  # single wire) reported confidence 1.0. The new model needs many UNIQUE
+  # articles from DIVERSE sources, recent and de-duplicated, to approach 1.0.
+  # Unique articles needed to saturate the count factor (10 != full confidence).
+  confidence_full_article_count: 25
+  # Distinct sources needed to saturate the diversity factor.
+  confidence_full_source_count: 5
+  # Articles older than this (days) count as "stale" and lower confidence.
+  stale_after_days: 14
+  # Per-model confidence ceilings: a lexicon model can't be as sure as FinBERT.
+  vader_confidence_factor: 0.85
+  finbert_confidence_factor: 1.0
 
 scoring:
   # Winsorize each metric at these percentiles before z-scoring.
