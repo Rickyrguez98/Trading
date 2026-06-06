@@ -91,3 +91,23 @@ def test_score_fundamentals_orders_high_quality_first():
     s = scores.set_index("ticker")
     # A (great growth + margins + cheap) should outscore C (negatives across the board).
     assert s.loc["A", "fundamentals_score"] > s.loc["C", "fundamentals_score"]
+
+
+def test_score_fundamentals_adds_explainability_columns():
+    cfg = load_config("configs/default_config.yaml").scoring
+    scores = score_fundamentals(_records(), cfg)
+    s = scores.set_index("ticker")
+    for col in (
+        "strongest_metric", "weakest_metric",
+        "market_cap_available", "valuation_metrics_available",
+    ):
+        assert col in s.columns
+    # A and D disclose market cap and all 5 valuation ratios.
+    assert bool(s.loc["A", "market_cap_available"]) is True
+    assert int(s.loc["A", "valuation_metrics_available"]) == 5
+    # C is missing pe/forward_pe/peg -> fewer valuation ratios available.
+    assert int(s.loc["C", "valuation_metrics_available"]) < 5
+    # The fully-disclosed strong name should name a real strongest metric.
+    assert isinstance(s.loc["A", "strongest_metric"], str)
+    # The empty ticker E has no metrics -> strongest/weakest are None.
+    assert s.loc["E", "strongest_metric"] is None
