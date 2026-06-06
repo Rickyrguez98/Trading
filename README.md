@@ -41,11 +41,11 @@ the current pipeline does **not** depend on.
 
 | Layer         | Default source                              | Limitations                                                                 |
 |---------------|---------------------------------------------|-----------------------------------------------------------------------------|
-| Tickers       | NASDAQ Trader FTP (`nasdaqlisted`, `otherlisted`) | Includes ETFs/warrants/units — filtered out in code.                         |
-| Fundamentals  | `yfinance` (Yahoo Finance, unofficial)      | Unofficial API; rate-limited; some fields are best-effort; no SLA.           |
+| Tickers       | NASDAQ Trader FTP (`nasdaqlisted`, `otherlisted`) | Includes ETFs/warrants/units/preferreds/rights/notes and When-Issued lines — all filtered out by default in code. Class shares (e.g. `BRK.B`) are kept and mapped to the provider's notation (`BRK-B`). |
+| Fundamentals  | `yfinance` (Yahoo Finance, unofficial)      | Unofficial API; rate-limited; some fields are best-effort; no SLA. Empty responses are recorded as `status="empty"`, not silently treated as illiquidity. |
 | Prices        | `yfinance`                                  | Same as above. Use for liquidity filters, not for execution decisions.      |
-| News          | `yfinance` news endpoint                    | Limited per-ticker recency and breadth. Replaceable provider.               |
-| Sentiment     | VADER (lexicon-based)                       | General-purpose lexicon; **not** finance-tuned. FinBERT is plug-compatible. |
+| News          | `yfinance` news endpoint                    | Caps at ~10 articles/ticker from a narrow set of sources. Duplicates and stale items are detected and down-weighted; breadth is still limited. Replaceable provider. |
+| Sentiment     | VADER (lexicon-based)                       | General-purpose lexicon; **not** finance-tuned. Confidence is capped below FinBERT's. FinBERT is plug-compatible (`pip install '.[finbert]'`). |
 
 All providers implement a common interface so paid or alternative sources
 (Finnhub, AlphaVantage, FMP, NewsAPI, MarketAux, SEC EDGAR direct, FinBERT)
@@ -56,16 +56,54 @@ can be swapped in without changing the pipeline. See
 
 ## Installation
 
+Python **3.9+** is required. The default pipeline needs **no API keys** —
+everything runs on free/public endpoints.
+
+### 1. Clone
+
 ```bash
-# Clone, then from the repo root:
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e ".[dev]"          # or: pip install -r requirements.txt
-cp .env.example .env             # optional, only if you plan to add API keys
+git clone https://github.com/Rickyrguez98/Trading.git
+cd Trading
 ```
 
-Python 3.9+ is required.
+### 2. Create and activate a virtual environment
+
+**macOS / Linux (bash/zsh):**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows (PowerShell):**
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+**Windows (cmd.exe):**
+
+```bat
+py -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+### 3. Install
+
+```bash
+pip install --upgrade pip
+pip install -e ".[dev]"          # editable install + dev/test extras
+# or, minimal runtime only:        pip install -r requirements.txt
+cp .env.example .env             # optional, only if you later add API keys
+```
+
+The editable install (`-e`) puts the `asset_selection` package on your path.
+If you prefer not to install, prefix commands with `PYTHONPATH=src`.
+
+> **Note on `tabulate`.** The Markdown reports use pandas' `.to_markdown()`,
+> which needs `tabulate`. It is included in the dev extras; if you used the
+> minimal install and see a tabulate error, run `pip install tabulate`.
 
 ## Configuration
 
@@ -106,12 +144,15 @@ checks — typically completes in 1–2 minutes.
 
 ```bash
 python -m asset_selection.pipelines.run_asset_selection \
-    --tickers AAPL MSFT GOOGL NVDA --top 4
+    --tickers AAPL MSFT GOOGL NVDA BRK.B BF.B --top 6
 ```
 
 `--tickers` implies `--universe custom`. Stage 1 is short-circuited;
 the funnel still runs prices → fundamentals → news → composite over
-exactly the tickers you named.
+exactly the tickers you named. Class shares can be written in dot
+notation (`BRK.B`, `BF.B`); the provider layer maps them to yfinance's
+hyphen notation (`BRK-B`, `BF-B`) internally while keeping the canonical
+ticker unchanged in the output.
 
 ### All flags
 
@@ -132,8 +173,9 @@ After it finishes, look at:
 - `data/processed/universe_clean.csv` — the cleaned stage-1 universe.
 - `data/processed/asset_selection_results.csv` — full ranking with all metrics.
 - `reports/top_candidates.md` — human-readable top-N report.
-- `reports/asset_selection_summary.json` — machine-readable run summary, including stages and exchange breakdown.
+- `reports/asset_selection_summary.json` — machine-readable run summary, including stages, provider failures, and exchange breakdown.
 - `reports/universe_summary.json` — universe-only report (stage stats + exchange counts), produced even when the pipeline aborts.
+- `reports/output_validation.md` / `reports/output_validation.json` — a post-run self-audit of the produced candidates (see [Output validation](#output-validation) below).
 
 ## Universe and staged filtering
 
@@ -153,8 +195,12 @@ exchange**:
 | BATS / Cboe    | mostly ETFs |
 | IEX            | small handful |
 
-After the cleaner removes ETFs / warrants / units / preferreds / rights
-/ test issues, you typically end up with **~4 700 common stocks**.
+After the cleaner removes ETFs / funds / warrants / units / preferreds /
+rights / notes / test issues **and When-Issued (WI) lines** (e.g. the
+temporary `SNDK`/`CEG` when-issued tickers, whose short price history is not
+comparable to seasoned common stock), you typically end up with **~4 700
+common stocks**. Every removal is attributed to a reason and counted in
+`reports/universe_summary.json`.
 
 You can narrow this with `universe.exchanges` in the YAML — empty (the
 default) keeps all of them; `[NASDAQ, NYSE]` keeps just those two.
@@ -164,9 +210,9 @@ Aliases are recognised: `AMEX` ≡ `NYSE American`, `ARCA` ≡ `NYSE Arca`,
 You can also flip per-asset-type include knobs
 (`universe.include_etfs`, `include_funds`, `include_warrants`,
 `include_units`, `include_preferred`, `include_rights`,
-`include_test_issues`, `include_notes`) — all default to `false`
-(exclude). Legacy `exclude_*` keys are honoured for backward
-compatibility.
+`include_test_issues`, `include_notes`, `include_when_issued`) — all
+default to `false` (exclude). Legacy `exclude_*` keys are honoured for
+backward compatibility.
 
 ### Why a staged funnel
 
@@ -233,8 +279,20 @@ The code is the ultimate authority; this is the explained-to-a-human view.
   - **recency-weighted compound** via an exponential half-life
     (`sentiment.recency_halflife_days`),
   - **positive / negative / neutral ratios**,
-  - **source diversity** (distinct publishers),
-  - a **confidence** proxy that grows with article count and source diversity.
+  - **source diversity** (distinct publishers of *unique* articles),
+  - **duplicate and stale accounting** — repeated wire stories (same URL or
+    headline) are flagged as duplicates; articles older than
+    `sentiment.stale_after_days` are flagged stale,
+  - a **confidence** in `[0, 1]` that is deliberately hard to max out.
+- **Confidence is a five-factor blend**, not a count that saturates at three
+  articles. It rewards *unique* article volume
+  (`sentiment.confidence_full_article_count`, default 25), *source diversity*
+  (`sentiment.confidence_full_source_count`, default 5), *freshness*, and
+  *de-duplication*, then caps the result by model quality
+  (`vader_confidence_factor` 0.85 < `finbert_confidence_factor` 1.0). The
+  common case of ten near-identical yfinance headlines from one source now
+  scores ≈ **0.48**, not 1.0 — sentiment can no longer look certain off a thin,
+  single-source feed.
 - The aggregated `sentiment_score` enters the composite at
   `composite.weights.sentiment` (default **0.15** — intentionally smaller
   than fundamentals). Low confidence below
@@ -297,17 +355,41 @@ fundamentals + pillar weights dominate sentiment (asserted by the test
 is clipped to `[0, 100]` and ties break by `fundamentals_score` then
 `sentiment_score`.
 
-### 5. Flags
+### 5. Risk controls and selection buckets
+
+Volatile and speculative names are **labeled, never silently dropped**, so a
+steady compounder is visibly separated from a 100 %-volatility momentum name.
+Thresholds live under `risk_controls` in the YAML (volatility values are
+annualized fractions, `0.80` = 80 %):
+
+- `HIGH_VOLATILITY` fires when annualized volatility exceeds
+  `risk_controls.max_volatility_pct` (default 0.80).
+- `SPECULATIVE_MOMENTUM` fires when a big run-up rides a very noisy tape —
+  return ≥ `speculative_return_pct` **and** volatility ≥
+  `speculative_volatility_pct`.
+
+Every ranked row also gets a `selection_bucket`, assigned by priority:
+
+| Bucket | Meaning |
+|--------|---------|
+| `speculative_candidate`        | High volatility, speculative momentum/hype, or a high risk penalty. Labeled, not removed. |
+| `watchlist_only`               | Weak trend, thin/poor fundamentals, or missing market cap; needs more review before sizing. |
+| `high_quality_core_candidate`  | Strong fundamentals (≥ `core_min_fundamentals`), contained volatility, low risk penalty, non-negative trend. |
+| `growth_candidate`             | Decent fundamentals with elevated — but not extreme — volatility. |
+
+### 6. Flags
 
 | Flag                                 | Meaning |
 |--------------------------------------|---------|
 | `SPECULATIVE_HYPE`                   | Strong sentiment but weak fundamentals — treat with caution. |
 | `STRONG_FUNDAMENTALS_BAD_SENTIMENT`  | Quality business with bad recent news — worth a closer look, not an auto-reject. |
 | `NO_NEWS`                            | No recent articles available; sentiment defaulted to neutral. |
-| `LOW_SENTIMENT_CONFIDENCE`           | Some news, but few articles or low source diversity. |
+| `LOW_SENTIMENT_CONFIDENCE`           | Some news, but few unique articles, low diversity, stale, or duplicated. |
 | `WEAK_PRICE_TREND`                   | Recent return below the configured weak-return threshold. |
 | `THIN_FUNDAMENTALS`                  | 5+ tracked fundamental fields missing. |
 | `MISSING_MARKET_CAP`                 | Couldn't read market cap; size/liquidity filters degraded. |
+| `HIGH_VOLATILITY`                    | Annualized volatility above `risk_controls.max_volatility_pct`. |
+| `SPECULATIVE_MOMENTUM`               | Large run-up on a very noisy tape; reward may be chasing risk. |
 
 ## How to interpret the output
 
@@ -317,11 +399,20 @@ pillar so you can see *why* a ticker ranked where it did:
 - `fundamentals_score` — blended pillar score [0, 100].
 - `growth_score`, `quality_score`, `valuation_score`, `balance_sheet_score`,
   `cash_flow_score` — pillar sub-scores.
-- `sentiment_score`, `article_count`, `sentiment_confidence`,
-  `positive_ratio`, `negative_ratio`, `source_diversity` — sentiment block.
+- `strongest_metric` / `weakest_metric` (+ their `_score`) — the single best
+  and worst individual metric behind the fundamentals score, so you can see
+  *what* drove it rather than trusting an opaque number.
+- `market_cap_available`, `valuation_metrics_available` — fundamentals
+  data-coverage flags (how many of the 5 valuation ratios were present).
+- `sentiment_score`, `article_count`, `unique_article_count`,
+  `duplicate_count`, `stale_count`, `fresh_ratio`, `unique_ratio`,
+  `sentiment_confidence`, `positive_ratio`, `negative_ratio`,
+  `source_diversity`, `sentiment_model` — sentiment block.
 - `last_close`, `return_pct`, `volatility_pct`, `avg_dollar_volume`,
   `market_cap` — price / liquidity block.
 - `risk_penalty` — combined liquidity / momentum / vol / missing-data hit.
+- `selection_bucket` — core / growth / speculative / watchlist label
+  (see [Risk controls and selection buckets](#5-risk-controls-and-selection-buckets)).
 - `top_driver_pillar` / `top_drag_pillar` — the pillar that most lifted /
   hurt the score above / below neutral 50.
 - `final_score` — weighted composite (see config).
@@ -331,6 +422,50 @@ pillar so you can see *why* a ticker ranked where it did:
   data was unavailable.
 
 **A high final score is a starting point for research, not a recommendation.**
+
+## Output validation
+
+After ranking, the pipeline re-audits its own output the way a skeptical
+reviewer would and writes `reports/output_validation.md` (plus a `.json`
+twin). **Nothing here drops rows — it only reports.** Each check is `ok` or
+`warn`; a warning means "look closer," not "this was removed." The checks:
+
+| Check | What it catches |
+|-------|-----------------|
+| `excluded_security_types_in_results` | An ETF / warrant / unit / preferred / rights / note / when-issued line that leaked past universe cleaning. |
+| `provider_failures`                  | How many provider calls errored or returned empty, by reason — so a run isn't trusted just because it finished. |
+| `stale_news`                         | Candidates whose sentiment leans on aging coverage. |
+| `extreme_volatility`                 | Names above the volatility ceiling (labeled, not removed). |
+| `missing_market_cap`                 | Names with degraded size/liquidity filtering. |
+| `overestimated_sentiment_confidence` | Confidence ≥ 0.80 on a thin or single-source feed. |
+| `single_pillar_dominance`            | A fundamentals score carried by one pillar while the others are weak. |
+
+This is the honesty layer: it makes data gaps and quality caveats explicit
+instead of letting a green "pipeline completed" message imply the results are
+clean.
+
+## Relevance to future portfolio rebalancing
+
+This milestone deliberately stops at **selection** — producing a transparent,
+explainable ranked shortlist — and does **not** size positions. But the output
+is designed to feed a future allocation / rebalancing milestone:
+
+- **`selection_bucket`** gives an allocator ready-made risk tiers. A future
+  rebalancer can cap or scale exposure per bucket (e.g. core gets full weight,
+  speculative is capped, watchlist is excluded until reviewed) instead of
+  blindly weighting by score.
+- **`risk_penalty`, `volatility_pct`, `return_pct`** are the raw inputs a
+  risk-aware weighting scheme (risk parity, vol targeting) would consume.
+- **`final_score` and the pillar sub-scores** can drive a score-tilted weight,
+  while **`sentiment_confidence` and the data-coverage fields** let an
+  allocator *discount* names whose signal is thin or poorly disclosed.
+- **The validation report** gives a rebalancer a pre-trade gate: refuse to size
+  a name that tripped `excluded_security_types_in_results` or
+  `missing_market_cap`.
+
+The placeholder packages `src/asset_selection/{allocation,backtesting,risk}/`
+mark where that work will live. They are **not** wired into the current
+pipeline — see [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md).
 
 ---
 
@@ -351,6 +486,7 @@ pillar so you can see *why* a ticker ranked where it did:
 │   ├── sentiment/
 │   ├── fundamentals/
 │   ├── scoring/
+│   ├── validation/          # post-run output self-audit
 │   ├── pipelines/run_asset_selection.py
 │   ├── utils/
 │   ├── allocation/        # future milestone — placeholder
