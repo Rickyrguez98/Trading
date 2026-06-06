@@ -431,3 +431,89 @@ def test_custom_mode_uses_provided_tickers(temp_workdir: Path):
     js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
     assert js["mode"] == "custom"
     assert {c["ticker"] for c in js["candidates"]} == {"NVDA", "AMD"}
+
+
+# ---------------------------------------------------------------------------
+# Output-quality fields + post-run validation report (audit fixes)
+# ---------------------------------------------------------------------------
+
+def test_pipeline_emits_quality_fields_and_validation_report(temp_workdir: Path):
+    """Every candidate must carry the new selection_bucket, richer sentiment
+    accounting, and fundamentals explainability fields; the run must also emit
+    reports/output_validation.{json,md}."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
+         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "AAPL", "MSFT", "GOOGL",
+            "--top", "3", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    new_fields = {
+        "selection_bucket",
+        "sentiment_unique_article_count", "sentiment_duplicate_count",
+        "sentiment_stale_count", "sentiment_fresh_ratio", "sentiment_unique_ratio",
+        "strongest_metric", "weakest_metric",
+        "market_cap_available", "valuation_metrics_available",
+    }
+    for c in js["candidates"]:
+        missing = new_fields - set(c.keys())
+        assert not missing, f"{c['ticker']} missing new quality fields: {missing}"
+        assert c["selection_bucket"], f"{c['ticker']} has empty selection_bucket"
+
+    # AAPL had two distinct articles from two sources -> not full confidence.
+    by_ticker = {c["ticker"]: c for c in js["candidates"]}
+    assert by_ticker["AAPL"]["sentiment_confidence"] < 1.0
+
+    # The validation report must be written and parseable.
+    val_json = temp_workdir / "reports" / "output_validation.json"
+    val_md = temp_workdir / "reports" / "output_validation.md"
+    assert val_json.exists() and val_md.exists()
+    report = json.loads(val_json.read_text())
+    assert report["overall_status"] in {"ok", "warn"}
+    check_names = {c["name"] for c in report["checks"]}
+    assert "excluded_security_types_in_results" in check_names
+    assert "overestimated_sentiment_confidence" in check_names
+
+
+def test_custom_mode_preserves_class_share_ticker(temp_workdir: Path):
+    """A class share written in dot notation (BRK.B) must survive the pipeline
+    with its canonical spelling intact in the output -- the dot->hyphen mapping
+    is a provider-call detail, not a mutation of the canonical ticker."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    class _ClassShareFund:
+        def __init__(self, **k): pass
+        def fetch(self, ticker):
+            # The pipeline passes the canonical ticker through; a real provider
+            # would map BRK.B -> BRK-B internally. Echo the canonical spelling.
+            return Fundamentals(
+                ticker=ticker, company_name=f"{ticker} Holdings",
+                market_cap=8e11, sector="Financials",
+                revenue_growth=0.1, earnings_growth=0.1, fcf_growth=0.1,
+                roe=0.15, roa=0.08, operating_margin=0.25, net_margin=0.18,
+                debt_to_equity=30.0, current_ratio=1.4,
+                free_cash_flow_yield=0.03, operating_cash_flow_margin=0.2,
+                pe_ratio=22.0, forward_pe=20.0, peg_ratio=1.6,
+                price_to_sales=4.0, price_to_book=1.5, source="mock",
+            )
+
+    with patch.object(r, "get_fundamentals_provider", return_value=_ClassShareFund), \
+         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
+         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "AAPL", "BRK.B", "BF.B",
+            "--top", "3", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    tickers = {c["ticker"] for c in js["candidates"]}
+    assert "BRK.B" in tickers and "BF.B" in tickers, (
+        f"Class-share canonical spelling was lost: {tickers}"
+    )
