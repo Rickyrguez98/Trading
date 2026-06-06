@@ -43,7 +43,16 @@ gaps; we document them rather than paper over them.
 - Used only for liquidity filters (avg dollar volume), recent return, and a
   vol proxy. **Not** used for execution decisions in this milestone.
 
-### Alternative
+### Backup (implemented): Stooq
+- Keyless CSV download (`https://stooq.com/q/d/l/`). Registered as the `stooq`
+  prices provider and used as a live fallback when yfinance fails — enable with
+  `--provider prices=yfinance,stooq` or
+  `robustness.provider_priority_by_data_type.prices: [yfinance, stooq]`.
+- Daily OHLCV only; class shares use the same dot→hyphen normalization as
+  yfinance (`BRK.B` → `BRK-B`). Coverage is U.S.-broad but not guaranteed for
+  every micro-cap.
+
+### Alternative (future stub)
 - **Alpha Vantage** TIME_SERIES_DAILY_ADJUSTED — keyed, rate-limited.
 
 ## News

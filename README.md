@@ -43,8 +43,8 @@ the current pipeline does **not** depend on.
 |---------------|---------------------------------------------|-----------------------------------------------------------------------------|
 | Tickers       | NASDAQ Trader FTP (`nasdaqlisted`, `otherlisted`) | Includes ETFs/warrants/units/preferreds/rights/notes and When-Issued lines — all filtered out by default in code. Class shares (e.g. `BRK.B`) are kept and mapped to the provider's notation (`BRK-B`). |
 | Fundamentals  | `yfinance` (Yahoo Finance, unofficial)      | Unofficial API; rate-limited; some fields are best-effort; no SLA. Empty responses are recorded as `status="empty"`, not silently treated as illiquidity. |
-| Prices        | `yfinance`                                  | Same as above. Use for liquidity filters, not for execution decisions.      |
-| News          | `yfinance` news endpoint                    | Caps at ~10 articles/ticker from a narrow set of sources. Duplicates and stale items are detected and down-weighted; breadth is still limited. Replaceable provider. |
+| Prices        | `yfinance`, with a **Stooq** CSV backup     | yfinance is unofficial/rate-limited; Stooq is a keyless fallback that fires when yfinance fails. Used for liquidity filters, not for execution decisions. |
+| News          | `yfinance` news endpoint                    | Caps at ~10 articles/ticker from a narrow set of sources. Duplicates and stale items are detected and down-weighted; breadth is still limited. Replaceable provider. **A news outage never invalidates a ranking** — it only lowers sentiment confidence. |
 | Sentiment     | VADER (lexicon-based)                       | General-purpose lexicon; **not** finance-tuned. Confidence is capped below FinBERT's. FinBERT is plug-compatible (`pip install '.[finbert]'`). |
 
 All providers implement a common interface so paid or alternative sources
@@ -167,13 +167,21 @@ ticker unchanged in the output.
 | `--no-cache`                         | Disable cache entirely for this run. |
 | `--output-dir PATH`                  | Override the default `reports/` directory. |
 | `--log-level LEVEL`                  | DEBUG / INFO / WARNING / ERROR. |
+| `--health-check-only`                | Probe the providers against benchmark mega-caps (AAPL, MSFT, GOOGL, NVDA, BRK.B), write `reports/provider_health.json`, and exit **without** running the pipeline. Exit `2` on a systemic failure. |
+| `--no-provider-health-check`         | Skip the pre-run benchmark health probe (it runs by default so a provider outage is caught before a misleading ranking). |
+| `--allow-partial-ranking` / `--no-partial-ranking` | Present a degraded-but-usable run as a `PARTIAL` ranking (default) vs. refuse and emit a diagnostic-only result (exit `2`). |
+| `--use-cache-on-provider-failure`    | Backup Plan C: when every live provider fails for a ticker, serve a fresh-enough cached record labeled `stale_cache` instead of reporting no data. Off by default. |
+| `--max-cache-age-days N`             | Max age of a cache entry allowed to back a failed live fetch under the flag above (default: `robustness.max_cache_age_days`, 7). |
+| `--provider TYPE=NAME[,NAME...]`     | Override the provider(s) per data type, e.g. `--provider prices=yfinance,stooq`. A comma list sets the fallback order (first = primary). Types: `prices`, `fundamentals`, `news`. |
 
 After it finishes, look at:
 
 - `data/processed/universe_clean.csv` — the cleaned stage-1 universe.
 - `data/processed/asset_selection_results.csv` — full ranking with all metrics.
-- `reports/top_candidates.md` — human-readable top-N report.
-- `reports/asset_selection_summary.json` — machine-readable run summary, including stages, provider failures, and exchange breakdown.
+- `reports/top_candidates.md` — human-readable top-N report, **prefixed with a run-status banner** so the table can never be read without its validity caveat.
+- `reports/asset_selection_summary.json` — machine-readable run summary, including `run_status`, `ranking_validity`, stages, provider failures, coverage, fallback usage, cache provenance, and exchange breakdown.
+- `reports/provider_diagnostics.md` / `reports/provider_diagnostics.json` — the single artifact that answers "can I trust today's ranking, and if not, why?" (see [Run status and provider reliability](#run-status-and-provider-reliability)).
+- `reports/provider_health.json` — benchmark mega-cap health probe (also the only output of `--health-check-only`).
 - `reports/universe_summary.json` — universe-only report (stage stats + exchange counts), produced even when the pipeline aborts.
 - `reports/output_validation.md` / `reports/output_validation.json` — a post-run self-audit of the produced candidates (see [Output validation](#output-validation) below).
 
@@ -423,6 +431,98 @@ pillar so you can see *why* a ticker ranked where it did:
 
 **A high final score is a starting point for research, not a recommendation.**
 
+## Run status and provider reliability
+
+A pipeline that "finished" is not the same as a pipeline you can trust. Free,
+unofficial data sources fail in bulk — Yahoo can rate-limit or block an entire
+run and return HTML instead of JSON for *every* ticker, including mega-caps.
+The reliability layer exists to **tell a partial ticker failure apart from a
+systemic provider outage**, continue when it safely can, and **refuse to dress
+up an outage as a clean ranking**.
+
+### Run status (the headline verdict)
+
+Every run resolves to one `run_status` (rolled up from a finer-grained
+`ranking_validity`). It is written to `asset_selection_summary.json`, printed as
+a banner atop `reports/top_candidates.md`, and explained in
+`reports/provider_diagnostics.md`.
+
+| `run_status` | `ranking_validity` | Trust it? | Exit | When |
+|--------------|--------------------|-----------|------|------|
+| **VALID**       | `VALID_RANKING`                 | Yes | `0` | All coverage thresholds met. |
+| **PARTIAL**     | `PARTIAL_RANKING_WITH_WARNINGS` | With caution | `0` | Coverage degraded but usable; read the warnings. Requires `--allow-partial-ranking` (the default). |
+| **DIAGNOSTIC**  | `DIAGNOSTIC_ONLY`               | **No** | `2` | Coverage too degraded to rank, or a systemic outage with `stop_on_systemic_provider_failure: false`. The table is diagnostics, not a ranking. |
+| **INVALID**     | `INVALID_PROVIDER_FAILURE` / `INVALID_INSUFFICIENT_DATA` | **No** | `2` | A benchmark systemic provider failure, or zero candidates with real fundamentals. No ranking is produced. |
+
+Hard pipeline errors (e.g. an empty universe) still exit `1`. A trusted run is
+exactly `VALID` or `PARTIAL`; `DIAGNOSTIC` and `INVALID` are never trusted.
+
+The verdict is derived from **data-coverage thresholds** under `robustness:` in
+the YAML — `min_price_coverage_ratio`, `min_fundamentals_coverage_ratio`,
+`min_news_coverage_ratio`, `max_provider_failure_ratio`,
+`min_valid_candidates_for_ranking`, `min_benchmark_price_health_ratio` — so what
+counts as "degraded" is configurable, not hard-coded.
+
+### Provider health checks (run first, by default)
+
+Before spending the API budget, the pipeline probes each provider against five
+benchmark mega-caps — **AAPL, MSFT, GOOGL, NVDA, BRK.B**. If price fetches for
+the bellwethers (AAPL/MSFT/GOOGL) all fail, that is a **systemic price
+failure**, not a ticker problem — the run is short-circuited to `INVALID` (or
+`DIAGNOSTIC`) and writes diagnostics instead of burning calls on an outage.
+Fundamentals are systemic only if *all* failures are provider-side; **news is
+never systemic** (a benchmark with no news is normal). Results land in
+`reports/provider_health.json`. Run the probe alone with `--health-check-only`.
+
+### Error taxonomy (honest failure reasons)
+
+Every non-usable provider response is classified, so the diagnostics can say
+*why* a fetch failed instead of lumping everything under "no data". Crucially,
+a rate-limit or an HTML-instead-of-JSON block is **provider-side** and counts
+toward the systemic-failure budget; a genuinely bad symbol is **not**.
+
+| Error type | Meaning | Provider-side? |
+|------------|---------|----------------|
+| `INVALID_TICKER`              | Malformed / not a real ticker. | No |
+| `UNSUPPORTED_PROVIDER_SYMBOL` | Provider can't express this symbol. | No |
+| `NO_PRICE_DATA`               | No price history (illiquid / new / uncovered). | No |
+| `NO_FUNDAMENTAL_DATA`         | No fundamentals returned. | No |
+| `NO_NEWS_DATA`                | No recent news (not a failure on its own). | No |
+| `POSSIBLY_DELISTED`           | No data after normalization; may be delisted. | No |
+| `PROVIDER_EMPTY_RESPONSE`     | Provider returned an empty payload. | Yes |
+| `PROVIDER_RATE_LIMITED`       | Provider rate-limited the request. | Yes |
+| `PROVIDER_TIMEOUT`            | Request timed out. | Yes |
+| `PROVIDER_BLOCKED`            | Auth/forbidden — provider blocked us. | Yes |
+| `PROVIDER_JSON_PARSE_ERROR`   | Got HTML/garbage instead of JSON (often blocked). | Yes |
+| `PROVIDER_HTTP_ERROR`         | Provider returned an HTTP error. | Yes |
+| `PROVIDER_UNKNOWN_ERROR`      | Unclassified provider error. | Yes |
+
+### Provider fallback and backup plans
+
+Each data type can be configured with an ordered chain of providers
+(`robustness.provider_priority_by_data_type` or `--provider TYPE=a,b`). When a
+fetch fails, the chain walks a four-step ladder:
+
+- **Plan A** — live primary provider (`data_source: live`).
+- **Plan B** — live secondary provider(s), e.g. **Stooq** for prices when
+  yfinance is blocked (`data_source: fallback`).
+- **Plan C** — a fresh-enough cached record, only with
+  `--use-cache-on-provider-failure`, bounded by `--max-cache-age-days`. It is
+  labeled `data_source: stale_cache` and **never passed off as live**.
+- **Plan D** — honest failure: the record is marked `unavailable` and counted.
+
+How often each rung fired is reported per data type in
+`fallback_usage_summary`, and per-record provenance is tallied in
+`cache_usage_summary` (`live` / `fallback` / `stale_cache` / `unavailable`).
+
+### `reports/provider_diagnostics.md`
+
+The one report to read when a run looks off. It consolidates, in plain
+language: the run-status verdict and *why*, the benchmark health check, the
+coverage ratios vs. their thresholds, the provider-failure breakdown by the
+taxonomy above, the fallback-chain usage, and cache provenance. It is terse on
+success and verbose on failure.
+
 ## Output validation
 
 After ranking, the pipeline re-audits its own output the way a skeptical
@@ -462,6 +562,11 @@ is designed to feed a future allocation / rebalancing milestone:
 - **The validation report** gives a rebalancer a pre-trade gate: refuse to size
   a name that tripped `excluded_security_types_in_results` or
   `missing_market_cap`.
+- **`run_status` / `ranking_validity`** is the coarsest gate of all: a future
+  rebalancer should only ever act on a `VALID` (or, with eyes open, `PARTIAL`)
+  run, and must skip rebalancing entirely on a `DIAGNOSTIC` / `INVALID` run
+  rather than trade on data produced during a provider outage. The `0` vs. `2`
+  exit code makes this enforceable from a cron/CI wrapper.
 
 The placeholder packages `src/asset_selection/{allocation,backtesting,risk}/`
 mark where that work will live. They are **not** wired into the current
@@ -486,7 +591,7 @@ pipeline — see [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md).
 │   ├── sentiment/
 │   ├── fundamentals/
 │   ├── scoring/
-│   ├── validation/          # post-run output self-audit
+│   ├── validation/          # coverage gating, run-status verdict, diagnostics, output self-audit
 │   ├── pipelines/run_asset_selection.py
 │   ├── utils/
 │   ├── allocation/        # future milestone — placeholder
