@@ -75,11 +75,15 @@ class Fundamentals:
     as_of: Optional[str] = None  # ISO timestamp from provider, if available
     source: Optional[str] = None
     missing_fields: List[str] = field(default_factory=list)
+    # Provenance / honesty fields (see PriceSnapshot for semantics).
+    provider_symbol: Optional[str] = None
+    status: str = "ok"
+    error: Optional[str] = None
 
 
 @dataclass
 class PriceSnapshot:
-    ticker: str
+    ticker: str                               # canonical symbol (e.g. BRK.B)
     last_close: Optional[float] = None
     avg_daily_volume: Optional[float] = None  # shares
     avg_dollar_volume: Optional[float] = None
@@ -87,6 +91,13 @@ class PriceSnapshot:
     volatility_pct: Optional[float] = None    # annualized stdev of daily returns
     lookback_days: Optional[int] = None
     source: Optional[str] = None
+    # Provenance / honesty fields. ``provider_symbol`` is what we actually sent
+    # to the provider (e.g. BRK-B). ``status`` is one of "ok" | "empty" |
+    # "error"; "empty" means the call succeeded but returned no usable data
+    # (NOT the same as a genuinely illiquid name that the filter later drops).
+    provider_symbol: Optional[str] = None
+    status: str = "ok"
+    error: Optional[str] = None
 
 
 @dataclass

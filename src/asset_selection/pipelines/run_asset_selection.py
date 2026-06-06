@@ -82,9 +82,27 @@ class StageStats:
     input_count: int = 0
     output_count: int = 0
     duration_seconds: float = 0.0
+    # ``provider_failures`` is the count of calls that did NOT return usable
+    # data (errors + empty responses). It is deliberately distinct from a
+    # genuine economic drop (e.g. a real but illiquid name): an illiquid ticker
+    # has status "ok" and is counted under ``dropped``, never here.
     provider_failures: int = 0
+    failure_reasons: Dict[str, int] = field(default_factory=dict)  # {"error": n, "empty": n}
+    failures: List[Dict[str, Any]] = field(default_factory=list)   # capped examples
     dropped: Dict[str, int] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+
+    def record_failure(self, ticker: str, provider_symbol: Optional[str],
+                       status: str, reason: Optional[str], cap: int = 50) -> None:
+        self.provider_failures += 1
+        self.failure_reasons[status] = self.failure_reasons.get(status, 0) + 1
+        if len(self.failures) < cap:
+            self.failures.append({
+                "ticker": ticker,
+                "provider_symbol": provider_symbol,
+                "status": status,
+                "reason": reason,
+            })
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -93,6 +111,8 @@ class StageStats:
             "output_count": self.output_count,
             "duration_seconds": round(self.duration_seconds, 2),
             "provider_failures": self.provider_failures,
+            "failure_reasons": dict(self.failure_reasons),
+            "failures": list(self.failures),
             "dropped": dict(self.dropped),
             "notes": list(self.notes),
         }
@@ -281,15 +301,25 @@ def _stage2_prices(
         try:
             snap = price_provider.fetch(ticker, lookback_days=config.prices.lookback_days)
         except Exception as exc:  # noqa: BLE001 - report-and-continue
-            logger.warning("Stage 2 price fetch failed for %s: %s", ticker, exc)
+            logger.warning("Stage 2 price fetch raised for %s: %s", ticker, exc)
             snap = PriceSnapshot(
                 ticker=ticker, lookback_days=config.prices.lookback_days,
-                source=config.providers.prices,
+                source=config.providers.prices, status="error",
+                error=f"{type(exc).__name__}: {exc}",
             )
-            stats.provider_failures += 1
         price_records[ticker] = snap
+        # Honest failure accounting: a non-"ok" status means the provider gave
+        # us no usable data. We record it here so it can never masquerade as a
+        # genuine "illiquid" drop below.
+        if getattr(snap, "status", "ok") != "ok":
+            stats.record_failure(
+                ticker, getattr(snap, "provider_symbol", None),
+                snap.status, snap.error,
+            )
         rows.append({
             "ticker": ticker,
+            "provider_symbol": getattr(snap, "provider_symbol", ticker),
+            "provider_status": getattr(snap, "status", "ok"),
             "last_close": snap.last_close,
             "avg_daily_volume": snap.avg_daily_volume,
             "avg_dollar_volume": snap.avg_dollar_volume,
@@ -299,7 +329,15 @@ def _stage2_prices(
 
     df = universe_df.merge(pd.DataFrame(rows), on="ticker", how="left")
 
-    # Liquidity filter.
+    # Separate provider no-data (error/empty) from genuine illiquidity. A
+    # ticker the provider couldn't serve is NOT evidence of illiquidity.
+    status_col = df.get("provider_status", pd.Series("ok", index=df.index)).fillna("ok")
+    no_data = status_col != "ok"
+    if int(no_data.sum()):
+        stats.dropped["no_provider_data"] = int(no_data.sum())
+    df = df.loc[~no_data].copy()
+
+    # Liquidity filter (only over names the provider actually priced).
     adv = pd.to_numeric(df["avg_dollar_volume"], errors="coerce")
     illiquid = adv.fillna(0) < config.prices.min_avg_dollar_volume
     stats.dropped["below_min_dollar_volume"] = int(illiquid.sum())
@@ -348,9 +386,18 @@ def _stage3_fundamentals(
         try:
             f = fund_provider.fetch(ticker)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Stage 3 fundamentals fetch failed for %s: %s", ticker, exc)
-            f = Fundamentals(ticker=ticker, source=config.providers.fundamentals)
-            stats.provider_failures += 1
+            logger.warning("Stage 3 fundamentals fetch raised for %s: %s", ticker, exc)
+            f = Fundamentals(
+                ticker=ticker, source=config.providers.fundamentals,
+                status="error", error=f"{type(exc).__name__}: {exc}",
+            )
+        if getattr(f, "status", "ok") != "ok":
+            # Fundamentals that came back empty/errored are still carried
+            # forward (missing data is penalized, not dropped) but we count the
+            # provider miss honestly so the summary can't claim zero failures.
+            stats.record_failure(
+                ticker, getattr(f, "provider_symbol", None), f.status, f.error,
+            )
         records.append(f)
 
     fund_scores = score_fundamentals(records, config.scoring)
@@ -441,9 +488,9 @@ def _stage4_sentiment(
         try:
             articles = news_provider.fetch(ticker, max_age_days=config.sentiment.max_age_days)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Stage 4 news fetch failed for %s: %s", ticker, exc)
+            logger.warning("Stage 4 news fetch raised for %s: %s", ticker, exc)
             articles = []
-            stats.provider_failures += 1
+            stats.record_failure(ticker, None, "error", f"{type(exc).__name__}: {exc}")
 
         scored = score_articles(articles, sentiment_model)
         agg = aggregate_ticker_sentiment(
@@ -673,6 +720,37 @@ def _progress(items: Iterable, desc: str):
         return items
 
 
+def _provider_failure_summary(stage_stats: List[StageStats]) -> Dict[str, Any]:
+    """Aggregate per-stage provider failures into one honest block.
+
+    Distinguishes ``error`` (the call raised) from ``empty`` (the call
+    succeeded but returned no usable data, e.g. an unsupported/delisted
+    symbol). A genuinely illiquid name is NOT counted here -- it has status
+    "ok" and lives in the stage's ``dropped`` block instead.
+    """
+    by_stage: Dict[str, Any] = {}
+    total = 0
+    total_reasons: Dict[str, int] = {}
+    examples: List[Dict[str, Any]] = []
+    for s in stage_stats:
+        if s.provider_failures:
+            by_stage[s.name] = {
+                "count": s.provider_failures,
+                "reasons": dict(s.failure_reasons),
+            }
+            total += s.provider_failures
+            for k, v in s.failure_reasons.items():
+                total_reasons[k] = total_reasons.get(k, 0) + v
+            for f in s.failures:
+                examples.append({"stage": s.name, **f})
+    return {
+        "total": total,
+        "by_reason": total_reasons,
+        "by_stage": by_stage,
+        "examples": examples[:100],
+    }
+
+
 def _write_universe_summary(
     config: AppConfig,
     mode: str,
@@ -683,6 +761,7 @@ def _write_universe_summary(
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "mode": mode,
         "exchange_breakdown": exchange_breakdown,
+        "provider_failures": _provider_failure_summary(stage_stats),
         "stages": [s.to_dict() for s in stage_stats],
     }
     output_dir = ensure_dir(config.run.output_dir)
@@ -704,6 +783,7 @@ def _build_summary(
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "mode": mode,
             "candidates": [],
+            "provider_failures": _provider_failure_summary(stage_stats),
             "stages": [s.to_dict() for s in stage_stats],
             "exchange_breakdown": exchange_breakdown,
             "total_runtime_seconds": round(total_runtime, 2),
@@ -757,6 +837,7 @@ def _build_summary(
         "sentiment_model": config.sentiment.model,
         "weights": config.composite.weights,
         "exchange_breakdown": exchange_breakdown,
+        "provider_failures": _provider_failure_summary(stage_stats),
         "stages": [s.to_dict() for s in stage_stats],
         "total_runtime_seconds": round(total_runtime, 2),
         "candidates": candidates,
