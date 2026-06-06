@@ -535,3 +535,87 @@ def test_custom_mode_preserves_class_share_ticker(temp_workdir: Path):
     assert "BRK.B" in tickers and "BF.B" in tickers, (
         f"Class-share canonical spelling was lost: {tickers}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Run-status / provider-reliability surfacing (robustness milestone)
+# ---------------------------------------------------------------------------
+
+def test_run_status_surfaced_in_summary_banner_and_diagnostics(temp_workdir: Path):
+    """A clean run must report run_status VALID in the JSON, prefix the Markdown
+    with a status banner, and emit provider_diagnostics.{json,md}."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "AAPL", "MSFT", "GOOGL",
+            "--top", "3", "--no-cache", "--log-level", "ERROR",
+        ])
+    assert rc == 0
+
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    assert js["run_status"] == "VALID"
+    assert js["ranking_validity"] == "VALID_RANKING"
+    # The new robustness summary blocks must all be present.
+    for key in (
+        "data_coverage_summary", "fallback_usage_summary",
+        "cache_usage_summary", "recommendations_for_next_run",
+    ):
+        assert key in js, f"summary missing {key}"
+
+    md = (temp_workdir / "reports" / "top_candidates.md").read_text()
+    assert "Run status: VALID" in md, "Markdown must be prefixed with a status banner."
+
+    diag_json = temp_workdir / "reports" / "provider_diagnostics.json"
+    diag_md = temp_workdir / "reports" / "provider_diagnostics.md"
+    assert diag_json.exists() and diag_md.exists()
+    diag = json.loads(diag_json.read_text())
+    assert diag["run_status"] == "VALID" and diag["is_trusted"] is True
+
+
+def test_systemic_price_outage_refuses_to_rank(temp_workdir: Path):
+    """If yfinance is blocked for the benchmark mega-caps (JSON-parse errors),
+    the pipeline must detect a SYSTEMIC failure, refuse to produce a ranking,
+    exit 2, and never call AAPL/MSFT 'invalid tickers'."""
+    from asset_selection.pipelines import run_asset_selection as r
+
+    class _BlockedPrices:
+        name = "yfinance"
+        def __init__(self, cache=None, rate_limiter=None):
+            pass
+        def fetch(self, ticker, lookback_days=90):
+            # The live-outage signature: HTML/garbage instead of JSON.
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_BlockedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
+        rc = r.main([
+            "--config", "configs/default_config.yaml",
+            "--tickers", "AAPL", "MSFT", "GOOGL",
+            "--top", "3", "--no-cache", "--log-level", "CRITICAL",
+        ])
+
+    # Systemic failure -> diagnostic-only, non-zero exit, no ranking.
+    assert rc == 2
+
+    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    assert js["run_status"] == "INVALID"
+    assert js["ranking_validity"] == "INVALID_PROVIDER_FAILURE"
+    assert js["candidates"] == []
+
+    # The health probe must blame the provider, not the tickers.
+    health = json.loads((temp_workdir / "reports" / "provider_health.json").read_text())
+    assert health["price_systemic_failure"] is True
+    price_errors = health["by_data_type"]["price"]["error_types"]
+    assert "PROVIDER_JSON_PARSE_ERROR" in price_errors
+    assert "INVALID_TICKER" not in price_errors
+
+    # The diagnostic report exists and is marked untrusted.
+    diag_md = (temp_workdir / "reports" / "provider_diagnostics.md").read_text()
+    assert "NOT A TRUSTED RANKING" in diag_md or "INVALID" in diag_md
+    top_md = (temp_workdir / "reports" / "top_candidates.md").read_text()
+    assert "No ranking produced" in top_md
