@@ -14,6 +14,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from ..utils.validation import coerce_float
 from .base import Fundamentals, FundamentalsProvider
+from .symbols import likely_no_data_reason, to_provider_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +73,11 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
     name = "yfinance"
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
-    def _fetch_info(self, ticker: str) -> Dict[str, Any]:
+    def _fetch_info(self, provider_symbol: str) -> Dict[str, Any]:
         import yfinance as yf
 
         self.rate_limiter.acquire()
-        tk = yf.Ticker(ticker)
+        tk = yf.Ticker(provider_symbol)
         # yfinance 0.2.40+ exposes .get_info(); older versions only have .info.
         try:
             info = tk.get_info()  # type: ignore[attr-defined]
@@ -86,18 +87,34 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
 
     def fetch(self, ticker: str) -> Fundamentals:
         ticker = ticker.strip().upper()
+        provider_symbol = to_provider_symbol(ticker, self.name)
 
-        cached = self._cache_get(ticker)
+        cache_id = provider_symbol
+        cached = self._cache_get(cache_id)
         if cached is not None:
+            cached.setdefault("provider_symbol", provider_symbol)
             return Fundamentals(**cached)
 
-        try:
-            info = self._fetch_info(ticker)
-        except Exception as exc:  # noqa: BLE001 - report-and-continue semantics
-            logger.warning("yfinance info fetch failed for %s: %s", ticker, exc)
-            info = {}
+        out = Fundamentals(
+            ticker=ticker, source=self.name, as_of=self._now_iso(),
+            provider_symbol=provider_symbol,
+        )
 
-        out = Fundamentals(ticker=ticker, source=self.name, as_of=self._now_iso())
+        try:
+            info = self._fetch_info(provider_symbol)
+        except Exception as exc:  # noqa: BLE001 - report-and-continue semantics
+            logger.warning(
+                "yfinance info fetch errored for %s (as %s): %s",
+                ticker, provider_symbol, exc,
+            )
+            info = {}
+            out.status = "error"
+            out.error = f"{type(exc).__name__}: {exc}"
+
+        if not info and out.status != "error":
+            # Successful call, empty payload: honest "empty", not "delisted".
+            out.status = "empty"
+            out.error = likely_no_data_reason(ticker, provider_symbol)
 
         # Identity / metadata fields (strings; left as-is or None).
         for src, dst in _INFO_MAP.items():

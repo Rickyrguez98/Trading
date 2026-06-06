@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .base import NewsItem, NewsProvider
+from .symbols import to_provider_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -21,25 +22,29 @@ class YFinanceNewsProvider(NewsProvider):
     name = "yfinance"
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
-    def _download(self, ticker: str) -> List[Dict[str, Any]]:
+    def _download(self, provider_symbol: str) -> List[Dict[str, Any]]:
         import yfinance as yf
 
         self.rate_limiter.acquire()
-        tk = yf.Ticker(ticker)
+        tk = yf.Ticker(provider_symbol)
         news = getattr(tk, "news", None) or []
         return list(news) if news else []
 
     def fetch(self, ticker: str, max_age_days: int = 30) -> List[NewsItem]:
         ticker = ticker.strip().upper()
-        cache_id = f"{ticker}:{max_age_days}"
+        provider_symbol = to_provider_symbol(ticker, self.name)
+        cache_id = f"{provider_symbol}:{max_age_days}"
         cached = self._cache_get(cache_id)
         if cached is not None:
             return [NewsItem(**row) for row in cached]
 
         try:
-            raw = self._download(ticker)
+            raw = self._download(provider_symbol)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("yfinance news fetch failed for %s: %s", ticker, exc)
+            logger.warning(
+                "yfinance news fetch failed for %s (as %s): %s",
+                ticker, provider_symbol, exc,
+            )
             raw = []
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)

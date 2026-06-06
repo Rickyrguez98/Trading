@@ -15,6 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from ..utils.validation import coerce_float
 from .base import PriceSnapshot, PricesProvider
+from .symbols import likely_no_data_reason, to_provider_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,13 @@ class YFinancePricesProvider(PricesProvider):
     name = "yfinance"
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=False)
-    def _download_history(self, ticker: str, lookback_days: int) -> pd.DataFrame:
+    def _download_history(self, provider_symbol: str, lookback_days: int) -> pd.DataFrame:
         import yfinance as yf
 
         self.rate_limiter.acquire()
         # period= accepts strings like '3mo'; we pass days->period mapping.
         period = self._period_for(lookback_days)
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        df = yf.Ticker(provider_symbol).history(period=period, auto_adjust=True)
         if df is None or df.empty:
             return pd.DataFrame()
         return df
@@ -48,20 +49,39 @@ class YFinancePricesProvider(PricesProvider):
 
     def fetch(self, ticker: str, lookback_days: int = 90) -> PriceSnapshot:
         ticker = ticker.strip().upper()
-        cache_id = f"{ticker}:{lookback_days}"
+        provider_symbol = to_provider_symbol(ticker, self.name)
+        # Cache by provider symbol+window so a symbol-mapping change invalidates
+        # cleanly and two canonical spellings can't collide.
+        cache_id = f"{provider_symbol}:{lookback_days}"
         cached = self._cache_get(cache_id)
         if cached is not None:
+            cached.setdefault("provider_symbol", provider_symbol)
             return PriceSnapshot(**cached)
 
-        try:
-            hist = self._download_history(ticker, lookback_days)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("yfinance price fetch failed for %s: %s", ticker, exc)
-            hist = pd.DataFrame()
+        snap = PriceSnapshot(
+            ticker=ticker, lookback_days=lookback_days, source=self.name,
+            provider_symbol=provider_symbol,
+        )
 
-        snap = PriceSnapshot(ticker=ticker, lookback_days=lookback_days, source=self.name)
+        try:
+            hist = self._download_history(provider_symbol, lookback_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "yfinance price fetch errored for %s (as %s): %s",
+                ticker, provider_symbol, exc,
+            )
+            snap.status = "error"
+            snap.error = f"{type(exc).__name__}: {exc}"
+            self._cache_set(cache_id, snap.__dict__)
+            return snap
 
         if hist.empty or "Close" not in hist.columns:
+            # The call succeeded but returned nothing usable. This is NOT an
+            # exception and NOT the same as a genuinely-illiquid name we later
+            # drop on the liquidity filter -- we record it as "empty" with an
+            # honest, non-committal reason.
+            snap.status = "empty"
+            snap.error = likely_no_data_reason(ticker, provider_symbol)
             self._cache_set(cache_id, snap.__dict__)
             return snap
 
