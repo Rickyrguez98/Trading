@@ -69,8 +69,11 @@ from ..sentiment.sentiment_model import (
 from ..universe import build_universe, save_universe, universe_counts_by_exchange
 from ..validation import (
     assess_coverage,
+    build_provider_diagnostics,
     determine_run_status,
+    render_run_status_banner,
     validate_outputs,
+    write_provider_diagnostics,
     write_validation_reports,
 )
 from ..utils.cache import Cache
@@ -837,19 +840,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         coverage = assess_coverage([], None, config)
         status = determine_run_status(coverage, health_report, config)
         output_dir = ensure_dir(config.run.output_dir)
+        fallback_usage = _fallback_usage_summary({
+            "prices": price_provider,
+            "fundamentals": fund_provider,
+            "news": news_provider,
+        })
         summary = {
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "mode": mode,
             "run_status": status["run_status"],
             "ranking_validity": status["ranking_validity"],
             "invalid_ranking_reasons": status["invalid_ranking_reasons"],
+            "coverage_warnings": status["warnings"],
             "recommendations_for_next_run": status["recommendations_for_next_run"],
             "data_coverage_summary": coverage,
+            "fallback_usage_summary": fallback_usage,
             "provider_health_check_summary": health_report,
             "candidates": [],
             "stages": [],
         }
         write_json(output_dir / "asset_selection_summary.json", summary)
+        # A banner-only Markdown report so reports/top_candidates.md visibly says
+        # "not a ranking" rather than being stale or absent.
+        (output_dir / "top_candidates.md").write_text(
+            render_run_status_banner(status, coverage)
+            + "# Asset Selection — Top Candidates\n\n"
+            "_No ranking produced: systemic provider failure. "
+            "See `provider_diagnostics.md`._\n",
+            encoding="utf-8",
+        )
+        diag = build_provider_diagnostics(
+            status=status, coverage=coverage, health_report=health_report,
+            provider_failures={}, fallback_usage=fallback_usage, cache_usage={},
+            providers={
+                "fundamentals": config.providers.fundamentals,
+                "prices": config.providers.prices,
+                "news": config.providers.news,
+            },
+        )
+        write_provider_diagnostics(diag, output_dir)
         logger.error(
             "Systemic provider failure on benchmark mega-caps -> %s. Refusing to "
             "produce a ranking; wrote a diagnostic summary instead. Reasons: %s",
@@ -882,7 +911,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
         return 1
 
-    after_fund_df, _funds, s3 = _stage3_fundamentals(
+    after_fund_df, fund_records, s3 = _stage3_fundamentals(
         after_prices_df, fund_provider, config
     )
     stage_stats.append(s3)
@@ -910,9 +939,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     write_csv(csv_path, ranked)
 
-    md = format_top_candidates_markdown(ranked, top_n=config.run.top_n)
-    md_path.write_text(md, encoding="utf-8")
-
     total_runtime = time.perf_counter() - pipeline_started
 
     summary = _build_summary(
@@ -927,15 +953,50 @@ def main(argv: Optional[List[str]] = None) -> int:
     # stops a systemic provider outage from masquerading as a clean ranking.
     coverage = assess_coverage(stage_stats, ranked, config)
     status = determine_run_status(coverage, health_report, config)
+
+    # Provider-chain + provenance summaries (improvements #7, #9).
+    fallback_usage = _fallback_usage_summary({
+        "prices": price_provider,
+        "fundamentals": fund_provider,
+        "news": news_provider,
+    })
+    cache_usage = _cache_usage_summary(price_records, fund_records)
+
     summary["run_status"] = status["run_status"]
     summary["ranking_validity"] = status["ranking_validity"]
     summary["invalid_ranking_reasons"] = status["invalid_ranking_reasons"]
     summary["coverage_warnings"] = status["warnings"]
     summary["recommendations_for_next_run"] = status["recommendations_for_next_run"]
     summary["data_coverage_summary"] = coverage
+    summary["fallback_usage_summary"] = fallback_usage
+    summary["cache_usage_summary"] = cache_usage
     if health_report is not None:
         summary["provider_health_check_summary"] = health_report
     write_json(json_path, summary)
+
+    # Markdown report, prefixed with a run-status banner so the headline table
+    # can never be read without its validity caveat.
+    banner = render_run_status_banner(status, coverage)
+    md = banner + format_top_candidates_markdown(ranked, top_n=config.run.top_n)
+    md_path.write_text(md, encoding="utf-8")
+
+    # Consolidated provider diagnostics report (improvement #9) -- the one
+    # artifact that says, in plain language, whether today's run is trustworthy.
+    diag = build_provider_diagnostics(
+        status=status,
+        coverage=coverage,
+        health_report=health_report,
+        provider_failures=summary.get("provider_failures", {}),
+        fallback_usage=fallback_usage,
+        cache_usage=cache_usage,
+        providers={
+            "fundamentals": config.providers.fundamentals,
+            "prices": config.providers.prices,
+            "news": config.providers.news,
+        },
+    )
+    diag_json, diag_md = write_provider_diagnostics(diag, output_dir)
+    logger.info("Diagnostics  : %s", diag_md)
 
     _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
 
@@ -984,6 +1045,56 @@ def _progress(items: Iterable, desc: str):
         return tqdm(list(items), desc=desc)
     except Exception:  # noqa: BLE001
         return items
+
+
+def _provenance_counts(records: Iterable) -> Dict[str, int]:
+    """Tally the ``data_source`` provenance label across fetched records."""
+    out: Dict[str, int] = {}
+    for r in records:
+        ds = getattr(r, "data_source", None) or "unknown"
+        out[ds] = out.get(ds, 0) + 1
+    return out
+
+
+def _fallback_usage_summary(providers: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-data-type view of the provider chain and how often a backup fired.
+
+    A single (unwrapped) provider reports ``wrapped: False`` with zeroed
+    counters; a Fallback* wrapper exposes its ``usage`` counters and chain.
+    """
+    out: Dict[str, Any] = {}
+    for dtype, p in providers.items():
+        usage = getattr(p, "usage", None)
+        chain = getattr(p, "provider_names", None) or [getattr(p, "name", "?")]
+        if isinstance(usage, dict):
+            out[dtype] = {
+                "chain": list(chain),
+                "wrapped": True,
+                "primary": usage.get("primary", 0),
+                "fallback": usage.get("fallback", 0),
+                "stale_cache": usage.get("stale_cache", 0),
+                "unavailable": usage.get("unavailable", 0),
+                "by_provider": dict(usage.get("by_provider", {})),
+            }
+        else:
+            out[dtype] = {"chain": list(chain), "wrapped": False}
+    return out
+
+
+def _cache_usage_summary(
+    price_records: Dict[str, Any], fund_records: Iterable
+) -> Dict[str, Any]:
+    """Cache/live provenance for the records we retained (improvement #7).
+
+    ``fresh_cache`` = served from a valid cache entry; ``stale_cache`` = a
+    knowingly-expired entry used as a backup; ``live``/``fallback`` = fetched
+    this run; ``unavailable`` = no data. News carries no per-item provenance,
+    so it is reported via fallback usage instead.
+    """
+    return {
+        "prices": _provenance_counts(price_records.values()),
+        "fundamentals": _provenance_counts(fund_records),
+    }
 
 
 def _provider_failure_summary(stage_stats: List[StageStats]) -> Dict[str, Any]:
