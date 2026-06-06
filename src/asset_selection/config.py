@@ -143,6 +143,21 @@ class SentimentConfig:
     recency_halflife_days: float = 7.0
     min_articles_for_confidence: int = 3
     low_confidence_threshold: float = 0.3
+    # Confidence model. The old model saturated at 3 articles, so the common
+    # yfinance case (10 near-identical headlines from one wire) reached
+    # confidence 1.0 -- clearly overstated. The new model needs many UNIQUE
+    # articles from DIVERSE sources, recent and de-duplicated, to approach 1.0.
+    # Articles needed to saturate the count factor (10 != full confidence).
+    confidence_full_article_count: int = 25
+    # Distinct sources needed to saturate the diversity factor.
+    confidence_full_source_count: int = 5
+    # Articles whose published_at is older than this are counted as "stale";
+    # a high stale ratio lowers confidence.
+    stale_after_days: float = 14.0
+    # Per-model confidence ceiling. A lexicon model (VADER) is noisier than a
+    # finance-tuned transformer, so it can never be as confident as FinBERT.
+    vader_confidence_factor: float = 0.85
+    finbert_confidence_factor: float = 1.0
 
 
 @dataclass

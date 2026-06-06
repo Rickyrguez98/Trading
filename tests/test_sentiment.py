@@ -79,3 +79,76 @@ def test_aggregate_confidence_scales_with_count_and_diversity():
     assert high.confidence > low.confidence
     assert 0.0 <= low.confidence <= 1.0
     assert 0.0 <= high.confidence <= 1.0
+
+
+def _single_source_articles(n: int, source: str = "yahoo"):
+    """n distinct, fresh articles all from ONE source (the yfinance pattern)."""
+    base = datetime.now(timezone.utc)
+    return [
+        NewsItem(
+            ticker="ZZZ",
+            headline=f"Distinct headline {i}",
+            summary=f"Body {i}",
+            source=source,
+            url=f"https://example.com/{i}",
+            published_at=base.isoformat(),
+            retrieved_at=base.isoformat(),
+        )
+        for i in range(n)
+    ]
+
+
+def test_ten_single_source_articles_do_not_reach_full_confidence():
+    # The audited bug: 10 near-identical yfinance headlines reported 1.0.
+    arts = _single_source_articles(10)
+    agg = aggregate_ticker_sentiment(
+        "ZZZ", score_articles(arts, DummyModel([0.3])),
+        recency_halflife_days=7.0, min_articles_for_confidence=3,
+        confidence_full_article_count=25, confidence_full_source_count=5,
+        model_confidence_factor=0.85,
+    )
+    # Far below 1.0: only 10/25 of the volume and 1/5 of the diversity.
+    assert agg.confidence < 0.6
+    assert agg.source_diversity == 1
+    assert agg.unique_article_count == 10
+    assert agg.duplicate_count == 0
+
+
+def test_duplicate_articles_are_flagged_and_lower_confidence():
+    base = datetime.now(timezone.utc)
+    dup = NewsItem(
+        ticker="ZZZ", headline="Same story", summary="x", source="wire",
+        url="https://example.com/same", published_at=base.isoformat(),
+    )
+    arts = [dup, dup, dup]  # three copies of the same wire story
+    agg = aggregate_ticker_sentiment(
+        "ZZZ", score_articles(arts, DummyModel([0.3])),
+        recency_halflife_days=7.0, min_articles_for_confidence=3,
+    )
+    assert agg.article_count == 3
+    assert agg.unique_article_count == 1
+    assert agg.duplicate_count == 2
+    assert agg.unique_ratio < 1.0
+    # Two of three articles are marked duplicates.
+    assert sum(1 for a in agg.articles if a.is_duplicate) == 2
+
+
+def test_stale_articles_are_flagged_and_reduce_freshness():
+    base = datetime.now(timezone.utc)
+    arts = [
+        NewsItem(ticker="ZZZ", headline="Old news", summary="x", source="a",
+                 url="https://example.com/old",
+                 published_at=(base - timedelta(days=40)).isoformat()),
+        NewsItem(ticker="ZZZ", headline="Fresh news", summary="y", source="b",
+                 url="https://example.com/new",
+                 published_at=base.isoformat()),
+    ]
+    agg = aggregate_ticker_sentiment(
+        "ZZZ", score_articles(arts, DummyModel([0.3])),
+        recency_halflife_days=7.0, min_articles_for_confidence=1,
+        stale_after_days=14.0,
+    )
+    assert agg.stale_count == 1
+    assert agg.fresh_ratio == 0.5
+    stale = [a for a in agg.articles if a.is_stale]
+    assert len(stale) == 1 and stale[0].headline == "Old news"
