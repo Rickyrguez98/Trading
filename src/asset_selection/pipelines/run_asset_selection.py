@@ -50,6 +50,7 @@ from ..data_providers import (
     get_news_provider,
     get_prices_provider,
 )
+from ..data_providers import errors as _err
 from ..data_providers.base import Fundamentals, NewsItem, PriceSnapshot
 from ..health import run_provider_health_checks
 from ..fundamentals.fundamental_scoring import score_fundamentals
@@ -90,19 +91,28 @@ class StageStats:
     # has status "ok" and is counted under ``dropped``, never here.
     provider_failures: int = 0
     failure_reasons: Dict[str, int] = field(default_factory=dict)  # {"error": n, "empty": n}
+    # Richer, machine-readable breakdown by error-taxonomy constant, e.g.
+    # {"PROVIDER_JSON_PARSE_ERROR": n, "NO_PRICE_DATA": m}.
+    failure_error_types: Dict[str, int] = field(default_factory=dict)
     failures: List[Dict[str, Any]] = field(default_factory=list)   # capped examples
     dropped: Dict[str, int] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
 
     def record_failure(self, ticker: str, provider_symbol: Optional[str],
-                       status: str, reason: Optional[str], cap: int = 50) -> None:
+                       status: str, reason: Optional[str],
+                       error_type: Optional[str] = None, cap: int = 50) -> None:
         self.provider_failures += 1
         self.failure_reasons[status] = self.failure_reasons.get(status, 0) + 1
+        if error_type:
+            self.failure_error_types[error_type] = (
+                self.failure_error_types.get(error_type, 0) + 1
+            )
         if len(self.failures) < cap:
             self.failures.append({
                 "ticker": ticker,
                 "provider_symbol": provider_symbol,
                 "status": status,
+                "error_type": error_type,
                 "reason": reason,
             })
 
@@ -114,6 +124,7 @@ class StageStats:
             "duration_seconds": round(self.duration_seconds, 2),
             "provider_failures": self.provider_failures,
             "failure_reasons": dict(self.failure_reasons),
+            "failure_error_types": dict(self.failure_error_types),
             "failures": list(self.failures),
             "dropped": dict(self.dropped),
             "notes": list(self.notes),
@@ -334,6 +345,7 @@ def _stage2_prices(
                 ticker=ticker, lookback_days=config.prices.lookback_days,
                 source=config.providers.prices, status="error",
                 error=f"{type(exc).__name__}: {exc}",
+                error_type=_err.classify_exception(exc), data_source="unavailable",
             )
         price_records[ticker] = snap
         # Honest failure accounting: a non-"ok" status means the provider gave
@@ -343,6 +355,7 @@ def _stage2_prices(
             stats.record_failure(
                 ticker, getattr(snap, "provider_symbol", None),
                 snap.status, snap.error,
+                error_type=getattr(snap, "error_type", None),
             )
         rows.append({
             "ticker": ticker,
@@ -418,6 +431,7 @@ def _stage3_fundamentals(
             f = Fundamentals(
                 ticker=ticker, source=config.providers.fundamentals,
                 status="error", error=f"{type(exc).__name__}: {exc}",
+                error_type=_err.classify_exception(exc), data_source="unavailable",
             )
         if getattr(f, "status", "ok") != "ok":
             # Fundamentals that came back empty/errored are still carried
@@ -425,6 +439,7 @@ def _stage3_fundamentals(
             # provider miss honestly so the summary can't claim zero failures.
             stats.record_failure(
                 ticker, getattr(f, "provider_symbol", None), f.status, f.error,
+                error_type=getattr(f, "error_type", None),
             )
         records.append(f)
 
@@ -525,7 +540,10 @@ def _stage4_sentiment(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Stage 4 news fetch raised for %s: %s", ticker, exc)
             articles = []
-            stats.record_failure(ticker, None, "error", f"{type(exc).__name__}: {exc}")
+            stats.record_failure(
+                ticker, None, "error", f"{type(exc).__name__}: {exc}",
+                error_type=_err.classify_exception(exc),
+            )
 
         scored = score_articles(articles, sentiment_model)
         agg = aggregate_ticker_sentiment(
@@ -835,21 +853,32 @@ def _provider_failure_summary(stage_stats: List[StageStats]) -> Dict[str, Any]:
     by_stage: Dict[str, Any] = {}
     total = 0
     total_reasons: Dict[str, int] = {}
+    total_error_types: Dict[str, int] = {}
     examples: List[Dict[str, Any]] = []
     for s in stage_stats:
         if s.provider_failures:
             by_stage[s.name] = {
                 "count": s.provider_failures,
                 "reasons": dict(s.failure_reasons),
+                "error_types": dict(s.failure_error_types),
             }
             total += s.provider_failures
             for k, v in s.failure_reasons.items():
                 total_reasons[k] = total_reasons.get(k, 0) + v
+            for k, v in s.failure_error_types.items():
+                total_error_types[k] = total_error_types.get(k, 0) + v
             for f in s.failures:
                 examples.append({"stage": s.name, **f})
+    # A failure looks systemic when provider-side faults (JSON-parse, rate
+    # limit, timeout, blocked, HTTP) dominate over honest "no data" misses.
+    provider_side = sum(
+        v for k, v in total_error_types.items() if _err.is_provider_side(k)
+    )
     return {
         "total": total,
         "by_reason": total_reasons,
+        "by_error_type": total_error_types,
+        "provider_side_failures": provider_side,
         "by_stage": by_stage,
         "examples": examples[:100],
     }

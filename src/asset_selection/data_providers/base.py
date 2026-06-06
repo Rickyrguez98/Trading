@@ -79,6 +79,12 @@ class Fundamentals:
     provider_symbol: Optional[str] = None
     status: str = "ok"
     error: Optional[str] = None
+    # Machine-readable error taxonomy (see data_providers/errors.py). None on a
+    # clean record; set to a constant like PROVIDER_JSON_PARSE_ERROR otherwise.
+    error_type: Optional[str] = None
+    # Where the data came from: "live" | "fresh_cache" | "stale_cache" |
+    # "fallback" | "unavailable". Lets reports state provenance honestly.
+    data_source: Optional[str] = None
 
 
 @dataclass
@@ -98,6 +104,10 @@ class PriceSnapshot:
     provider_symbol: Optional[str] = None
     status: str = "ok"
     error: Optional[str] = None
+    # Machine-readable error taxonomy (see data_providers/errors.py).
+    error_type: Optional[str] = None
+    # Provenance: "live" | "fresh_cache" | "stale_cache" | "fallback" | "unavailable".
+    data_source: Optional[str] = None
 
 
 @dataclass
