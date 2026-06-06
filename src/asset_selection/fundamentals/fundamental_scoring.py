@@ -187,9 +187,14 @@ def compute_pillar_scores(
 
     pillar_scores = pd.DataFrame(index=df.index)
     missing_count = pd.Series(0, index=df.index, dtype=int)
+    # Collect every metric's normalized [0,100] score so we can name the
+    # single strongest / weakest metric per ticker (explainability, Issue 6).
+    all_metric_scores = pd.DataFrame(index=df.index)
 
     for pillar, (metrics, weights) in pillar_definitions.items():
         metric_scores = normalize_metrics(df, metrics, cfg)
+        for col in metric_scores.columns:
+            all_metric_scores[col] = metric_scores[col]
         scores: List[float] = []
         missing_list: List[int] = []
         for ticker in df.index:
@@ -204,7 +209,55 @@ def compute_pillar_scores(
         missing_count = missing_count + pd.Series(missing_list, index=df.index)
 
     pillar_scores["missing_metric_count"] = missing_count
+    _attach_explainability(pillar_scores, df, all_metric_scores)
     return pillar_scores
+
+
+def _attach_explainability(
+    pillar_scores: pd.DataFrame,
+    df: pd.DataFrame,
+    all_metric_scores: pd.DataFrame,
+) -> None:
+    """Add per-ticker explainability columns in place.
+
+    * strongest_metric / strongest_metric_score -- best individual metric
+    * weakest_metric   / weakest_metric_score   -- worst individual metric
+    * market_cap_available  -- did the provider return a market cap?
+    * valuation_metrics_available -- how many of the 5 valuation ratios exist
+    Naming the best/worst metric lets a reader see *why* a fundamentals score
+    is what it is instead of trusting an opaque number.
+    """
+    strongest: List[Optional[str]] = []
+    strongest_val: List[Optional[float]] = []
+    weakest: List[Optional[str]] = []
+    weakest_val: List[Optional[float]] = []
+    for ticker in df.index:
+        row = all_metric_scores.loc[ticker].dropna() if len(all_metric_scores.columns) else pd.Series(dtype=float)
+        if row.empty:
+            strongest.append(None); strongest_val.append(None)
+            weakest.append(None); weakest_val.append(None)
+            continue
+        s_name = row.idxmax(); w_name = row.idxmin()
+        strongest.append(str(s_name)); strongest_val.append(round(float(row[s_name]), 1))
+        weakest.append(str(w_name)); weakest_val.append(round(float(row[w_name]), 1))
+
+    pillar_scores["strongest_metric"] = strongest
+    pillar_scores["strongest_metric_score"] = strongest_val
+    pillar_scores["weakest_metric"] = weakest
+    pillar_scores["weakest_metric_score"] = weakest_val
+
+    if "market_cap" in df.columns:
+        pillar_scores["market_cap_available"] = pd.to_numeric(
+            df["market_cap"], errors="coerce"
+        ).notna().values
+    else:
+        pillar_scores["market_cap_available"] = False
+
+    present_val = pd.Series(0, index=df.index, dtype=int)
+    for col in VALUATION_METRICS:
+        if col in df.columns:
+            present_val = present_val + pd.to_numeric(df[col], errors="coerce").notna().astype(int)
+    pillar_scores["valuation_metrics_available"] = present_val.values
 
 
 def score_fundamentals(

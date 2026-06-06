@@ -65,6 +65,7 @@ from ..sentiment.sentiment_model import (
     score_articles,
 )
 from ..universe import build_universe, save_universe, universe_counts_by_exchange
+from ..validation import validate_outputs, write_validation_reports
 from ..utils.cache import Cache
 from ..utils.io import ensure_dir, write_csv, write_json
 from ..utils.rate_limiter import RateLimiter
@@ -737,6 +738,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
 
+    # Post-run output validation: re-audit the produced candidates and write
+    # reports/output_validation.{json,md}. This never drops rows -- it reports.
+    try:
+        validation = validate_outputs(ranked, summary, config)
+        val_json, val_md = write_validation_reports(validation, output_dir)
+        logger.info(
+            "Validation   : %s (%d warning[s]) -> %s",
+            validation.get("overall_status"), validation.get("n_warnings", 0), val_md,
+        )
+    except Exception as exc:  # noqa: BLE001 - validation must never break a run
+        logger.warning("Output validation failed to run: %s", exc)
+
     logger.info("CSV written  : %s", csv_path)
     logger.info("Markdown     : %s", md_path)
     logger.info("JSON summary : %s", json_path)
@@ -868,6 +881,13 @@ def _build_summary(
             "final_score": _safe_num(row.get("final_score")),
             "top_driver_pillar": row.get("top_driver_pillar") or None,
             "top_drag_pillar": row.get("top_drag_pillar") or None,
+            "strongest_metric": row.get("strongest_metric") or None,
+            "strongest_metric_score": _safe_num(row.get("strongest_metric_score")),
+            "weakest_metric": row.get("weakest_metric") or None,
+            "weakest_metric_score": _safe_num(row.get("weakest_metric_score")),
+            "market_cap_available": bool(row.get("market_cap_available"))
+            if row.get("market_cap_available") is not None else None,
+            "valuation_metrics_available": int(row.get("valuation_metrics_available", 0) or 0),
             "selection_bucket": row.get("selection_bucket") or None,
             "reason": row.get("reason"),
             "warning_flags": list(row.get("flags") or []),
