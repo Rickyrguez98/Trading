@@ -64,7 +64,22 @@ def _mock_fundamentals(ticker: str) -> Fundamentals:
             price_to_sales=6.5, price_to_book=7.0, source="mock",
         ),
     }
-    profile = profiles.get(ticker, Fundamentals(ticker=ticker, source="mock"))
+    # Unknown tickers get a generic-but-complete profile (real market cap +
+    # metrics). This keeps synthetic-universe tests above the coverage gate's
+    # "valid candidates need real fundamentals" floor; an all-empty fallback
+    # would (correctly) be judged INSUFFICIENT_DATA and exit 2.
+    generic = Fundamentals(
+        ticker=ticker, company_name=f"{ticker} Inc.", sector="Industrials",
+        industry="Diversified", market_cap=5e10,
+        revenue_growth=0.08, earnings_growth=0.09, fcf_growth=0.07,
+        operating_margin=0.18, net_margin=0.12, roe=0.18, roa=0.10,
+        debt_to_equity=70.0, current_ratio=1.6,
+        free_cash_flow=3e9, operating_cash_flow=4e9,
+        free_cash_flow_yield=0.03, operating_cash_flow_margin=0.16,
+        pe_ratio=20.0, forward_pe=18.0, peg_ratio=1.6,
+        price_to_sales=4.0, price_to_book=3.0, source="mock",
+    )
+    profile = profiles.get(ticker, generic)
     # Tracked-missing-fields logic in the real provider is replicated here
     # so the test reflects production behaviour.
     tracked = [
