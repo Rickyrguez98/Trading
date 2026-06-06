@@ -51,6 +51,7 @@ from ..data_providers import (
     get_prices_provider,
 )
 from ..data_providers.base import Fundamentals, NewsItem, PriceSnapshot
+from ..health import run_provider_health_checks
 from ..fundamentals.fundamental_scoring import score_fundamentals
 from ..logging_config import configure_logging
 from ..scoring.composite_score import (
@@ -174,6 +175,22 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--log-level", default=None,
         help="Override the log level: DEBUG / INFO / WARNING / ERROR."
+    )
+    p.add_argument(
+        "--health-check-only", action="store_true",
+        help=(
+            "Probe each provider against benchmark mega-caps (AAPL, MSFT, "
+            "GOOGL, NVDA, BRK.B), write reports/provider_health.json, and exit "
+            "WITHOUT running the full pipeline. Exit 2 on a systemic failure."
+        ),
+    )
+    p.add_argument(
+        "--no-provider-health-check", action="store_true",
+        help=(
+            "Skip the pre-run provider health check. By default the pipeline "
+            "probes benchmark tickers first so a systemic provider outage is "
+            "caught before a misleading ranking is produced."
+        ),
     )
     return p.parse_args(argv)
 
@@ -671,6 +688,37 @@ def main(argv: Optional[List[str]] = None) -> int:
             config.sentiment.model, exc,
         )
         sentiment_model = get_sentiment_model("vader")
+
+    # --- Provider health check (benchmark mega-caps) ---
+    health_report: Optional[Dict[str, Any]] = None
+    run_health = args.health_check_only or not args.no_provider_health_check
+    if run_health:
+        logger.info("Running provider health checks on benchmark tickers ...")
+        health_report = run_provider_health_checks(
+            price_provider=price_provider,
+            fundamentals_provider=fund_provider,
+            news_provider=news_provider,
+        )
+        output_dir = ensure_dir(config.run.output_dir)
+        write_json(output_dir / "provider_health.json", health_report)
+        logger.info(
+            "Provider health: %s (price_systemic=%s, fundamentals_systemic=%s)",
+            health_report.get("overall_status"),
+            health_report.get("price_systemic_failure"),
+            health_report.get("fundamentals_systemic_failure"),
+        )
+
+    if args.health_check_only:
+        if health_report is None:  # pragma: no cover - defensive
+            return 1
+        systemic = bool(health_report.get("any_blocking_systemic_failure"))
+        logger.info(
+            "Health-check-only mode: overall=%s. %s",
+            health_report.get("overall_status"),
+            "Systemic provider failure detected -- a full run would NOT produce a "
+            "trusted ranking." if systemic else "Providers look usable.",
+        )
+        return 2 if systemic else 0
 
     # --- Stages ---
     stage_stats: List[StageStats] = []
