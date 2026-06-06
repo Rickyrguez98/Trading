@@ -48,6 +48,10 @@ universe:
   include_rights: false
   include_test_issues: false
   include_notes: false
+  # "When-Issued" (WI) / temporary conditional instruments. Their price
+  # history is short and not comparable to seasoned common stock, so they are
+  # excluded by default. (This is what kept SNDK/CEG When-Issued lines out.)
+  include_when_issued: false
   # Minimum length of ticker symbol (filters out obvious garbage).
   min_ticker_length: 1
   max_ticker_length: 5

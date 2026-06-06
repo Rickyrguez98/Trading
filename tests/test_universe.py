@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from asset_selection.config import UniverseConfig
-from asset_selection.universe import clean_universe
+from asset_selection.universe import clean_universe, clean_universe_with_stats
 
 
 def _raw_df() -> pd.DataFrame:
@@ -106,6 +106,48 @@ def test_clean_universe_exchange_alias_amex_resolves_to_nyse_american():
     cfg = UniverseConfig(exchanges=["AMEX"])
     cleaned = clean_universe(df, cfg)
     assert set(cleaned["ticker"]) == {"IMO"}
+
+
+def test_clean_universe_excludes_when_issued_by_default():
+    """When-Issued lines (the SNDK/CEG bug from the audited run) must be
+    dropped by default -- their short conditional tape is not comparable to
+    seasoned common stock."""
+    df = pd.DataFrame([
+        {"ticker": "AAPL", "company_name": "Apple Inc. - Common Stock",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "SNDK", "company_name": "Sandisk Corporation - Common Stock When-Issued",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+        {"ticker": "CEG", "company_name": "Constellation Energy Corporation - Common Stock When-Issued",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+    ])
+    cleaned = clean_universe(df, UniverseConfig())
+    tickers = set(cleaned["ticker"])
+    assert tickers == {"AAPL"}
+    assert "SNDK" not in tickers
+    assert "CEG" not in tickers
+
+
+def test_clean_universe_include_when_issued_toggle_keeps_them():
+    df = pd.DataFrame([
+        {"ticker": "SNDK", "company_name": "Sandisk Corporation - Common Stock When-Issued",
+         "exchange": "NASDAQ", "asset_type": "common", "is_etf": False, "is_test_issue": False},
+    ])
+    cleaned = clean_universe(df, UniverseConfig(include_when_issued=True))
+    assert "SNDK" in set(cleaned["ticker"])
+
+
+def test_clean_universe_with_stats_reports_removal_reasons():
+    cleaned, stats = clean_universe_with_stats(_raw_df(), UniverseConfig())
+    assert stats["raw"] == len(_raw_df())
+    assert stats["cleaned"] == len(cleaned)
+    removed = stats["removed"]
+    # Every removed row is attributed to exactly one reason, and the counts
+    # reconcile with the raw->cleaned delta.
+    assert sum(removed.values()) == stats["raw"] - stats["cleaned"]
+    # The fixture contains an ETF, a warrant, a unit, a preferred, rights, a
+    # test issue and an invalid ticker -- the reasons should be populated.
+    assert removed  # non-empty
+    assert "etf_flag" in removed or "etf_or_fund_name" in removed
 
 
 def test_clean_universe_include_etfs_toggle_keeps_etfs():

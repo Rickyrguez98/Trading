@@ -257,6 +257,16 @@ def _stage1_universe(
     for exch, n in by_exchange.items():
         stats.notes.append(f"exchange:{exch}={n}")
 
+    # Per-reason removal accounting from the cleaning step (When-Issued, ETF,
+    # preferred, ...). Stored on ``dropped`` so it shows up in the summaries.
+    clean_stats = cleaned.attrs.get("clean_stats") if hasattr(cleaned, "attrs") else None
+    if isinstance(clean_stats, dict) and clean_stats.get("removed"):
+        for reason, n in clean_stats["removed"].items():
+            stats.dropped[f"universe_clean:{reason}"] = int(n)
+        stats.notes.append(
+            f"universe_clean: {clean_stats['raw']} raw -> {clean_stats['cleaned']} cleaned"
+        )
+
     df = cleaned
     if mode == "sample" and sample_limit and len(df) > sample_limit:
         df = df.head(sample_limit).copy()
