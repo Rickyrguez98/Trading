@@ -21,7 +21,9 @@ import re
 
 # Providers we know how to translate for. Unknown providers fall through to a
 # no-op (return the canonical symbol unchanged), which is the safe default.
-_DOT_HYPHEN_PROVIDERS = {"yfinance"}
+# Both yfinance and Stooq spell US class shares with a hyphen (BRK-B); Stooq
+# additionally needs a ``.us`` market suffix, applied by the Stooq provider.
+_DOT_HYPHEN_PROVIDERS = {"yfinance", "stooq"}
 
 # A canonical class-share / suffixed common stock looks like ROOT '.' SUFFIX,
 # e.g. 'BRK.B', 'BF.A', 'AKO.B'. We only remap the dot form; anything else is

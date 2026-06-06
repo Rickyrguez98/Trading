@@ -157,9 +157,9 @@ def test_pipeline_runs_end_to_end_with_mocked_providers(temp_workdir: Path):
     from asset_selection.pipelines import run_asset_selection as r
 
     # Patch only the provider classes; everything else is real.
-    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
@@ -217,9 +217,9 @@ def test_pipeline_does_not_crash_when_all_news_empty(temp_workdir: Path):
         def fetch(self, ticker: str, max_age_days: int = 30) -> List[NewsItem]:
             return []
 
-    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_EmptyNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_EmptyNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "MSFT",
@@ -246,9 +246,9 @@ def test_summary_includes_stage_stats_and_exchange_breakdown(temp_workdir: Path)
     exchange breakdown in the JSON summary, plus a universe_summary.json."""
     from asset_selection.pipelines import run_asset_selection as r
 
-    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
@@ -305,9 +305,9 @@ def test_news_runs_only_after_fundamentals_prescreen(temp_workdir: Path):
             news_calls.append(ticker)
             return []
 
-    with patch.object(r, "get_fundamentals_provider", return_value=_BigCapFund), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_SpyNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_BigCapFund), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_SpyNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "TINY", "MSFT",
@@ -346,9 +346,9 @@ def test_sample_mode_respects_limit(temp_workdir: Path):
         })
 
     with patch.object(r, "build_universe", side_effect=_fake_build_universe), \
-         patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+         patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--universe", "sample", "--limit", "3",
@@ -397,9 +397,9 @@ def test_full_mode_does_not_silently_cap_at_50(temp_workdir: Path):
             )
 
     with patch.object(r, "build_universe", side_effect=_big_universe), \
-         patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_NoOpPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+         patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_NoOpPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--universe", "full",
@@ -422,9 +422,9 @@ def test_full_mode_does_not_silently_cap_at_50(temp_workdir: Path):
 def test_custom_mode_uses_provided_tickers(temp_workdir: Path):
     from asset_selection.pipelines import run_asset_selection as r
 
-    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "NVDA", "AMD",
@@ -446,9 +446,9 @@ def test_pipeline_emits_quality_fields_and_validation_report(temp_workdir: Path)
     reports/output_validation.{json,md}."""
     from asset_selection.pipelines import run_asset_selection as r
 
-    with patch.object(r, "get_fundamentals_provider", return_value=_PatchedFundamentals), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_PatchedFundamentals), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
@@ -506,9 +506,9 @@ def test_custom_mode_preserves_class_share_ticker(temp_workdir: Path):
                 price_to_sales=4.0, price_to_book=1.5, source="mock",
             )
 
-    with patch.object(r, "get_fundamentals_provider", return_value=_ClassShareFund), \
-         patch.object(r, "get_prices_provider", return_value=_PatchedPrices), \
-         patch.object(r, "get_news_provider", return_value=_PatchedNews):
+    with patch("asset_selection.data_providers.get_fundamentals_provider", return_value=_ClassShareFund), \
+         patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
+         patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
             "--config", "configs/default_config.yaml",
             "--tickers", "AAPL", "BRK.B", "BF.B",

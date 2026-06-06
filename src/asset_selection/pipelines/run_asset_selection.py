@@ -46,9 +46,9 @@ except Exception:  # noqa: BLE001 - .env is optional
 
 from ..config import AppConfig, load_config
 from ..data_providers import (
-    get_fundamentals_provider,
-    get_news_provider,
-    get_prices_provider,
+    build_fundamentals_provider,
+    build_news_provider,
+    build_prices_provider,
 )
 from ..data_providers import errors as _err
 from ..data_providers.base import Fundamentals, NewsItem, PriceSnapshot
@@ -203,7 +203,63 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "caught before a misleading ranking is produced."
         ),
     )
+    p.add_argument(
+        "--use-cache-on-provider-failure", action="store_true",
+        help=(
+            "Backup Plan C: when every live provider fails for a ticker, serve a "
+            "fresh-enough cached record (within --max-cache-age-days) labeled "
+            "'stale_cache' rather than reporting no data. Off by default so a run "
+            "never silently passes stale data off as live."
+        ),
+    )
+    p.add_argument(
+        "--max-cache-age-days", type=float, default=None,
+        help=(
+            "Maximum age (in days) of a cache entry allowed to back a failed live "
+            "fetch under --use-cache-on-provider-failure. Default: config value "
+            "(robustness.max_cache_age_days, 7 days)."
+        ),
+    )
+    p.add_argument(
+        "--provider", nargs="*", default=None, metavar="TYPE=NAME[,NAME...]",
+        help=(
+            "Override the provider(s) for a data type. Repeatable / space-"
+            "separated, e.g. '--provider prices=yfinance,stooq fundamentals="
+            "yfinance'. A comma-separated list sets the fallback priority order "
+            "(first is primary); a single name sets just that provider. Valid "
+            "types: prices, fundamentals, news."
+        ),
+    )
     return p.parse_args(argv)
+
+
+def _apply_provider_overrides(args: argparse.Namespace, config: AppConfig) -> None:
+    """Apply --provider TYPE=NAME[,NAME...] overrides onto the config.
+
+    A single name sets ``providers.<type>`` (the primary). A comma-separated
+    list additionally records the fallback priority order in
+    ``robustness.provider_priority_by_data_type[<type>]``.
+    """
+    if not args.provider:
+        return
+    valid = {"prices", "fundamentals", "news"}
+    for token in args.provider:
+        if "=" not in token:
+            raise SystemExit(
+                f"--provider expects TYPE=NAME[,NAME...]; got {token!r}."
+            )
+        data_type, _, raw_names = token.partition("=")
+        data_type = data_type.strip().lower()
+        if data_type not in valid:
+            raise SystemExit(
+                f"--provider type must be one of {sorted(valid)}; got {data_type!r}."
+            )
+        names = [n.strip() for n in raw_names.split(",") if n.strip()]
+        if not names:
+            raise SystemExit(f"--provider {data_type}= requires at least one name.")
+        setattr(config.providers, data_type, names[0])
+        if len(names) > 1:
+            config.robustness.provider_priority_by_data_type[data_type] = names
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +700,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.run.top_n = args.top
     if args.output_dir:
         config.run.output_dir = args.output_dir
+    if args.use_cache_on_provider_failure:
+        config.robustness.use_cache_on_provider_failure = True
+    if args.max_cache_age_days is not None:
+        config.robustness.max_cache_age_days = float(args.max_cache_age_days)
+    _apply_provider_overrides(args, config)
 
     configure_logging(
         level=args.log_level or config.logging.level,
@@ -678,25 +739,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         removed = cache.invalidate()
         logger.info("Cleared cache: %d entries removed.", removed)
 
+    # Universe building still uses a single default-paced limiter.
     rate_limiter = RateLimiter(config.rate_limits.get("yfinance", 0.4))
 
-    # Providers
-    Fund = get_fundamentals_provider(config.providers.fundamentals)
-    Price = get_prices_provider(config.providers.prices)
-    News = get_news_provider(config.providers.news)
+    # Providers are built from config priority order (primary -> fallback) with
+    # optional cache-backup, so the stages talk to a chain without knowing it.
+    # The builders take callbacks so this module owns cache/pacing wiring.
+    _limiters: Dict[str, RateLimiter] = {}
 
-    fund_provider = Fund(
-        cache=_namespaced_cache(cache, "fundamentals", config),
-        rate_limiter=rate_limiter,
-    )
-    price_provider = Price(
-        cache=_namespaced_cache(cache, "prices", config),
-        rate_limiter=rate_limiter,
-    )
-    news_provider = News(
-        cache=_namespaced_cache(cache, "news", config),
-        rate_limiter=rate_limiter,
-    )
+    def make_cache(namespace: str) -> Cache:
+        return _namespaced_cache(cache, namespace, config)
+
+    def make_rate_limiter(name: str) -> RateLimiter:
+        # One limiter per provider name so chained providers don't share pace.
+        if name not in _limiters:
+            default = config.rate_limits.get("yfinance", 0.4)
+            _limiters[name] = RateLimiter(config.rate_limits.get(name, default))
+        return _limiters[name]
+
+    fund_provider = build_fundamentals_provider(config, make_cache, make_rate_limiter)
+    price_provider = build_prices_provider(config, make_cache, make_rate_limiter)
+    news_provider = build_news_provider(config, make_cache, make_rate_limiter)
 
     try:
         sentiment_model = get_sentiment_model(config.sentiment.model)

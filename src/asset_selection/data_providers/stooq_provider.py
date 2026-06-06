@@ -1,19 +1,28 @@
-"""Prices via yfinance for liquidity filters and basic context.
+"""Stooq prices backup provider (free, keyless).
 
-We do not use prices for portfolio construction yet — just average dollar
-volume, recent return, and a volatility proxy.
+Stooq exposes a CSV endpoint that needs no API key:
+
+    https://stooq.com/q/d/l/?s=aapl.us&i=d
+
+It returns daily OHLCV rows (``Date,Open,High,Low,Close,Volume``). US symbols
+take a ``.us`` market suffix and spell class shares with a hyphen (``brk-b.us``).
+This makes Stooq a practical **fallback** for the liquidity/price-context metrics
+the funnel needs (last close, average dollar volume, recent return, a volatility
+proxy) when yfinance is blocked or rate-limited.
+
+We keep the same :class:`PriceSnapshot` contract and error taxonomy as the
+yfinance provider so the fallback wrapper can treat them interchangeably.
 """
 from __future__ import annotations
 
+import io
 import logging
 import math
+from dataclasses import fields as _dc_fields
 from typing import Any, Dict
 
-import numpy as np
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential
-
-from dataclasses import fields as _dc_fields
 
 from ..utils.validation import coerce_float
 from . import errors as err
@@ -22,60 +31,55 @@ from .symbols import likely_no_data_reason, to_provider_symbol, was_remapped
 
 logger = logging.getLogger(__name__)
 
+_STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 _PRICE_FIELDS = {f.name for f in _dc_fields(PriceSnapshot)}
 
 
 def _compat(cached: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep only keys the current ``PriceSnapshot`` schema knows about.
-
-    Lets a cache entry written by an older OR newer build reconstruct cleanly:
-    unknown keys are dropped, missing keys fall back to dataclass defaults.
-    """
     return {k: v for k, v in cached.items() if k in _PRICE_FIELDS}
 
 
-class YFinancePricesProvider(PricesProvider):
-    name = "yfinance"
+def _stooq_symbol(canonical: str) -> str:
+    """Canonical -> Stooq symbol, e.g. AAPL -> aapl.us, BRK.B -> brk-b.us."""
+    base = to_provider_symbol(canonical.strip().upper(), "stooq").lower()
+    return f"{base}.us"
+
+
+class StooqPricesProvider(PricesProvider):
+    name = "stooq"
 
     def cache_identifier(self, ticker: str, lookback_days: int = 90) -> str:
-        provider_symbol = to_provider_symbol(ticker.strip().upper(), self.name)
-        return f"{provider_symbol}:{lookback_days}"
+        return f"{_stooq_symbol(ticker)}:{lookback_days}"
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
-    def _download_history(self, provider_symbol: str, lookback_days: int) -> pd.DataFrame:
-        import yfinance as yf
+    def _download_csv(self, stooq_symbol: str) -> pd.DataFrame:
+        # Imported lazily so the dependency is only needed when Stooq is used.
+        import urllib.request
 
         self.rate_limiter.acquire()
-        # period= accepts strings like '3mo'; we pass days->period mapping.
-        period = self._period_for(lookback_days)
-        df = yf.Ticker(provider_symbol).history(period=period, auto_adjust=True)
-        if df is None or df.empty:
+        url = _STOOQ_URL.format(symbol=stooq_symbol)
+        req = urllib.request.Request(url, headers={"User-Agent": "asset-selection/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 - fixed host
+            raw = resp.read().decode("utf-8", errors="replace")
+        text = raw.strip()
+        # Stooq returns the literal "No data" (or a bare header) for unknown or
+        # uncovered symbols -- treat that as an empty frame, not an error.
+        if not text or text.lower().startswith("no data"):
+            return pd.DataFrame()
+        df = pd.read_csv(io.StringIO(raw))
+        if df.empty or "Close" not in df.columns:
             return pd.DataFrame()
         return df
 
-    @staticmethod
-    def _period_for(lookback_days: int) -> str:
-        if lookback_days <= 30:
-            return "1mo"
-        if lookback_days <= 90:
-            return "3mo"
-        if lookback_days <= 180:
-            return "6mo"
-        if lookback_days <= 365:
-            return "1y"
-        return "2y"
-
     def fetch(self, ticker: str, lookback_days: int = 90) -> PriceSnapshot:
         ticker = ticker.strip().upper()
-        provider_symbol = to_provider_symbol(ticker, self.name)
-        # Cache by provider symbol+window so a symbol-mapping change invalidates
-        # cleanly and two canonical spellings can't collide.
+        provider_symbol = _stooq_symbol(ticker)
         cache_id = f"{provider_symbol}:{lookback_days}"
+
         cached = self._cache_get(cache_id)
         if cached is not None:
             cached.setdefault("provider_symbol", provider_symbol)
             snap = PriceSnapshot(**_compat(cached))
-            # A cache hit is within TTL by construction -> fresh cache.
             snap.data_source = "fresh_cache"
             return snap
 
@@ -85,10 +89,10 @@ class YFinancePricesProvider(PricesProvider):
         )
 
         try:
-            hist = self._download_history(provider_symbol, lookback_days)
+            hist = self._download_csv(provider_symbol)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "yfinance price fetch errored for %s (as %s): %s",
+                "stooq price fetch errored for %s (as %s): %s",
                 ticker, provider_symbol, exc,
             )
             snap.status = "error"
@@ -99,10 +103,6 @@ class YFinancePricesProvider(PricesProvider):
             return snap
 
         if hist.empty or "Close" not in hist.columns:
-            # The call succeeded but returned nothing usable. This is NOT an
-            # exception and NOT the same as a genuinely-illiquid name we later
-            # drop on the liquidity filter -- we record it as "empty" with an
-            # honest, non-committal reason and a NO_PRICE_DATA error type.
             snap.status = "empty"
             snap.error = likely_no_data_reason(ticker, provider_symbol)
             snap.error_type = err.classify_empty(
@@ -111,8 +111,12 @@ class YFinancePricesProvider(PricesProvider):
             self._cache_set(cache_id, snap.__dict__)
             return snap
 
-        closes = hist["Close"].dropna()
-        volumes = hist.get("Volume", pd.Series(dtype=float)).fillna(0)
+        # Keep only the most recent lookback window.
+        if "Date" in hist.columns:
+            hist = hist.sort_values("Date")
+        tail = hist.tail(max(lookback_days, 1))
+        closes = pd.to_numeric(tail["Close"], errors="coerce").dropna()
+        volumes = pd.to_numeric(tail.get("Volume", pd.Series(dtype=float)), errors="coerce").fillna(0)
 
         if not closes.empty:
             snap.last_close = coerce_float(closes.iloc[-1])
@@ -132,7 +136,6 @@ class YFinancePricesProvider(PricesProvider):
             if snap.last_close is not None:
                 snap.avg_dollar_volume = avg_vol * snap.last_close
 
-        # Coerce NaNs to None so the rest of the system sees true missing.
         for fld in ("last_close", "avg_daily_volume", "avg_dollar_volume",
                     "return_pct", "volatility_pct"):
             v = getattr(snap, fld)
@@ -141,7 +144,3 @@ class YFinancePricesProvider(PricesProvider):
 
         self._cache_set(cache_id, snap.__dict__)
         return snap
-
-
-def snapshot_to_dict(s: PriceSnapshot) -> Dict[str, Any]:
-    return {k: v for k, v in s.__dict__.items()}

@@ -58,8 +58,50 @@ universe:
 
 providers:
   fundamentals: yfinance      # yfinance | finnhub (future) | fmp (future)
-  prices: yfinance            # yfinance | alphavantage (future)
+  prices: yfinance            # yfinance | stooq | alphavantage (future)
   news: yfinance              # yfinance | newsapi (future) | marketaux (future)
+
+# Backup-plan ladder + provider-fallback + coverage gating policy.
+# The pipeline tries primary -> secondary provider(s) live (Plan A/B), then a
+# fresh-enough cache (Plan C), then a diagnostic-only result (Plan D) instead of
+# a misleading ranking. Coverage thresholds decide whether the final ranking is
+# presented as VALID, PARTIAL (with warnings), or DIAGNOSTIC_ONLY.
+robustness:
+  # --- Backup-plan ladder ---
+  # Plan C: when every live provider fails for a ticker, may we serve a
+  # recent-but-expired cache entry (labeled "stale_cache")? Off by default so a
+  # run never silently passes stale data off as live.
+  use_cache_on_provider_failure: false
+  # How old (days) a cache entry may be and still back a failed live fetch.
+  max_cache_age_days: 7
+  # Allow stale cache to back a *diagnostic* run even when not used live.
+  allow_stale_cache_for_diagnostic: true
+  # Ordered provider names per data type (first = primary, rest = fallbacks).
+  # Empty -> use the single providers.<type> above. Example:
+  #   provider_priority_by_data_type:
+  #     prices: [yfinance, stooq]
+  provider_priority_by_data_type: {}
+  # If benchmark health shows a systemic provider failure, refuse to present a
+  # normal ranking (the run is marked INVALID_PROVIDER_FAILURE).
+  stop_on_systemic_provider_failure: true
+  # Allow a degraded-but-usable run to be presented as a PARTIAL ranking (with
+  # warnings) instead of being blocked outright.
+  allow_partial_ranking: true
+
+  # --- Coverage thresholds (consumed by the coverage-validation layer) ---
+  # Minimum fraction of priced / fundamentals / news coverage required before
+  # the ranking is trusted. News coverage never blocks a run; it only downgrades
+  # sentiment confidence.
+  min_price_coverage_ratio: 0.60
+  min_fundamentals_coverage_ratio: 0.50
+  min_news_coverage_ratio: 0.10
+  # If provider-side failures exceed this fraction of attempts, treat as a
+  # systemic outage.
+  max_provider_failure_ratio: 0.50
+  # Fewest valid candidates required to present a real ranking.
+  min_valid_candidates_for_ranking: 1
+  # Minimum benchmark price-health success ratio to run the full pipeline.
+  min_benchmark_price_health_ratio: 0.50
 
 cache:
   enabled: true

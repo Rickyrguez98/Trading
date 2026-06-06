@@ -68,6 +68,38 @@ class Cache:
         return blob.get("payload")
 
     # ------------------------------------------------------------------
+    def get_entry(
+        self,
+        namespace: str,
+        identifier: str,
+        max_age_seconds: Optional[int] = None,
+    ) -> Optional[CacheEntry]:
+        """Read an entry IGNORING the normal TTL, bounded by ``max_age_seconds``.
+
+        This is the stale-cache backup path (Plan C): when live providers fail,
+        a caller may knowingly accept a recent-but-expired entry. Returns a
+        :class:`CacheEntry` (timestamp + payload) so the caller can label the
+        provenance and the age honestly, or ``None`` if no entry exists or it is
+        older than ``max_age_seconds``.
+        """
+        if not self.enabled:
+            return None
+        path = self._key_path(namespace, identifier)
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                blob = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Cache read failed for %s/%s: %s", namespace, identifier, exc)
+            return None
+        ts = float(blob.get("timestamp", 0.0))
+        if max_age_seconds is not None and max_age_seconds >= 0:
+            if (time.time() - ts) > max_age_seconds:
+                return None
+        return CacheEntry(timestamp=ts, payload=blob.get("payload"))
+
+    # ------------------------------------------------------------------
     def set(self, namespace: str, identifier: str, payload: Any) -> None:
         if not self.enabled:
             return

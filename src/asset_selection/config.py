@@ -114,6 +114,53 @@ class ProvidersConfig:
 
 
 @dataclass
+class RobustnessConfig:
+    """Backup-plan + provider-fallback policy.
+
+    The pipeline tries primary -> secondary provider(s) (live), then a
+    fresh-enough cache (Plan C), then -- if everything fails -- produces a
+    diagnostic-only result rather than a misleading ranking (Plan D). Coverage
+    thresholds (consumed by the coverage-validation layer) gate whether the
+    final ranking is presented as valid, partial, or diagnostic.
+    """
+    # --- Backup-plan ladder ---
+    # On a live provider miss, may we serve a recent-but-expired cache entry?
+    use_cache_on_provider_failure: bool = False
+    # How old (days) a cache entry may be and still back a failed live fetch.
+    max_cache_age_days: float = 7.0
+    # Allow stale cache to back a *diagnostic* run even if not used live.
+    allow_stale_cache_for_diagnostic: bool = True
+    # Ordered provider names per data type, e.g.
+    # {"prices": ["yfinance", "stooq"]}. Empty -> use providers.<type> alone.
+    provider_priority_by_data_type: Dict[str, List[str]] = field(default_factory=dict)
+    # If benchmark health shows a systemic provider failure, refuse to present
+    # a normal ranking (the run is marked INVALID_PROVIDER_FAILURE).
+    stop_on_systemic_provider_failure: bool = True
+    # Allow a degraded-but-usable run to be presented as a PARTIAL ranking
+    # (with warnings) instead of being blocked outright.
+    allow_partial_ranking: bool = True
+
+    # --- Coverage thresholds (consumed by validation/coverage.py) ---
+    # Minimum fraction of priced/fundamentals/news coverage required before the
+    # ranking is trusted. News coverage never blocks a run; it only downgrades
+    # sentiment confidence.
+    min_price_coverage_ratio: float = 0.60
+    min_fundamentals_coverage_ratio: float = 0.50
+    min_news_coverage_ratio: float = 0.10
+    # If provider-side failures exceed this fraction of attempts, treat as a
+    # systemic outage.
+    max_provider_failure_ratio: float = 0.50
+    # Fewest valid-fundamentals candidates required to present a real ranking.
+    min_valid_candidates_for_ranking: int = 1
+    # Minimum benchmark price-health success ratio to run the full pipeline.
+    min_benchmark_price_health_ratio: float = 0.50
+
+    @property
+    def max_cache_age_seconds(self) -> int:
+        return int(max(0.0, self.max_cache_age_days) * 86400)
+
+
+@dataclass
 class CacheConfig:
     enabled: bool = True
     dir: str = "data/cache"
@@ -217,6 +264,7 @@ class AppConfig:
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     pipeline: PipelineStagesConfig = field(default_factory=PipelineStagesConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+    robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     rate_limits: Dict[str, float] = field(default_factory=lambda: {"yfinance": 0.4})
     prices: PricesConfig = field(default_factory=PricesConfig)
@@ -279,6 +327,7 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
         universe=UniverseConfig(**_filtered(UniverseConfig, section("universe"))),
         pipeline=PipelineStagesConfig(**_filtered(PipelineStagesConfig, section("pipeline"))),
         providers=ProvidersConfig(**_filtered(ProvidersConfig, section("providers"))),
+        robustness=RobustnessConfig(**_filtered(RobustnessConfig, section("robustness"))),
         cache=CacheConfig(**_filtered(CacheConfig, section("cache"))),
         rate_limits=dict(section("rate_limits") or {"yfinance": 0.4}),
         prices=PricesConfig(**_filtered(PricesConfig, section("prices"))),
