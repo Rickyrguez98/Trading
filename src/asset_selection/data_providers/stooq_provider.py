@@ -17,17 +17,21 @@ from __future__ import annotations
 
 import io
 import logging
-import math
 from dataclasses import fields as _dc_fields
 from typing import Any, Dict
 
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from ..utils.validation import coerce_float
 from . import errors as err
 from .base import PriceSnapshot, PricesProvider
-from .symbols import likely_no_data_reason, to_provider_symbol, was_remapped
+from .prices_provider import _populate_price_metrics, _run_symbol_ladder
+from .symbols import (
+    likely_no_data_reason,
+    resolve_provider_symbols,
+    stooq_symbol as _stooq_symbol,
+    was_remapped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +41,6 @@ _PRICE_FIELDS = {f.name for f in _dc_fields(PriceSnapshot)}
 
 def _compat(cached: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in cached.items() if k in _PRICE_FIELDS}
-
-
-def _stooq_symbol(canonical: str) -> str:
-    """Canonical -> Stooq symbol, e.g. AAPL -> aapl.us, BRK.B -> brk-b.us."""
-    base = to_provider_symbol(canonical.strip().upper(), "stooq").lower()
-    return f"{base}.us"
 
 
 class StooqPricesProvider(PricesProvider):
@@ -73,74 +71,63 @@ class StooqPricesProvider(PricesProvider):
 
     def fetch(self, ticker: str, lookback_days: int = 90) -> PriceSnapshot:
         ticker = ticker.strip().upper()
-        provider_symbol = _stooq_symbol(ticker)
-        cache_id = f"{provider_symbol}:{lookback_days}"
+        # Stooq resolution ladder: primary ``nvda.us`` first, then (only on an
+        # EMPTY response) dotted / root-only spellings Stooq sometimes lists
+        # under. variants[0] is always what ``stooq_symbol`` would return, so
+        # the common single-variant case costs exactly one request.
+        variants = resolve_provider_symbols(ticker, self.name) or [_stooq_symbol(ticker)]
+        primary_symbol = variants[0]
+        cache_id = f"{primary_symbol}:{lookback_days}"
 
         cached = self._cache_get(cache_id)
         if cached is not None:
-            cached.setdefault("provider_symbol", provider_symbol)
+            cached.setdefault("provider_symbol", primary_symbol)
             snap = PriceSnapshot(**_compat(cached))
             snap.data_source = "fresh_cache"
             return snap
 
         snap = PriceSnapshot(
             ticker=ticker, lookback_days=lookback_days, source=self.name,
-            provider_symbol=provider_symbol, data_source="live",
+            provider_symbol=primary_symbol, data_source="live",
         )
 
-        try:
-            hist = self._download_csv(provider_symbol)
-        except Exception as exc:  # noqa: BLE001
+        # The Stooq CSV endpoint ignores any lookback hint (it returns the full
+        # daily history), so the downloader takes only the symbol; we adapt it
+        # to the ladder's ``(symbol, lookback_days)`` signature with a wrapper.
+        hist, used_symbol, transport_exc = _run_symbol_ladder(
+            ticker, variants, self.name,
+            lambda sym, _days: self._download_csv(sym), lookback_days, snap,
+        )
+        snap.provider_symbol = used_symbol
+
+        if transport_exc is not None:
             logger.warning(
                 "stooq price fetch errored for %s (as %s): %s",
-                ticker, provider_symbol, exc,
+                ticker, used_symbol, transport_exc,
             )
             snap.status = "error"
-            snap.error = f"{type(exc).__name__}: {exc}"
-            snap.error_type = err.classify_exception(exc)
+            snap.error = f"{type(transport_exc).__name__}: {transport_exc}"
+            snap.error_type = err.classify_exception(transport_exc)
             snap.data_source = "unavailable"
             self._cache_set(cache_id, snap.__dict__)
             return snap
 
-        if hist.empty or "Close" not in hist.columns:
+        if hist is None or hist.empty or "Close" not in hist.columns:
             snap.status = "empty"
-            snap.error = likely_no_data_reason(ticker, provider_symbol)
+            snap.error = likely_no_data_reason(ticker, used_symbol)
             snap.error_type = err.classify_empty(
                 "price", remapped=was_remapped(ticker, self.name)
             )
             self._cache_set(cache_id, snap.__dict__)
             return snap
 
-        # Keep only the most recent lookback window.
+        # Keep only the most recent lookback window, then share the exact metric
+        # derivation used by the yfinance provider so the two never drift.
         if "Date" in hist.columns:
             hist = hist.sort_values("Date")
         tail = hist.tail(max(lookback_days, 1))
         closes = pd.to_numeric(tail["Close"], errors="coerce").dropna()
         volumes = pd.to_numeric(tail.get("Volume", pd.Series(dtype=float)), errors="coerce").fillna(0)
-
-        if not closes.empty:
-            snap.last_close = coerce_float(closes.iloc[-1])
-            if len(closes) > 1:
-                first = closes.iloc[0]
-                if first and first > 0:
-                    snap.return_pct = float((closes.iloc[-1] / first) - 1.0)
-                daily_ret = closes.pct_change().dropna()
-                if len(daily_ret) >= 5:
-                    stdev = float(daily_ret.std())
-                    if math.isfinite(stdev):
-                        snap.volatility_pct = stdev * math.sqrt(252)
-
-        if not volumes.empty:
-            avg_vol = float(volumes.tail(20).mean()) if len(volumes) >= 20 else float(volumes.mean())
-            snap.avg_daily_volume = avg_vol
-            if snap.last_close is not None:
-                snap.avg_dollar_volume = avg_vol * snap.last_close
-
-        for fld in ("last_close", "avg_daily_volume", "avg_dollar_volume",
-                    "return_pct", "volatility_pct"):
-            v = getattr(snap, fld)
-            if v is None or (isinstance(v, float) and not math.isfinite(v)):
-                setattr(snap, fld, None)
-
+        _populate_price_metrics(snap, closes, volumes)
         self._cache_set(cache_id, snap.__dict__)
         return snap
