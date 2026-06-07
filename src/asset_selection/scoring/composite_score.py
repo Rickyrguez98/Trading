@@ -35,7 +35,12 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from ..config import CompositeConfig, PricesConfig, RiskControlsConfig
+from ..config import (
+    CompositeConfig,
+    PricesConfig,
+    RiskControlsConfig,
+    SentimentConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +118,55 @@ def compute_risk_penalty(
 
 
 # ---------------------------------------------------------------------------
+# Effective (confidence-adjusted) sentiment
+# ---------------------------------------------------------------------------
+
+def compute_effective_sentiment(
+    df: pd.DataFrame,
+    sentiment_cfg: SentimentConfig,
+) -> pd.Series:
+    """Pull raw sentiment toward neutral in proportion to (1 - confidence).
+
+    ``effective = neutral + confidence * (raw - neutral)``
+
+    A high-confidence 80/100 sentiment stays near 80; a low-confidence 80/100 is
+    pulled back toward ``neutral_sentiment_score`` so a thin, noisy, or stale feed
+    cannot swing the composite. Confidence is taken from
+    ``effective_sentiment_confidence`` when present (stale-news damping, see
+    flag_rows) and otherwise from the raw ``sentiment_confidence``.
+
+    When ``use_confidence_adjusted_sentiment`` is False this is a pass-through of
+    the raw sentiment, so the behaviour is fully config-reversible.
+    """
+    neutral = float(sentiment_cfg.neutral_sentiment_score)
+    raw = pd.to_numeric(df.get("sentiment_score", neutral), errors="coerce").fillna(neutral)
+    if not sentiment_cfg.use_confidence_adjusted_sentiment:
+        return raw.clip(lower=0.0, upper=100.0)
+    if "effective_sentiment_confidence" in df.columns:
+        conf_src = df["effective_sentiment_confidence"]
+    else:
+        conf_src = df.get("sentiment_confidence", 0.0)
+    conf = pd.to_numeric(conf_src, errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+    effective = neutral + conf * (raw - neutral)
+    return effective.clip(lower=0.0, upper=100.0)
+
+
+# ---------------------------------------------------------------------------
 # Composite score
 # ---------------------------------------------------------------------------
 
 def compute_composite_scores(
     df: pd.DataFrame,
     composite_cfg: CompositeConfig,
+    sentiment_column: str = "sentiment_score",
 ) -> pd.Series:
-    """Weighted blend of pillar scores minus risk penalty."""
+    """Weighted blend of pillar scores minus risk penalty.
+
+    ``sentiment_column`` selects which sentiment series feeds the blend. The
+    pipeline passes ``effective_sentiment_score`` (confidence-adjusted) by
+    default; pass ``sentiment_score`` to use the raw value. Falls back to
+    ``sentiment_score`` if the requested column is absent.
+    """
     w = composite_cfg.weights or {}
     if not w:
         # Fallback equal weights so the pipeline still runs.
@@ -137,7 +183,8 @@ def compute_composite_scores(
     growth = pd.to_numeric(df.get("growth_score", 50), errors="coerce").fillna(50)
     quality = pd.to_numeric(df.get("quality_score", 50), errors="coerce").fillna(50)
     valuation = pd.to_numeric(df.get("valuation_score", 50), errors="coerce").fillna(50)
-    sentiment = pd.to_numeric(df.get("sentiment_score", 50), errors="coerce").fillna(50)
+    sent_col = sentiment_column if sentiment_column in df.columns else "sentiment_score"
+    sentiment = pd.to_numeric(df.get(sent_col, 50), errors="coerce").fillna(50)
     risk = pd.to_numeric(df.get("risk_penalty", 0), errors="coerce").fillna(0)
 
     composite = (

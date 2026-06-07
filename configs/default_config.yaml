@@ -153,6 +153,19 @@ sentiment:
   # Per-model confidence ceilings: a lexicon model can't be as sure as FinBERT.
   vader_confidence_factor: 0.85
   finbert_confidence_factor: 1.0
+  # Confidence-adjusted sentiment fed into the composite. When true, the score
+  # uses effective_sentiment = neutral + confidence * (raw - neutral), so a
+  # low-confidence sentiment is pulled toward neutral instead of swinging the
+  # final_score. raw_sentiment_score is still reported for transparency.
+  use_confidence_adjusted_sentiment: true
+  neutral_sentiment_score: 50.0
+  # Stale-news handling: a low fresh_ratio damps the effective confidence and
+  # raises STALE_NEWS / VERY_STALE_NEWS flags.
+  stale_news_penalty_enabled: true
+  stale_news_fresh_ratio_threshold: 0.50
+  very_stale_news_fresh_ratio_threshold: 0.20
+  # Distinct non-duplicate sources below this fires LOW_SOURCE_DIVERSITY.
+  low_source_diversity_threshold: 2
 
 scoring:
   # Winsorize each metric at these percentiles before z-scoring.
