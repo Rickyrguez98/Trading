@@ -76,7 +76,9 @@ from ..universe import build_universe, save_universe, universe_counts_by_exchang
 from ..validation import (
     assess_coverage,
     build_provider_diagnostics,
+    build_provider_report,
     determine_run_status,
+    render_provider_provenance_note,
     render_run_status_banner,
     validate_outputs,
     write_provider_diagnostics,
@@ -879,6 +881,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             "fundamentals": fund_provider,
             "news": news_provider,
         })
+        configured_providers = {
+            "fundamentals": config.providers.fundamentals,
+            "prices": config.providers.prices,
+            "news": config.providers.news,
+        }
+        provider_report = build_provider_report(
+            configured_providers=configured_providers,
+            fallback_usage=fallback_usage,
+            cache_usage={},
+        )
         summary = {
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "mode": mode,
@@ -889,6 +901,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "recommendations_for_next_run": status["recommendations_for_next_run"],
             "data_coverage_summary": coverage,
             "fallback_usage_summary": fallback_usage,
+            "provider_report": provider_report,
             "provider_health_check_summary": health_report,
             "candidates": [],
             "stages": [],
@@ -906,11 +919,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         diag = build_provider_diagnostics(
             status=status, coverage=coverage, health_report=health_report,
             provider_failures={}, fallback_usage=fallback_usage, cache_usage={},
-            providers={
-                "fundamentals": config.providers.fundamentals,
-                "prices": config.providers.prices,
-                "news": config.providers.news,
-            },
+            providers=configured_providers,
         )
         write_provider_diagnostics(diag, output_dir)
         logger.error(
@@ -995,6 +1004,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         "news": news_provider,
     })
     cache_usage = _cache_usage_summary(price_records, fund_records)
+    # One consistent provenance block reused by the summary JSON, the diagnostics
+    # report, and the top-candidates footer so the four artifacts can't disagree.
+    configured_providers = {
+        "fundamentals": config.providers.fundamentals,
+        "prices": config.providers.prices,
+        "news": config.providers.news,
+    }
+    provider_report = build_provider_report(
+        configured_providers=configured_providers,
+        fallback_usage=fallback_usage,
+        cache_usage=cache_usage,
+    )
 
     summary["run_status"] = status["run_status"]
     summary["ranking_validity"] = status["ranking_validity"]
@@ -1004,6 +1025,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary["data_coverage_summary"] = coverage
     summary["fallback_usage_summary"] = fallback_usage
     summary["cache_usage_summary"] = cache_usage
+    # Consolidated provider provenance (improvement #7): configured_providers,
+    # provider_chain_by_data_type, actual_provider_usage, cache_usage_by_stage.
+    summary["provider_report"] = provider_report
     # Output-location pointers (improvement #8): the summary holds only the
     # top-N slice, so name where the full ranking and human report live.
     summary["full_results_path"] = str(csv_path)
@@ -1013,9 +1037,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     write_json(json_path, summary)
 
     # Markdown report, prefixed with a run-status banner so the headline table
-    # can never be read without its validity caveat.
+    # can never be read without its validity caveat, and suffixed with the same
+    # provider-provenance block the diagnostics report uses (consistency).
     banner = render_run_status_banner(status, coverage)
-    md = banner + format_top_candidates_markdown(ranked, top_n=config.run.top_n)
+    md = (
+        banner
+        + format_top_candidates_markdown(ranked, top_n=config.run.top_n)
+        + render_provider_provenance_note(provider_report)
+    )
     md_path.write_text(md, encoding="utf-8")
 
     # Consolidated provider diagnostics report (improvement #9) -- the one
