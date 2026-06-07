@@ -314,6 +314,40 @@ class AllocationConfig:
 
 
 @dataclass
+class CriticalTickersConfig:
+    """Which tickers are *material* -- worth extra effort before being dropped.
+
+    A "critical" ticker is one whose silent disappearance from a ranking is a
+    data-quality red flag rather than an economic signal (a mega-cap, a
+    benchmark name, or a name the user explicitly watches). When the price
+    endpoint fails for a critical ticker, Stage 2 runs the full symbol ladder
+    and a cross-provider fundamentals confirmation before classifying it, and
+    the validation layer reports the gap loudly instead of letting overall
+    coverage hide it. Nothing here forces a name *into* the ranking -- it only
+    governs how hard we try and how loudly we report a failure.
+    """
+    # Static, always-critical set (canonical spellings; class shares dotted).
+    static_tickers: List[str] = field(default_factory=lambda: [
+        "AAPL", "MSFT", "GOOGL", "GOOG", "NVDA", "AMZN", "META", "BRK.B", "TSLA",
+    ])
+    # Names the user explicitly cares about (treated as critical + reported
+    # under failed_user_watchlist_tickers).
+    user_watchlist: List[str] = field(default_factory=list)
+    # Benchmark health tickers are treated as critical too (kept in sync with
+    # the health-check bellwethers) when true.
+    treat_benchmark_as_critical: bool = True
+    # Dynamic criticality thresholds. A name whose price snapshot reports a
+    # dollar volume at/above this is treated as high-liquidity (material) even
+    # if not in the static set. Market-cap based criticality is only available
+    # once fundamentals are known, so it is applied at the validation layer.
+    high_dollar_volume_for_critical: float = 50_000_000.0
+    large_cap_for_critical: float = 10_000_000_000.0
+    # Run the Stage-2 recovery ladder (full variants + cross-provider
+    # fundamentals confirmation) for failed critical tickers.
+    enable_stage2_recovery: bool = True
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     log_to_file: bool = False
@@ -335,6 +369,7 @@ class AppConfig:
     composite: CompositeConfig = field(default_factory=CompositeConfig)
     risk_controls: RiskControlsConfig = field(default_factory=RiskControlsConfig)
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
+    critical_tickers: CriticalTickersConfig = field(default_factory=CriticalTickersConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @property
@@ -399,6 +434,9 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
         composite=CompositeConfig(**_filtered(CompositeConfig, section("composite"))),
         risk_controls=RiskControlsConfig(**_filtered(RiskControlsConfig, section("risk_controls"))),
         allocation=AllocationConfig(**_filtered(AllocationConfig, section("allocation"))),
+        critical_tickers=CriticalTickersConfig(
+            **_filtered(CriticalTickersConfig, section("critical_tickers"))
+        ),
         logging=LoggingConfig(**_filtered(LoggingConfig, section("logging"))),
     )
 
