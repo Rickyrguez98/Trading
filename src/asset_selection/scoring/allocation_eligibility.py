@@ -191,14 +191,38 @@ def _allocation_adjusted_score(
     return float(max(0.0, min(100.0, adj)))
 
 
-def _risk_bucket(row: pd.Series, rc: RiskControlsConfig) -> str:
+def _risk_bucket(row: pd.Series, rc: RiskControlsConfig, flags: List[str]) -> str:
+    """Classify a name's risk for allocation triage.
+
+    The bucket is driven by volatility, the realized risk penalty, AND the
+    risk-related flags / selection bucket -- not volatility alone. A
+    speculative-momentum name whose headline volatility sits just under the
+    ceiling is still surfaced as ``high_risk`` rather than hiding behind a
+    sub-threshold number, so the risk bucket can never disagree with the flags.
+    """
     vol = _num(row.get("volatility_pct"))
     risk_penalty = _num(row.get("risk_penalty")) or 0.0
-    if (vol is None or vol <= rc.core_max_volatility_pct) and risk_penalty <= rc.core_max_risk_penalty:
+    bucket = str(row.get("selection_bucket") or "")
+
+    # Hard high-risk signals: above the vol/risk ceilings, an explicit high-vol
+    # or speculative-momentum flag, or the speculative bucket itself.
+    if (
+        (vol is not None and vol > rc.max_volatility_pct)
+        or risk_penalty > rc.max_risk_penalty
+        or "HIGH_VOLATILITY" in flags
+        or "SPECULATIVE_MOMENTUM" in flags
+        or bucket == "speculative_candidate"
+    ):
+        return "high_risk"
+    # Low risk requires contained vol AND contained risk penalty AND no
+    # weak-trend flag; anything in between is moderate.
+    if (
+        (vol is None or vol <= rc.core_max_volatility_pct)
+        and risk_penalty <= rc.core_max_risk_penalty
+        and "WEAK_PRICE_TREND" not in flags
+    ):
         return "low_risk"
-    if (vol is None or vol <= rc.max_volatility_pct) and risk_penalty <= rc.max_risk_penalty:
-        return "moderate_risk"
-    return "high_risk"
+    return "moderate_risk"
 
 
 def _sentiment_quality_bucket(row: pd.Series, scfg: SentimentConfig) -> str:
@@ -230,8 +254,13 @@ def _recommended_next_step(
 ) -> str:
     if eligible:
         return "eligible_for_portfolio_optimizer"
-    if bucket in ("speculative_candidate", "watchlist_only"):
+    # Speculative names are a hard default-exclude; the watchlist is explicitly a
+    # manual-review queue (weak trend / thin data that a human should re-check),
+    # so it routes to review rather than a silent exclusion.
+    if bucket == "speculative_candidate":
         return "exclude_from_allocation_by_default"
+    if bucket == "watchlist_only":
+        return "needs_manual_review"
     if any(x in _RISK_REASONS for x in reasons):
         return "risk_review_needed"
     if any(x in _SENTIMENT_REASONS for x in reasons):
@@ -290,7 +319,7 @@ def compute_allocation_fields(
         adj_col.append(_allocation_adjusted_score(row, flags, allocation_cfg))
         reasons_col.append(reasons)
         human_col.append(_human_exclusion(reasons))
-        risk_col.append(_risk_bucket(row, risk_controls))
+        risk_col.append(_risk_bucket(row, risk_controls, flags))
         sent_col.append(_sentiment_quality_bucket(row, sentiment_cfg))
         data_col.append(_data_quality_bucket(row, flags))
         role_col.append(_ROLE_BY_BUCKET.get(bucket, "watchlist_only"))
