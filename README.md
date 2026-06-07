@@ -576,6 +576,58 @@ toward the systemic-failure budget; a genuinely bad symbol is **not**.
 | `PROVIDER_HTTP_ERROR`         | Provider returned an HTTP error. | Yes |
 | `PROVIDER_UNKNOWN_ERROR`      | Unclassified provider error. | Yes |
 
+When a *critical* ticker (see below) loses its price, the bare `NO_PRICE_DATA`
+is **refined** into a more honest label after a cross-provider check — and the
+classifier **never** asserts `POSSIBLY_DELISTED` for a well-known name without
+evidence:
+
+| Refined type | Meaning |
+|--------------|---------|
+| `PRICE_ENDPOINT_NO_DATA`            | The price endpoint specifically returned nothing (a price-feed miss). |
+| `PROVIDER_SYMBOL_RESOLUTION_FAILED` | Every symbol variant we tried came back empty. |
+| `PRICE_PROVIDER_GAP`                | Price failed **but fundamentals exist** for the same ticker → a provider coverage gap, **not delisting**. |
+| `PROVIDER_COVERAGE_GAP`             | The free provider simply doesn't cover this name (nothing else corroborates it either). |
+| `CRITICAL_TICKER_PRICE_FAILURE`     | An important / mega-cap name lost its price → reported as a material gap. |
+
+### Material data gaps and critical tickers
+
+99.8% headline coverage can still hide a missing **NVDA**. To stop that, a set
+of **critical tickers** (configurable under `critical_tickers:` — the mega-caps,
+the benchmark bellwethers, and your `user_watchlist`) get extra effort and loud
+reporting:
+
+- **Symbol-resolution ladder.** Each provider is queried with *its own* spelling
+  — yfinance gets `NVDA` and `BRK-B`; Stooq gets `nvda.us` and `brk-b.us`. A
+  Stooq-style symbol is **never** sent to yfinance. Class shares and aliases add
+  a few ordered fallback variants, tried only after an *empty* response (never
+  after a transport error, where a different spelling can't help).
+- **Per-provider attempt trail.** Every `(provider, symbol, success, error)`
+  attempt is recorded on the snapshot and surfaced in `provider_diagnostics.md`,
+  so the report shows *what was actually tried* instead of collapsing the chain
+  into a single `NO_PRICE_DATA`.
+- **Stage-2 recovery + cross-provider confirmation.** Before a critical name is
+  allowed to vanish, the pipeline confirms the **company is real** via a
+  fundamentals lookup. If fundamentals survive, the gap is labeled
+  `PRICE_PROVIDER_GAP` (a price-feed gap, *not* delisting); the name is never
+  fabricated into the ranking.
+
+This feeds a second validity axis, **`ranking_completeness_status`** (orthogonal
+to `ranking_validity`):
+
+| `ranking_completeness_status` | Meaning |
+|-------------------------------|---------|
+| `COMPLETE`                          | No material gaps. |
+| `COMPLETE_WITH_MINOR_GAPS`          | Only non-material (illiquid/uncovered) names missing. |
+| `VALID_WITH_MATERIAL_WARNINGS`      | A watchlist / dynamic large-cap name is missing — reported loudly. |
+| `PARTIAL_CRITICAL_TICKER_FAILURE`   | A configured mega-cap / benchmark name is missing. |
+| `INVALID_SYSTEMIC_PROVIDER_FAILURE` | The benchmark probe shows a systemic outage. |
+
+A `PARTIAL_CRITICAL_TICKER_FAILURE` **downgrades the headline `run_status` from
+VALID to PARTIAL** (so the gap can't be missed) but the run stays **trusted
+(exit `0`)** — the ordering of the names that *were* priced is still sound. The
+missing tickers are named in `material_data_gaps`, `critical_ticker_failures`,
+and the warnings, never silently dropped.
+
 ### Provider fallback and backup plans
 
 Each data type can be configured with an ordered chain of providers
