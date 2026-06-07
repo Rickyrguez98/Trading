@@ -206,6 +206,24 @@ class SentimentConfig:
     vader_confidence_factor: float = 0.85
     finbert_confidence_factor: float = 1.0
 
+    # --- Confidence-adjusted sentiment (fed into the composite) ---
+    # When true, the composite uses an EFFECTIVE sentiment that is pulled toward
+    # `neutral_sentiment_score` in proportion to (1 - confidence): a low-confidence
+    # 80/100 sentiment contributes far less than a high-confidence one. The raw
+    # sentiment is still kept (raw_sentiment_score) for transparency.
+    use_confidence_adjusted_sentiment: bool = True
+    neutral_sentiment_score: float = 50.0
+    # --- Stale-news handling (consumed in flag_rows + effective confidence) ---
+    # A low fresh_ratio damps the effective confidence used above, so sentiment
+    # that leans on aging coverage cannot swing the score.
+    stale_news_penalty_enabled: bool = True
+    # fresh_ratio below this fires STALE_NEWS and starts damping confidence.
+    stale_news_fresh_ratio_threshold: float = 0.50
+    # fresh_ratio at/below this fires VERY_STALE_NEWS.
+    very_stale_news_fresh_ratio_threshold: float = 0.20
+    # Distinct non-duplicate sources below this fires LOW_SOURCE_DIVERSITY.
+    low_source_diversity_threshold: int = 2
+
 
 @dataclass
 class ScoringConfig:

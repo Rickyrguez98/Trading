@@ -17,6 +17,8 @@ _DISPLAY_COLUMNS: List[str] = [
     "return_pct",
     "volatility_pct",
     "sentiment_score",
+    "raw_sentiment_score",
+    "effective_sentiment_score",
     "article_count",
     "unique_article_count",
     "duplicate_count",

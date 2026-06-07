@@ -61,6 +61,7 @@ from ..scoring.allocation_eligibility import (
 )
 from ..scoring.composite_score import (
     compute_composite_scores,
+    compute_effective_sentiment,
     compute_risk_penalty,
     flag_rows,
 )
@@ -699,7 +700,22 @@ def _stage5_compose_and_rank(
 
     df = df.copy()
     df["risk_penalty"] = compute_risk_penalty(df, config.prices)
-    df["final_score"] = compute_composite_scores(df, config.composite)
+    # Keep the raw sentiment for transparency, and derive a confidence-adjusted
+    # effective sentiment that the composite consumes by default. A low-confidence
+    # or stale-news sentiment is pulled toward neutral instead of swinging the score.
+    df["raw_sentiment_score"] = pd.to_numeric(
+        df.get("sentiment_score", config.sentiment.neutral_sentiment_score),
+        errors="coerce",
+    ).fillna(config.sentiment.neutral_sentiment_score)
+    df["effective_sentiment_score"] = compute_effective_sentiment(df, config.sentiment)
+    sentiment_column = (
+        "effective_sentiment_score"
+        if config.sentiment.use_confidence_adjusted_sentiment
+        else "sentiment_score"
+    )
+    df["final_score"] = compute_composite_scores(
+        df, config.composite, sentiment_column=sentiment_column
+    )
     df = flag_rows(
         df,
         config.composite,
@@ -1204,6 +1220,8 @@ def _build_summary(
             "return_pct": _safe_num(row.get("return_pct")),
             "volatility_pct": _safe_num(row.get("volatility_pct")),
             "sentiment_score": _safe_num(row.get("sentiment_score")),
+            "raw_sentiment_score": _safe_num(row.get("raw_sentiment_score")),
+            "effective_sentiment_score": _safe_num(row.get("effective_sentiment_score")),
             "sentiment_article_count": int(row.get("article_count", 0) or 0),
             "sentiment_unique_article_count": int(row.get("unique_article_count", 0) or 0),
             "sentiment_duplicate_count": int(row.get("duplicate_count", 0) or 0),
