@@ -61,6 +61,7 @@ from ..scoring.allocation_eligibility import (
 )
 from ..scoring.composite_score import (
     compute_composite_scores,
+    compute_effective_confidence,
     compute_effective_sentiment,
     compute_risk_penalty,
     flag_rows,
@@ -707,6 +708,8 @@ def _stage5_compose_and_rank(
         df.get("sentiment_score", config.sentiment.neutral_sentiment_score),
         errors="coerce",
     ).fillna(config.sentiment.neutral_sentiment_score)
+    # Stale news damps the confidence used by the effective-sentiment formula.
+    df["effective_sentiment_confidence"] = compute_effective_confidence(df, config.sentiment)
     df["effective_sentiment_score"] = compute_effective_sentiment(df, config.sentiment)
     sentiment_column = (
         "effective_sentiment_score"
@@ -722,6 +725,9 @@ def _stage5_compose_and_rank(
         low_sentiment_confidence_threshold=config.sentiment.low_confidence_threshold,
         weak_return_threshold=config.prices.weak_return_threshold,
         risk_controls=config.risk_controls,
+        stale_news_fresh_ratio_threshold=config.sentiment.stale_news_fresh_ratio_threshold,
+        very_stale_news_fresh_ratio_threshold=config.sentiment.very_stale_news_fresh_ratio_threshold,
+        low_source_diversity_threshold=config.sentiment.low_source_diversity_threshold,
     )
     ranked = rank_candidates(df, top_n=config.run.top_n)
     # Separate the research ranking from the allocation shortlist: tag every
@@ -1231,6 +1237,7 @@ def _build_summary(
             "sentiment_positive_ratio": _safe_num(row.get("positive_ratio")),
             "sentiment_negative_ratio": _safe_num(row.get("negative_ratio")),
             "sentiment_confidence": _safe_num(row.get("sentiment_confidence")),
+            "sentiment_effective_confidence": _safe_num(row.get("effective_sentiment_confidence")),
             "sentiment_source_diversity": int(row.get("source_diversity", 0) or 0),
             "sentiment_model": row.get("sentiment_model") or config.sentiment.model,
             "fundamentals_score": _safe_num(row.get("fundamentals_score")),

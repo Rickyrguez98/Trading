@@ -121,6 +121,29 @@ def compute_risk_penalty(
 # Effective (confidence-adjusted) sentiment
 # ---------------------------------------------------------------------------
 
+def compute_effective_confidence(
+    df: pd.DataFrame,
+    sentiment_cfg: SentimentConfig,
+) -> pd.Series:
+    """Damp the reported confidence when news is stale.
+
+    Below ``stale_news_fresh_ratio_threshold`` the confidence is scaled down in
+    proportion to how fresh the feed is (``fresh_ratio / threshold``, capped at
+    1.0), so sentiment that leans on aging coverage carries less weight in the
+    effective-sentiment formula. With ``stale_news_penalty_enabled`` False this
+    returns the raw confidence unchanged.
+    """
+    conf = pd.to_numeric(df.get("sentiment_confidence", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+    if not sentiment_cfg.stale_news_penalty_enabled:
+        return conf
+    thr = float(sentiment_cfg.stale_news_fresh_ratio_threshold)
+    if thr <= 0:
+        return conf
+    fresh = pd.to_numeric(df.get("fresh_ratio", 1.0), errors="coerce").fillna(1.0).clip(lower=0.0, upper=1.0)
+    damp = (fresh / thr).clip(upper=1.0)
+    return (conf * damp).clip(lower=0.0, upper=1.0)
+
+
 def compute_effective_sentiment(
     df: pd.DataFrame,
     sentiment_cfg: SentimentConfig,
@@ -208,6 +231,9 @@ def flag_rows(
     low_sentiment_confidence_threshold: float = 0.3,
     weak_return_threshold: float = -0.10,
     risk_controls: "RiskControlsConfig | None" = None,
+    stale_news_fresh_ratio_threshold: float = 0.50,
+    very_stale_news_fresh_ratio_threshold: float = 0.20,
+    low_source_diversity_threshold: int = 2,
 ) -> pd.DataFrame:
     """Add ``flags`` (list[str]), ``reason``, and ``selection_bucket`` columns.
 
@@ -262,11 +288,27 @@ def flag_rows(
             and s_score <= review_cfg.get("sentiment_max", 35)
         ):
             row_flags.append("STRONG_FUNDAMENTALS_BAD_SENTIMENT")
+        fresh_ratio = _coerce(row.get("fresh_ratio"))
+        source_diversity = int(row.get("source_diversity", 0) or 0)
         if article_count == 0:
             row_flags.append("NO_NEWS")
-        elif sentiment_confidence < low_sentiment_confidence_threshold:
-            # Some news, but not enough volume/diversity to trust the signal.
-            row_flags.append("LOW_SENTIMENT_CONFIDENCE")
+        else:
+            if sentiment_confidence < low_sentiment_confidence_threshold:
+                # Some news, but not enough volume/diversity to trust the signal.
+                row_flags.append("LOW_SENTIMENT_CONFIDENCE")
+            # Freshness: VERY_STALE_NEWS supersedes STALE_NEWS.
+            if (
+                fresh_ratio is not None
+                and fresh_ratio <= very_stale_news_fresh_ratio_threshold
+            ):
+                row_flags.append("VERY_STALE_NEWS")
+            elif (
+                fresh_ratio is not None
+                and fresh_ratio < stale_news_fresh_ratio_threshold
+            ):
+                row_flags.append("STALE_NEWS")
+            if source_diversity < low_source_diversity_threshold:
+                row_flags.append("LOW_SOURCE_DIVERSITY")
         if r is not None and r < weak_return_threshold:
             row_flags.append("WEAK_PRICE_TREND")
         if missing_metric_count >= 5:
