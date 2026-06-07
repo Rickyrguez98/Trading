@@ -252,6 +252,50 @@ class RiskControlsConfig:
 
 
 @dataclass
+class AllocationConfig:
+    """Gates that separate a *research ranking* from an *allocation shortlist*.
+
+    Asset selection answers "which assets are worth considering?". These knobs
+    decide which of those research candidates are *eligible* to be handed to a
+    future allocation/rebalancing module (which answers "how much, and when?").
+    Nothing here removes a candidate from the research ranking -- it only sets
+    ``eligible_for_allocation`` and the ``allocation_adjusted_score``.
+
+    Default policy: only ``high_quality_core_candidate`` and ``growth_candidate``
+    can be eligible, and only if they also clear the risk / data-quality /
+    sentiment gates below. ``speculative_candidate`` and ``watchlist_only`` are
+    never eligible by default (flip the ``allow_*`` switches to override).
+    """
+    # --- Bucket gating ---
+    allow_speculative_for_allocation: bool = False
+    allow_watchlist_for_allocation: bool = False
+
+    # --- Risk gating (annualized vol fraction; risk_penalty on 0..100) ---
+    max_allocation_volatility: float = 0.50
+    max_allocation_risk_penalty: float = 25.0
+    require_non_negative_recent_return_for_allocation: bool = True
+
+    # --- Data-quality gating ---
+    max_missing_metric_count_for_allocation: int = 4
+    require_market_cap_for_allocation: bool = True
+
+    # --- Sentiment gating (only applied when the name actually has news) ---
+    min_sentiment_confidence_for_allocation: float = 0.30
+    min_fresh_news_ratio_for_allocation: float = 0.50
+
+    # --- allocation_adjusted_score penalties (subtracted from final_score) ---
+    penalty_high_volatility: float = 25.0
+    penalty_speculative_momentum: float = 20.0
+    penalty_weak_price_trend: float = 15.0
+    penalty_watchlist_bucket: float = 20.0
+    penalty_speculative_bucket: float = 15.0
+    penalty_low_sentiment_confidence: float = 10.0
+    penalty_stale_news: float = 10.0
+    # Multiplier on (risk_penalty - max_allocation_risk_penalty) when over budget.
+    penalty_excess_risk_weight: float = 0.5
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     log_to_file: bool = False
@@ -272,6 +316,7 @@ class AppConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     composite: CompositeConfig = field(default_factory=CompositeConfig)
     risk_controls: RiskControlsConfig = field(default_factory=RiskControlsConfig)
+    allocation: AllocationConfig = field(default_factory=AllocationConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @property
@@ -335,6 +380,7 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
         scoring=ScoringConfig(**_filtered(ScoringConfig, section("scoring"))),
         composite=CompositeConfig(**_filtered(CompositeConfig, section("composite"))),
         risk_controls=RiskControlsConfig(**_filtered(RiskControlsConfig, section("risk_controls"))),
+        allocation=AllocationConfig(**_filtered(AllocationConfig, section("allocation"))),
         logging=LoggingConfig(**_filtered(LoggingConfig, section("logging"))),
     )
 
