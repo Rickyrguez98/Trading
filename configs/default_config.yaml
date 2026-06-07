@@ -103,6 +103,30 @@ robustness:
   # Minimum benchmark price-health success ratio to run the full pipeline.
   min_benchmark_price_health_ratio: 0.50
 
+# Material / "critical" tickers -- names whose silent disappearance from a
+# ranking is a data-quality red flag, not an economic signal. When a critical
+# ticker's price endpoint fails, Stage 2 runs the full symbol ladder and a
+# cross-provider fundamentals confirmation before classifying it, and the
+# validation layer reports the gap LOUDLY (materiality) instead of letting 99.8%
+# headline coverage bury a missing NVDA. Nothing here forces a name *into* the
+# ranking -- it only governs how hard we try and how visibly a failure is shown.
+critical_tickers:
+  # Always-critical set (canonical spellings; class shares dotted, e.g. BRK.B).
+  static_tickers: [AAPL, MSFT, GOOGL, GOOG, NVDA, AMZN, META, BRK.B, TSLA]
+  # Names you explicitly watch (treated as critical + reported under
+  # failed_user_watchlist_tickers when they go missing).
+  user_watchlist: []
+  # Treat the benchmark health bellwethers as critical too.
+  treat_benchmark_as_critical: true
+  # Dynamic criticality: a priced name at/above this dollar volume is material
+  # even if not in the static set; a fundamentals market-cap at/above the cap
+  # threshold marks a dynamic large-cap (applied at the validation layer).
+  high_dollar_volume_for_critical: 50000000.0
+  large_cap_for_critical: 10000000000.0
+  # Run the Stage-2 recovery (full symbol ladder + cross-provider fundamentals
+  # confirmation) for failed critical tickers before classifying the gap.
+  enable_stage2_recovery: true
+
 cache:
   enabled: true
   dir: data/cache
