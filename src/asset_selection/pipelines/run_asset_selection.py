@@ -55,6 +55,10 @@ from ..data_providers.base import Fundamentals, NewsItem, PriceSnapshot
 from ..health import run_provider_health_checks
 from ..fundamentals.fundamental_scoring import score_fundamentals
 from ..logging_config import configure_logging
+from ..scoring.allocation_eligibility import (
+    allocation_field_summary,
+    compute_allocation_fields,
+)
 from ..scoring.composite_score import (
     compute_composite_scores,
     compute_risk_penalty,
@@ -704,6 +708,14 @@ def _stage5_compose_and_rank(
         risk_controls=config.risk_controls,
     )
     ranked = rank_candidates(df, top_n=config.run.top_n)
+    # Separate the research ranking from the allocation shortlist: tag every
+    # candidate with eligibility + an allocation-adjusted score (never drops rows).
+    ranked = compute_allocation_fields(
+        ranked,
+        allocation_cfg=config.allocation,
+        risk_controls=config.risk_controls,
+        sentiment_cfg=config.sentiment,
+    )
 
     stats.output_count = len(ranked)
     stats.duration_seconds = time.perf_counter() - started
@@ -1180,7 +1192,7 @@ def _build_summary(
     top = ranked.head(config.run.top_n).copy()
     candidates: List[Dict[str, Any]] = []
     for _, row in top.iterrows():
-        candidates.append({
+        candidate = {
             "rank": int(row.get("rank", 0)),
             "ticker": row.get("ticker"),
             "company_name": row.get("company_name"),
@@ -1225,7 +1237,10 @@ def _build_summary(
             "warning_flags": list(row.get("flags") or []),
             "missing_fields": list(row.get("missing_fields") or []),
             "missing_metric_count": int(row.get("missing_metric_count", 0) or 0),
-        })
+        }
+        # Allocation-eligibility fields (same set in CSV/JSON/Markdown).
+        candidate.update(allocation_field_summary(row))
+        candidates.append(candidate)
     return {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "mode": mode,

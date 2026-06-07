@@ -227,6 +227,35 @@ risk_controls:
   core_max_risk_penalty: 12.0     # ...and risk_penalty no higher than this
   watchlist_max_fundamentals: 50.0  # below this (if not speculative) -> watchlist
 
+# Allocation-eligibility gates. These separate the RESEARCH RANKING (every
+# scored candidate, sorted by final_score) from the ALLOCATION SHORTLIST (the
+# subset safe to hand to a future allocation/rebalancing module). Nothing here
+# removes a candidate from the research ranking -- it only sets
+# `eligible_for_allocation` and the `allocation_adjusted_score`.
+allocation:
+  # Buckets that are never eligible by default (flip to true to override).
+  allow_speculative_for_allocation: false
+  allow_watchlist_for_allocation: false
+  # Risk gates (annualized vol fraction; risk_penalty on 0..100).
+  max_allocation_volatility: 0.50
+  max_allocation_risk_penalty: 25.0
+  require_non_negative_recent_return_for_allocation: true
+  # Data-quality gates.
+  max_missing_metric_count_for_allocation: 4
+  require_market_cap_for_allocation: true
+  # Sentiment gates (only applied when the name actually has news).
+  min_sentiment_confidence_for_allocation: 0.30
+  min_fresh_news_ratio_for_allocation: 0.50
+  # allocation_adjusted_score penalties (subtracted from final_score, 0..100).
+  penalty_high_volatility: 25.0
+  penalty_speculative_momentum: 20.0
+  penalty_weak_price_trend: 15.0
+  penalty_watchlist_bucket: 20.0
+  penalty_speculative_bucket: 15.0
+  penalty_low_sentiment_confidence: 10.0
+  penalty_stale_news: 10.0
+  penalty_excess_risk_weight: 0.5
+
 logging:
   level: INFO
   log_to_file: false
