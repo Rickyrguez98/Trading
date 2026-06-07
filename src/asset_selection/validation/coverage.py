@@ -37,6 +37,18 @@ DIAGNOSTIC_ONLY = "DIAGNOSTIC_ONLY"
 INVALID_PROVIDER_FAILURE = "INVALID_PROVIDER_FAILURE"
 INVALID_INSUFFICIENT_DATA = "INVALID_INSUFFICIENT_DATA"
 
+# --- Ranking-completeness status (materiality axis; audit fix) ---
+# Orthogonal to ranking_validity: a run can be a VALID_RANKING by coverage yet
+# still be incomplete because a *material* (mega-cap / benchmark / watchlist)
+# ticker silently failed. We surface that here instead of letting a 99.8%
+# headline bury a missing NVDA. A single critical miss downgrades completeness
+# and is reported loudly, but does NOT by itself invalidate the whole run.
+COMPLETE = "COMPLETE"
+COMPLETE_WITH_MINOR_GAPS = "COMPLETE_WITH_MINOR_GAPS"
+VALID_WITH_MATERIAL_WARNINGS = "VALID_WITH_MATERIAL_WARNINGS"
+PARTIAL_CRITICAL_TICKER_FAILURE = "PARTIAL_CRITICAL_TICKER_FAILURE"
+INVALID_SYSTEMIC_PROVIDER_FAILURE = "INVALID_SYSTEMIC_PROVIDER_FAILURE"
+
 # --- Coarse run-status rollup (used for the report header + return code) ---
 RUN_STATUS_VALID = "VALID"
 RUN_STATUS_PARTIAL = "PARTIAL"
@@ -202,6 +214,109 @@ def assess_coverage(
 
 
 # ---------------------------------------------------------------------------
+# Materiality assessment (audit fix #4/#5)
+# ---------------------------------------------------------------------------
+
+def _ranked_tickers(ranked) -> set:
+    if ranked is None or getattr(ranked, "empty", True) or "ticker" not in getattr(ranked, "columns", []):
+        return set()
+    return {str(t).strip().upper() for t in ranked["ticker"].tolist()}
+
+
+def assess_materiality(
+    stage_stats: Sequence[Any],
+    ranked,
+    config: AppConfig,
+    *,
+    health_report: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Decide whether the produced ranking is materially complete.
+
+    Reads the ``material_gaps`` recorded by Stage 2 for critical tickers and
+    buckets them (critical / large-cap / high-liquidity / user-watchlist), then
+    assigns a ``ranking_completeness_status``. This is the layer that refuses to
+    let overall coverage hide a missing mega-cap: every gap is named, and a
+    failure on a hard-critical name downgrades completeness loudly.
+    """
+    ct = getattr(config, "critical_tickers", None)
+    static_known = set()
+    if ct is not None:
+        static_known = {str(t).strip().upper() for t in (ct.static_tickers or [])}
+        if getattr(ct, "treat_benchmark_as_critical", False):
+            try:
+                from ..health import BENCHMARK_TICKERS
+                static_known |= {str(t).strip().upper() for t in BENCHMARK_TICKERS}
+            except Exception:  # pragma: no cover - defensive
+                pass
+    watchlist = set()
+    if ct is not None:
+        watchlist = {str(t).strip().upper() for t in (ct.user_watchlist or [])}
+
+    ranked_set = _ranked_tickers(ranked)
+
+    gaps: List[Dict[str, Any]] = []
+    for s in stage_stats:
+        for g in getattr(s, "material_gaps", []) or []:
+            gaps.append(g)
+
+    # A gap is only "live" if the ticker did not otherwise make it into the
+    # ranking (recovery via cache could have rescued it).
+    live_gaps = [g for g in gaps if str(g.get("ticker", "")).strip().upper() not in ranked_set]
+
+    critical_failures: List[str] = []
+    large_cap_failures: List[str] = []
+    high_liq_failures: List[str] = []
+    watchlist_failures: List[str] = []
+    confirmed_real: List[str] = []
+    for g in live_gaps:
+        t = str(g.get("ticker", "")).strip().upper()
+        critical_failures.append(t)
+        if g.get("is_large_cap"):
+            large_cap_failures.append(t)
+        if g.get("is_user_watchlist") or t in watchlist:
+            watchlist_failures.append(t)
+        # Known mega-caps + dynamic large-caps are treated as high-liquidity.
+        if t in static_known or g.get("is_large_cap"):
+            high_liq_failures.append(t)
+        if g.get("company_confirmed_real"):
+            confirmed_real.append(t)
+
+    # Hard-critical = a statically configured mega-cap / benchmark name. A
+    # watchlist-only or purely-dynamic miss is material but a step less severe.
+    hard_critical = [t for t in critical_failures if t in static_known]
+
+    blocking_systemic = bool((health_report or {}).get("any_blocking_systemic_failure"))
+
+    # Were there non-material price misses at all (minor gaps)?
+    price_stage = _stage_by_name(stage_stats, "2_prices")
+    price_failures = int(getattr(price_stage, "provider_failures", 0) or 0) if price_stage else 0
+    minor_gaps = max(0, price_failures - len(live_gaps))
+
+    if blocking_systemic:
+        completeness = INVALID_SYSTEMIC_PROVIDER_FAILURE
+    elif hard_critical:
+        completeness = PARTIAL_CRITICAL_TICKER_FAILURE
+    elif live_gaps:
+        completeness = VALID_WITH_MATERIAL_WARNINGS
+    elif minor_gaps:
+        completeness = COMPLETE_WITH_MINOR_GAPS
+    else:
+        completeness = COMPLETE
+
+    return {
+        "ranking_completeness_status": completeness,
+        "critical_ticker_failures": sorted(set(critical_failures)),
+        "hard_critical_ticker_failures": sorted(set(hard_critical)),
+        "failed_large_cap_tickers": sorted(set(large_cap_failures)),
+        "failed_high_liquidity_tickers": sorted(set(high_liq_failures)),
+        "failed_user_watchlist_tickers": sorted(set(watchlist_failures)),
+        "critical_failures_with_company_confirmed_real": sorted(set(confirmed_real)),
+        "minor_non_material_price_gaps": minor_gaps,
+        "material_data_gaps": live_gaps,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Ranking-validity verdict
 # ---------------------------------------------------------------------------
 
@@ -209,6 +324,7 @@ def determine_run_status(
     coverage: Dict[str, Any],
     health_report: Optional[Dict[str, Any]],
     config: AppConfig,
+    materiality: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Map coverage + benchmark health onto a ranking-validity verdict.
 
@@ -228,6 +344,42 @@ def determine_run_status(
     blocking_systemic = bool(
         (health_report or {}).get("any_blocking_systemic_failure")
     )
+
+    mat = materiality or {}
+
+    # --- Materiality: a missing mega-cap must be reported loudly, even on an
+    # otherwise-healthy run. Critical failures downgrade *completeness* (a
+    # separate axis) and raise warnings; a single one does not invalidate the
+    # whole run, but it must never be hidden behind aggregate coverage. ---
+    crit_fail = mat.get("critical_ticker_failures") or []
+    if crit_fail:
+        confirmed = mat.get("critical_failures_with_company_confirmed_real") or []
+        warnings.append(
+            f"Material gap: {len(crit_fail)} critical/important ticker(s) "
+            f"({', '.join(crit_fail)}) failed the price endpoint and are absent "
+            "from the ranking. "
+            + (
+                f"Cross-provider fundamentals confirm {', '.join(confirmed)} still "
+                "report data -> a price-provider coverage gap, NOT delisting. "
+                if confirmed else ""
+            )
+            + "This is flagged as a material data gap rather than a silent drop."
+        )
+        recommendations.append(
+            "Re-fetch the listed critical tickers (e.g. --tickers "
+            f"{' '.join(crit_fail)} --provider prices=yfinance,stooq) or add a "
+            "keyed price provider; do not treat their absence as an economic signal."
+        )
+    for label, key in (
+        ("large-cap", "failed_large_cap_tickers"),
+        ("user-watchlist", "failed_user_watchlist_tickers"),
+    ):
+        names = mat.get(key) or []
+        if names:
+            warnings.append(
+                f"Material {label} ticker(s) missing from the ranking: "
+                f"{', '.join(names)}."
+            )
 
     # --- News is advisory: warn but never block. ---
     if not coverage.get("meets_news_coverage", True):
@@ -287,7 +439,8 @@ def determine_run_status(
                 "stop_on_systemic_provider_failure is off: emitting a "
                 "diagnostic-only result despite a systemic failure."
             )
-        return _verdict(validity, reasons, warnings, recommendations, bench=bench)
+        return _verdict(validity, reasons, warnings, recommendations, bench=bench,
+                        materiality=mat)
 
     # 2) Not enough real candidates to rank honestly.
     if not coverage.get("has_min_valid_candidates", False):
@@ -301,11 +454,13 @@ def determine_run_status(
             "Widen the universe or relax stage filters, and confirm the "
             "fundamentals provider is returning data."
         )
-        return _verdict(INVALID_INSUFFICIENT_DATA, reasons, warnings, recommendations)
+        return _verdict(INVALID_INSUFFICIENT_DATA, reasons, warnings, recommendations,
+                        materiality=mat)
 
     # 3) Everything in budget -> trustworthy ranking.
     if not degraded:
-        return _verdict(VALID_RANKING, reasons, warnings, recommendations)
+        return _verdict(VALID_RANKING, reasons, warnings, recommendations,
+                        materiality=mat)
 
     # 4) Degraded but rankable.
     if rob.allow_partial_ranking:
@@ -314,14 +469,16 @@ def determine_run_status(
             "provider recovers, or add a fallback provider, before acting on it."
         )
         return _verdict(
-            PARTIAL_RANKING_WITH_WARNINGS, reasons, warnings, recommendations
+            PARTIAL_RANKING_WITH_WARNINGS, reasons, warnings, recommendations,
+            materiality=mat,
         )
     recommendations.append(
         "Coverage is degraded and partial ranking is disabled; emitting a "
         "diagnostic-only result. Re-run with --allow-partial-ranking to accept a "
         "caveated ranking, or improve coverage."
     )
-    return _verdict(DIAGNOSTIC_ONLY, reasons, warnings, recommendations)
+    return _verdict(DIAGNOSTIC_ONLY, reasons, warnings, recommendations,
+                    materiality=mat)
 
 
 def _verdict(
@@ -331,15 +488,44 @@ def _verdict(
     recommendations: List[str],
     *,
     bench: Optional[Dict[str, Any]] = None,
+    materiality: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_status = run_status_for(ranking_validity)
-    return {
+    mat = materiality or {}
+    completeness = mat.get("ranking_completeness_status", COMPLETE)
+
+    # Materiality is a second axis. A hard-critical (mega-cap/benchmark) miss on
+    # an otherwise-VALID run downgrades the rollup to PARTIAL so the header and
+    # return code reflect that the ranking is incomplete -- but it stays trusted
+    # (exit 0) because the ordering of the names we DID price is still sound.
+    if (
+        completeness == PARTIAL_CRITICAL_TICKER_FAILURE
+        and run_status == RUN_STATUS_VALID
+    ):
+        run_status = RUN_STATUS_PARTIAL
+
+    out = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_status": run_status,
         "ranking_validity": ranking_validity,
+        "ranking_completeness_status": completeness,
         "is_trusted": is_trusted_run_status(run_status),
         "return_code": return_code_for(run_status),
         "invalid_ranking_reasons": list(reasons),
         "warnings": list(warnings),
         "recommendations_for_next_run": list(recommendations),
     }
+    # Carry the material-gap detail so the summary/diagnostics can render it.
+    for k in (
+        "critical_ticker_failures",
+        "hard_critical_ticker_failures",
+        "failed_large_cap_tickers",
+        "failed_high_liquidity_tickers",
+        "failed_user_watchlist_tickers",
+        "critical_failures_with_company_confirmed_real",
+        "minor_non_material_price_gaps",
+        "material_data_gaps",
+    ):
+        if k in mat:
+            out[k] = mat[k]
+    return out
