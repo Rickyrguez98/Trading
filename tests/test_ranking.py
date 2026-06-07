@@ -42,7 +42,10 @@ def test_rank_handles_empty():
 
 def test_markdown_report_includes_top_only_with_disclaimer():
     md = format_top_candidates_markdown(rank_candidates(_df(), top_n=2), top_n=2)
-    assert "Asset Selection — Top Candidates" in md
+    # The report is split by decision purpose: research ranking vs allocation shortlist.
+    assert "Asset Selection — Research Ranking & Allocation Shortlist" in md
+    assert "Research ranking" in md
+    assert "Portfolio-eligible shortlist" in md
     assert "Not financial advice" in md
     # B should be ranked above A; C is below the top-2 cut and must be absent.
     assert md.index("B Co") < md.index("A Co")

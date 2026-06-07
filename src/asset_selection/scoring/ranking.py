@@ -70,76 +70,184 @@ def rank_candidates(df: pd.DataFrame, top_n: int = 25) -> pd.DataFrame:
     return ranked[cols + other_cols]
 
 
-def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
-    """Render the top-N rows as a self-contained Markdown report."""
-    if df.empty:
-        return "# Asset Selection — Top Candidates\n\n_No candidates produced._\n"
+# Per-section display columns (only those present are rendered).
+_SHORTLIST_COLS = [
+    "rank", "ticker", "company_name", "sector", "market_cap",
+    "allocation_adjusted_score", "final_score", "fundamentals_score",
+    "effective_sentiment_score", "return_pct", "volatility_pct",
+    "risk_bucket", "candidate_role",
+]
+_RESEARCH_COLS = [
+    "rank", "ticker", "company_name", "final_score", "fundamentals_score",
+    "sentiment_score", "effective_sentiment_score", "selection_bucket",
+    "eligible_for_allocation", "allocation_adjusted_score",
+    "return_pct", "volatility_pct", "flags",
+]
+_SPECULATIVE_COLS = [
+    "rank", "ticker", "company_name", "final_score", "return_pct",
+    "volatility_pct", "risk_bucket", "article_count", "flags",
+]
+_WATCHLIST_COLS = [
+    "watchlist_rank", "ticker", "company_name", "final_score",
+    "fundamentals_score", "return_pct", "data_quality_bucket",
+    "exclusion_reason_from_allocation",
+]
+_EXCLUDED_COLS = [
+    "rank", "ticker", "selection_bucket", "candidate_role",
+    "recommended_next_step", "exclusion_reason_from_allocation",
+]
 
-    head = df.head(top_n).copy()
-    # Pretty-print the things people will actually read.
-    if "market_cap" in head.columns:
-        head["market_cap"] = head["market_cap"].apply(_humanize_money)
-    if "avg_dollar_volume" in head.columns:
-        head["avg_dollar_volume"] = head["avg_dollar_volume"].apply(_humanize_money)
+
+def _prettify_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with human-friendly formatting for the report tables."""
+    head = df.copy()
+    for col in ("market_cap", "avg_dollar_volume"):
+        if col in head.columns:
+            head[col] = head[col].apply(_humanize_money)
     for col in (
-        "final_score",
-        "fundamentals_score",
-        "sentiment_score",
-        "growth_score",
-        "quality_score",
-        "valuation_score",
-        "risk_penalty",
+        "final_score", "allocation_adjusted_score", "fundamentals_score",
+        "sentiment_score", "raw_sentiment_score", "effective_sentiment_score",
+        "growth_score", "quality_score", "valuation_score", "risk_penalty",
     ):
         if col in head.columns:
             head[col] = head[col].apply(_fmt_pct)
-    if "return_pct" in head.columns:
-        head["return_pct"] = head["return_pct"].apply(_fmt_signed_pct)
-    if "volatility_pct" in head.columns:
-        head["volatility_pct"] = head["volatility_pct"].apply(_fmt_signed_pct)
-    if "sentiment_confidence" in head.columns:
-        head["sentiment_confidence"] = head["sentiment_confidence"].apply(_fmt_confidence)
-    if "fresh_ratio" in head.columns:
-        head["fresh_ratio"] = head["fresh_ratio"].apply(_fmt_confidence)
-
-    if "flags" in head.columns:
-        head["flags"] = head["flags"].apply(lambda v: ", ".join(v) if isinstance(v, list) else (v or ""))
-    if "missing_fields" in head.columns:
-        head["missing_fields"] = head["missing_fields"].apply(
-            lambda v: ", ".join(v) if isinstance(v, list) else (v or "")
+    for col in ("return_pct", "volatility_pct"):
+        if col in head.columns:
+            head[col] = head[col].apply(_fmt_signed_pct)
+    for col in ("sentiment_confidence", "fresh_ratio", "effective_sentiment_confidence"):
+        if col in head.columns:
+            head[col] = head[col].apply(_fmt_confidence)
+    if "eligible_for_allocation" in head.columns:
+        head["eligible_for_allocation"] = head["eligible_for_allocation"].apply(
+            lambda b: "yes" if bool(b) else "no"
         )
+    for col in ("flags", "missing_fields", "allocation_exclusion_reasons"):
+        if col in head.columns:
+            head[col] = head[col].apply(
+                lambda v: ", ".join(v) if isinstance(v, list) else (v or "")
+            )
+    return head
 
-    columns_in_order = [
-        "rank",
-        "ticker",
-        "company_name",
-        "sector",
-        "market_cap",
-        "final_score",
-        "fundamentals_score",
-        "sentiment_score",
-        "growth_score",
-        "valuation_score",
-        "return_pct",
-        "volatility_pct",
-        "risk_penalty",
-        "selection_bucket",
-        "article_count",
-        "stale_count",
-        "fresh_ratio",
-        "sentiment_confidence",
-        "top_driver_pillar",
-        "top_drag_pillar",
-        "flags",
-    ]
-    cols = [c for c in columns_in_order if c in head.columns]
 
-    md = ["# Asset Selection — Top Candidates", ""]
-    md.append(f"_Top {min(top_n, len(head))} of {len(df)} ranked candidates._")
-    md.append("")
+def _section_table(
+    df: pd.DataFrame,
+    cols,
+    *,
+    sort_by=None,
+    ascending: bool = False,
+    limit=None,
+) -> str:
+    """Sort + slice the raw frame, then render the requested columns."""
+    sub = df
+    if sort_by:
+        keys = [sort_by] if isinstance(sort_by, str) else list(sort_by)
+        keys = [c for c in keys if c in sub.columns]
+        if keys:
+            sub = sub.sort_values(keys, ascending=ascending)
+    if limit is not None:
+        sub = sub.head(limit)
+    pretty = _prettify_for_display(sub)
+    use_cols = [c for c in cols if c in pretty.columns]
+    return pretty[use_cols].to_markdown(index=False)
+
+
+def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
+    """Render the report, split by decision purpose.
+
+    Five sections keep the *research ranking* visibly separate from the
+    *allocation shortlist*:
+
+      A. Portfolio-eligible shortlist (the table to use for allocation)
+      B. Research ranking (everything, research-only)
+      C. Speculative candidates (research-only)
+      D. Watchlist-only candidates (manual review)
+      E. Excluded-from-allocation reasons (why each top name was not eligible)
+    """
+    if df.empty:
+        return "# Asset Selection — Research Ranking & Allocation Shortlist\n\n_No candidates produced._\n"
+
+    has_alloc = "eligible_for_allocation" in df.columns
+    eligible = df[df["eligible_for_allocation"].astype(bool)] if has_alloc else df.iloc[0:0]
+    bucket = df.get("selection_bucket")
+    spec = df[bucket == "speculative_candidate"] if bucket is not None else df.iloc[0:0]
+    watch = df[bucket == "watchlist_only"] if bucket is not None else df.iloc[0:0]
+
+    md = ["# Asset Selection — Research Ranking & Allocation Shortlist", ""]
     md.append("> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.")
     md.append("")
-    md.append(head[cols].to_markdown(index=False))
+    md.append("This report answers two different questions, kept deliberately separate:")
     md.append("")
+    md.append("- **Research ranking** — *which assets are worth considering?* Every scored "
+              "candidate, sorted by `final_score`. Speculative and watchlist names are kept "
+              "here, labeled, never hidden.")
+    md.append("- **Allocation shortlist** — *which of those are safe to size by default?* "
+              "Only candidates with `eligible_for_allocation = true`, sorted by "
+              "`allocation_adjusted_score`. This is the subset a future allocation / "
+              "rebalancing module would consume.")
+    md.append("")
+    md.append(
+        f"_Ranked candidates: {len(df)} · allocation-eligible: {len(eligible)} · "
+        f"speculative: {len(spec)} · watchlist-only: {len(watch)}._"
+    )
+    md.append("")
+
+    # --- A. Portfolio-eligible shortlist ---
+    md += ["## A. Portfolio-eligible shortlist", "",
+           "Core/growth candidates that cleared the risk, data-quality, and sentiment "
+           "gates, sorted by `allocation_adjusted_score`. **This is the table to use for "
+           "allocation.**", ""]
+    if eligible.empty:
+        md.append("_No candidate is allocation-eligible in this run. Every top research name "
+                  "was excluded — see section E for the reasons._")
+    else:
+        md.append(_section_table(
+            eligible, _SHORTLIST_COLS,
+            sort_by=["allocation_adjusted_score", "final_score"], limit=top_n,
+        ))
+    md.append("")
+
+    # --- B. Research ranking ---
+    md += ["## B. Research ranking (all candidates)", "",
+           "The full ranking by `final_score`. Research-only: a high rank here is **not** an "
+           "allocation recommendation. The `eligible_for_allocation` column shows what carried "
+           "into the shortlist above.", ""]
+    md.append(_section_table(df, _RESEARCH_COLS, sort_by=["final_score"], limit=top_n))
+    md.append("")
+
+    # --- C. Speculative candidates ---
+    md += ["## C. Speculative candidates (research-only)", "",
+           "High-volatility / speculative-momentum / hype names. Kept for research "
+           "visibility; not allocation-eligible by default.", ""]
+    md.append("_None._" if spec.empty else
+              _section_table(spec, _SPECULATIVE_COLS, sort_by=["final_score"], limit=top_n))
+    md.append("")
+
+    # --- D. Watchlist-only candidates ---
+    md += ["## D. Watchlist-only candidates (manual review)", "",
+           "Weak trend, thin/poor fundamentals, missing market cap, or stale news. Need "
+           "review before sizing; not allocation-eligible by default.", ""]
+    md.append("_None._" if watch.empty else
+              _section_table(watch, _WATCHLIST_COLS, sort_by=["final_score"], limit=top_n))
+    md.append("")
+
+    # --- E. Excluded-from-allocation reasons ---
+    md += ["## E. Excluded-from-allocation reasons (top-ranked names)", "",
+           "Why each top-ranked research name did not make the allocation shortlist.", ""]
+    top_research = df.sort_values("final_score", ascending=False).head(top_n)
+    ineligible = (
+        top_research[~top_research["eligible_for_allocation"].astype(bool)]
+        if has_alloc else top_research.iloc[0:0]
+    )
+    md.append("_Every top-ranked name is allocation-eligible._" if ineligible.empty else
+              _section_table(ineligible, _EXCLUDED_COLS, sort_by=["final_score"], limit=top_n))
+    md.append("")
+
+    md += _legend_section()
+    return "\n".join(md) + "\n"
+
+
+def _legend_section() -> List[str]:
+    md: List[str] = []
     md.append("## Flag legend")
     md.append("")
     md.append("- **SPECULATIVE_HYPE** — strong sentiment but weak fundamentals.")
@@ -155,13 +263,21 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
     md.append("- **HIGH_VOLATILITY** — annualized volatility above the configured ceiling; size positions accordingly.")
     md.append("- **SPECULATIVE_MOMENTUM** — large run-up on a very noisy tape; reward may be chasing risk.")
     md.append("")
-    md.append("## Selection buckets")
+    md.append("## Selection buckets (research) vs. candidate roles (allocation)")
     md.append("")
-    md.append("- **high_quality_core_candidate** — strong fundamentals, contained volatility, low risk penalty, non-negative trend.")
-    md.append("- **growth_candidate** — decent fundamentals with elevated (but not extreme) volatility.")
-    md.append("- **speculative_candidate** — high volatility, speculative momentum/hype, or high risk penalty. Labeled, not removed.")
-    md.append("- **watchlist_only** — weak trend, thin/poor fundamentals, or missing market cap; needs more review before sizing.")
-    return "\n".join(md) + "\n"
+    md.append("- **high_quality_core_candidate** → role `core_candidate` — strong fundamentals, contained volatility, low risk penalty, non-negative trend.")
+    md.append("- **growth_candidate** → role `satellite_growth_candidate` — decent fundamentals with elevated (but not extreme) volatility; eligible only if it clears the allocation gates.")
+    md.append("- **speculative_candidate** → role `speculative_research_only` — high volatility, speculative momentum/hype, or high risk penalty. Labeled, not removed; not eligible by default.")
+    md.append("- **watchlist_only** → role `watchlist_only` — weak trend, thin/poor fundamentals, or missing market cap; needs review before sizing; not eligible by default.")
+    md.append("")
+    md.append("## How to read `allocation_adjusted_score`")
+    md.append("")
+    md.append("`allocation_adjusted_score` starts from `final_score` and subtracts penalties for "
+              "high volatility, speculative momentum, weak trend, watchlist/speculative bucket, "
+              "low sentiment confidence, stale news, and excess risk penalty. It is the sort key "
+              "for the allocation shortlist, so a high research score with high risk lands lower "
+              "than a steadier name.")
+    return md
 
 
 def _humanize_money(v) -> str:
