@@ -24,6 +24,8 @@ from .output_validation import (
 )
 from .provider_diagnostics import (
     build_provider_diagnostics,
+    build_provider_report,
+    render_provider_provenance_note,
     render_run_status_banner,
     write_provider_diagnostics,
 )
@@ -42,6 +44,8 @@ __all__ = [
     "INVALID_PROVIDER_FAILURE",
     "INVALID_INSUFFICIENT_DATA",
     "build_provider_diagnostics",
+    "build_provider_report",
+    "render_provider_provenance_note",
     "render_run_status_banner",
     "write_provider_diagnostics",
 ]

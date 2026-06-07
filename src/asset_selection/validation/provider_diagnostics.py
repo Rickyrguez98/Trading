@@ -39,6 +39,73 @@ _ERROR_GLOSS = {
 }
 
 
+_DATA_TYPES = ("prices", "fundamentals", "news")
+# Which staged fetch produces each data type's provenance, for cache_usage_by_stage.
+_STAGE_BY_DATA_TYPE = {"prices": "2_prices", "fundamentals": "3_fundamentals"}
+
+
+def build_provider_report(
+    *,
+    configured_providers: Dict[str, Any],
+    fallback_usage: Dict[str, Any],
+    cache_usage: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One consistent provider-provenance block, shared by every artifact.
+
+    The same dict is embedded in ``asset_selection_summary.json``,
+    ``provider_diagnostics.{json,md}`` and the top-candidates banner, so the four
+    reports can never disagree about which provider was configured, what the
+    fallback chain was, or how often a backup actually fired.
+
+    It also fixes the *misleading-zero* problem: a single (unwrapped) provider is
+    not instrumented for primary/fallback counters, so instead of printing
+    ``primary=0, fallback=0`` -- which reads as "served nothing" -- it reports
+    ``instrumented: false`` and falls back to the cache/provenance counts, which
+    *are* measured for every record.
+    """
+    configured = dict(configured_providers or {})
+    fb_all = fallback_usage if isinstance(fallback_usage, dict) else {}
+    cu_all = cache_usage if isinstance(cache_usage, dict) else {}
+
+    chain_by_dt: Dict[str, List[str]] = {}
+    actual_usage: Dict[str, Any] = {}
+    for dt in _DATA_TYPES:
+        fb = fb_all.get(dt) or {}
+        chain = list(fb.get("chain") or [])
+        if not chain and configured.get(dt):
+            chain = [configured[dt]]
+        chain_by_dt[dt] = chain
+
+        wrapped = bool(fb.get("wrapped"))
+        by_source = dict(cu_all.get(dt) or {})  # data_source provenance counts
+        entry: Dict[str, Any] = {
+            "configured": configured.get(dt),
+            "chain": chain,
+            "instrumented": wrapped,
+            "by_source": by_source,
+        }
+        if wrapped:
+            entry["by_provider"] = dict(fb.get("by_provider") or {})
+            entry["counters"] = {
+                "primary": fb.get("primary", 0),
+                "fallback": fb.get("fallback", 0),
+                "stale_cache": fb.get("stale_cache", 0),
+                "unavailable": fb.get("unavailable", 0),
+            }
+        actual_usage[dt] = entry
+
+    cache_by_stage = {
+        stage: dict(cu_all.get(dt) or {})
+        for dt, stage in _STAGE_BY_DATA_TYPE.items()
+    }
+    return {
+        "configured_providers": configured,
+        "provider_chain_by_data_type": chain_by_dt,
+        "actual_provider_usage": actual_usage,
+        "cache_usage_by_stage": cache_by_stage,
+    }
+
+
 def build_provider_diagnostics(
     *,
     status: Dict[str, Any],
@@ -50,6 +117,11 @@ def build_provider_diagnostics(
     providers: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble the diagnostics dict written to reports/provider_diagnostics.json."""
+    provider_report = build_provider_report(
+        configured_providers=providers or {},
+        fallback_usage=fallback_usage or {},
+        cache_usage=cache_usage or {},
+    )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_status": status.get("run_status"),
@@ -61,12 +133,33 @@ def build_provider_diagnostics(
             status.get("recommendations_for_next_run", [])
         ),
         "configured_providers": providers or {},
+        "provider_report": provider_report,
         "provider_health_check_summary": health_report or {},
         "data_coverage_summary": coverage or {},
         "provider_failure_summary": provider_failures or {},
         "fallback_usage_summary": fallback_usage or {},
         "cache_usage_summary": cache_usage or {},
     }
+
+
+def render_provider_provenance_note(provider_report: Dict[str, Any]) -> str:
+    """A compact provider-provenance footer appended to top_candidates.md so the
+    headline report names the same providers/chain as the diagnostics."""
+    if not provider_report:
+        return ""
+    configured = provider_report.get("configured_providers") or {}
+    chains = provider_report.get("provider_chain_by_data_type") or {}
+    lines: List[str] = ["## Data providers", ""]
+    lines.append("| Data type | Configured | Fallback chain |")
+    lines.append("| --- | --- | --- |")
+    for dt in _DATA_TYPES:
+        chain = chains.get(dt) or ([configured.get(dt)] if configured.get(dt) else [])
+        chain_str = " → ".join(str(c) for c in chain) if chain else "—"
+        lines.append(f"| {dt} | {configured.get(dt) or '—'} | {chain_str} |")
+    lines += ["",
+              "_See `provider_diagnostics.md` for actual per-provider usage, cache "
+              "provenance, and the run-status verdict._", ""]
+    return "\n".join(lines) + "\n"
 
 
 def write_provider_diagnostics(
@@ -205,20 +298,48 @@ def _render_markdown(diag: Dict[str, Any]) -> str:
             lines.append(f"| `{et}` | {n} | {_ERROR_GLOSS.get(et, '')} |")
         lines.append("")
 
-    # --- Fallback usage ---
-    fb = diag.get("fallback_usage_summary") or {}
-    if fb:
-        lines += ["## Provider fallback usage", "",
-                  "| Data type | Chain | Wrapped | Primary | Fallback | Stale cache | Unavailable |",
-                  "| --- | --- | --- | --- | --- | --- | --- |"]
-        for dt, blk in fb.items():
-            chain = ", ".join(blk.get("chain", []) or [])
-            lines.append(
-                f"| {dt} | {chain} | {blk.get('wrapped')} | {blk.get('primary', 0)} "
-                f"| {blk.get('fallback', 0)} | {blk.get('stale_cache', 0)} "
-                f"| {blk.get('unavailable', 0)} |"
-            )
+    # --- Configured providers + fallback chain (consistent provenance block) ---
+    report = diag.get("provider_report") or {}
+    configured = report.get("configured_providers") or diag.get("configured_providers") or {}
+    chains = report.get("provider_chain_by_data_type") or {}
+    actual = report.get("actual_provider_usage") or {}
+    if configured or chains:
+        lines += ["## Providers (configured + chain)", "",
+                  "| Data type | Configured | Fallback chain |",
+                  "| --- | --- | --- |"]
+        for dt in _DATA_TYPES:
+            chain = chains.get(dt) or ([configured.get(dt)] if configured.get(dt) else [])
+            chain_str = " → ".join(str(c) for c in chain) if chain else "—"
+            lines.append(f"| {dt} | {configured.get(dt) or '—'} | {chain_str} |")
         lines.append("")
+
+    # --- Actual provider usage ---
+    # A single (unwrapped) provider is NOT instrumented for primary/fallback
+    # counters, so we print "—" rather than a misleading 0 and lean on the
+    # cache/provenance counts, which are measured for every record.
+    if actual:
+        lines += ["## Actual provider usage", "",
+                  "| Data type | Instrumented | Primary | Fallback | Stale cache | Unavailable | By source |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for dt in _DATA_TYPES:
+            blk = actual.get(dt) or {}
+            instrumented = bool(blk.get("instrumented"))
+            counters = blk.get("counters") or {}
+            by_source = blk.get("by_source") or {}
+            src = ", ".join(f"{k}={v}" for k, v in sorted(by_source.items())) or "—"
+            if instrumented:
+                cells = (
+                    f"{counters.get('primary', 0)} | {counters.get('fallback', 0)} "
+                    f"| {counters.get('stale_cache', 0)} | {counters.get('unavailable', 0)}"
+                )
+            else:
+                # Not instrumented: do not imply "served zero records".
+                cells = "— | — | — | —"
+            lines.append(f"| {dt} | {'yes' if instrumented else 'no'} | {cells} | {src} |")
+        lines += ["",
+                  "_\"Instrumented: no\" means a single provider with no fallback "
+                  "wrapper; its activity is reflected in the by-source column and the "
+                  "cache provenance below, not in the primary/fallback counters._", ""]
 
     # --- Cache provenance ---
     cu = diag.get("cache_usage_summary") or {}
