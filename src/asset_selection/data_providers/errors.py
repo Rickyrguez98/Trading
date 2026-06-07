@@ -35,6 +35,29 @@ NO_FUNDAMENTAL_DATA = "NO_FUNDAMENTAL_DATA"
 NO_NEWS_DATA = "NO_NEWS_DATA"
 PROVIDER_EMPTY_RESPONSE = "PROVIDER_EMPTY_RESPONSE"
 
+# --- Price-coverage taxonomy (audit fix) -----------------------------------
+# These refine a bare NO_PRICE_DATA once we have *context* about the ticker.
+# They never assert delisting; they say WHERE the gap is.
+#
+#   PRICE_ENDPOINT_NO_DATA        the price endpoint specifically returned
+#                                 nothing (a price-feed miss, not a verdict on
+#                                 the company).
+#   PROVIDER_SYMBOL_RESOLUTION_FAILED  every symbol variant we tried was empty
+#                                 -- the spelling, not the company, is suspect.
+#   PRICE_PROVIDER_GAP            price failed but fundamentals/news for the SAME
+#                                 canonical ticker succeeded -> the company is
+#                                 clearly real and covered; this is a price-
+#                                 provider coverage gap, NOT delisting.
+#   PROVIDER_COVERAGE_GAP         the free provider simply does not cover this
+#                                 name (no corroborating evidence either way).
+#   CRITICAL_TICKER_PRICE_FAILURE a configured/important (mega-cap, benchmark,
+#                                 watchlist) ticker lost its price -> material.
+PRICE_ENDPOINT_NO_DATA = "PRICE_ENDPOINT_NO_DATA"
+PROVIDER_SYMBOL_RESOLUTION_FAILED = "PROVIDER_SYMBOL_RESOLUTION_FAILED"
+PRICE_PROVIDER_GAP = "PRICE_PROVIDER_GAP"
+PROVIDER_COVERAGE_GAP = "PROVIDER_COVERAGE_GAP"
+CRITICAL_TICKER_PRICE_FAILURE = "CRITICAL_TICKER_PRICE_FAILURE"
+
 # Requires corroborating evidence; classifiers never emit this from a bare
 # empty/parse response.
 POSSIBLY_DELISTED = "POSSIBLY_DELISTED"
@@ -59,13 +82,24 @@ PROVIDER_SIDE_ERRORS = frozenset({
     PROVIDER_UNKNOWN_ERROR,
 })
 
+# Refinements of a bare price miss. These are coverage/feed gaps, NOT transport
+# outages and NOT delisting -- they classify *where* a price gap sits once we
+# know whether other data for the same ticker succeeded.
+PRICE_COVERAGE_REFINEMENTS = frozenset({
+    PRICE_ENDPOINT_NO_DATA,
+    PROVIDER_SYMBOL_RESOLUTION_FAILED,
+    PRICE_PROVIDER_GAP,
+    PROVIDER_COVERAGE_GAP,
+    CRITICAL_TICKER_PRICE_FAILURE,
+})
+
 # "No data" outcomes that are not, on their own, evidence of a provider outage.
 EMPTY_DATA_ERRORS = frozenset({
     NO_PRICE_DATA,
     NO_FUNDAMENTAL_DATA,
     NO_NEWS_DATA,
     PROVIDER_EMPTY_RESPONSE,
-})
+}) | PRICE_COVERAGE_REFINEMENTS
 
 
 # ---------------------------------------------------------------------------
@@ -164,3 +198,35 @@ def status_for(error_type: Optional[str]) -> str:
     if error_type in EMPTY_DATA_ERRORS:
         return "empty"
     return "error"
+
+
+def reclassify_price_failure(
+    original_error_type: Optional[str],
+    *,
+    has_other_data: bool = False,
+    all_variants_empty: bool = False,
+) -> str:
+    """Refine a bare price failure once we have context about the ticker.
+
+    The point is to stop a price miss reading as "possibly delisted" for a name
+    that demonstrably still trades. We only refine an *empty* outcome (the call
+    succeeded but the price endpoint returned nothing): a transport/provider-side
+    fault (JSON-parse, rate-limit, blocked, timeout, HTTP) is returned unchanged,
+    because in a real outage that genuinely IS the cause and it must keep
+    counting toward the systemic-failure budget.
+
+    * ``has_other_data`` -- fundamentals or news for the SAME canonical ticker
+      succeeded. The company is clearly real and covered, so the price miss is a
+      ``PRICE_PROVIDER_GAP`` (a price-feed coverage gap), never delisting.
+    * ``all_variants_empty`` -- every symbol variant we tried came back empty and
+      nothing else corroborates the name -> ``PROVIDER_COVERAGE_GAP`` (the free
+      provider just does not carry it).
+    * otherwise -> ``PRICE_ENDPOINT_NO_DATA`` (an honest price-endpoint miss).
+    """
+    if is_provider_side(original_error_type):
+        return original_error_type  # a real outage -- do not soften it
+    if has_other_data:
+        return PRICE_PROVIDER_GAP
+    if all_variants_empty:
+        return PROVIDER_COVERAGE_GAP
+    return PRICE_ENDPOINT_NO_DATA
