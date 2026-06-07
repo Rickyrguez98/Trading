@@ -108,6 +108,41 @@ class PriceSnapshot:
     error_type: Optional[str] = None
     # Provenance: "live" | "fresh_cache" | "stale_cache" | "fallback" | "unavailable".
     data_source: Optional[str] = None
+    # Per-attempt trail across the symbol-resolution ladder AND the provider
+    # chain. Each entry is a plain dict (JSON-friendly) with the audit fields:
+    # canonical_symbol, provider_name, provider_symbol, symbol_variant_attempted,
+    # success, error_type, error_message, response_summary. This is what lets the
+    # diagnostics say *which* provider/symbol was tried instead of collapsing
+    # everything into a single NO_PRICE_DATA. Empty on a clean first-try success.
+    provider_attempts: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def make_provider_attempt(
+    *,
+    canonical_symbol: str,
+    provider_name: str,
+    provider_symbol: str,
+    success: bool,
+    error_type: Optional[str] = None,
+    error_message: Optional[str] = None,
+    response_summary: Optional[str] = None,
+    symbol_variant_attempted: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build one normalized provider-attempt record (the audit's required shape).
+
+    ``symbol_variant_attempted`` defaults to ``provider_symbol`` (the spelling we
+    actually sent) so callers that try a single variant need not pass it twice.
+    """
+    return {
+        "canonical_symbol": canonical_symbol,
+        "provider_name": provider_name,
+        "provider_symbol": provider_symbol,
+        "symbol_variant_attempted": symbol_variant_attempted or provider_symbol,
+        "success": bool(success),
+        "error_type": error_type,
+        "error_message": error_message,
+        "response_summary": response_summary,
+    }
 
 
 @dataclass

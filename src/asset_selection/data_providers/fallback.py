@@ -86,14 +86,25 @@ class _FallbackMixin:
         cache_id_for: Callable[[Any], str],
     ) -> Any:
         last = None
+        # Accumulate the per-provider attempt trail across the WHOLE chain so the
+        # surviving record shows that (e.g.) yfinance AND Stooq were tried, with
+        # the symbol variant + result for each. Previously the chain returned
+        # only the last provider's record, which made a Stooq ``nvda.us`` failure
+        # read as if yfinance had tried ``nvda.us`` -- the core reporting bug.
+        prior_attempts: List[Dict[str, Any]] = []
         for idx, provider in enumerate(self.providers):
             rec = call(provider)
             last = rec
+            rec_attempts = list(getattr(rec, "provider_attempts", None) or [])
             if is_usable(rec):
                 kind = "primary" if idx == 0 else "fallback"
                 rec.data_source = "live" if idx == 0 else "fallback"
                 self._bump(kind, getattr(provider, "name", None))
+                if prior_attempts and hasattr(rec, "provider_attempts"):
+                    rec.provider_attempts = prior_attempts + rec_attempts
                 return rec
+            # This provider failed -> keep its attempts for the eventual record.
+            prior_attempts.extend(rec_attempts)
 
         # Plan C: fresh-enough cache from the primary provider.
         if self.use_cache_on_failure:
@@ -113,12 +124,18 @@ class _FallbackMixin:
                             "Served stale cache (age ~%.0fs) after live providers failed.",
                             __import__("time").time() - entry.timestamp,
                         )
+                        if prior_attempts and hasattr(rec, "provider_attempts"):
+                            rec.provider_attempts = prior_attempts + list(
+                                getattr(rec, "provider_attempts", None) or []
+                            )
                         return rec
 
-        # Plan D: honest failure.
+        # Plan D: honest failure. The final record carries the full chain trail.
         self._bump("unavailable")
         if last is not None:
             last.data_source = "unavailable"
+            if hasattr(last, "provider_attempts"):
+                last.provider_attempts = prior_attempts
         return last
 
 
