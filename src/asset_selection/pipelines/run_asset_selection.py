@@ -45,6 +45,7 @@ except Exception:  # noqa: BLE001 - .env is optional
     pass
 
 from ..config import AppConfig, load_config
+from ..criticality import resolve_static_critical_set
 from ..data_providers import (
     build_fundamentals_provider,
     build_news_provider,
@@ -75,6 +76,7 @@ from ..sentiment.sentiment_model import (
 from ..universe import build_universe, save_universe, universe_counts_by_exchange
 from ..validation import (
     assess_coverage,
+    assess_materiality,
     build_provider_diagnostics,
     build_provider_report,
     determine_run_status,
@@ -113,6 +115,11 @@ class StageStats:
     failures: List[Dict[str, Any]] = field(default_factory=list)   # capped examples
     dropped: Dict[str, int] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    # Material data gaps: failures on *critical* (mega-cap / benchmark /
+    # watchlist) tickers that were investigated (full ladder + cross-provider
+    # confirmation) and classified honestly rather than silently dropped. Each
+    # entry carries enough context for the materiality validation + diagnostics.
+    material_gaps: List[Dict[str, Any]] = field(default_factory=list)
 
     def record_failure(self, ticker: str, provider_symbol: Optional[str],
                        status: str, reason: Optional[str],
@@ -132,6 +139,9 @@ class StageStats:
                 "reason": reason,
             })
 
+    def record_material_gap(self, gap: Dict[str, Any]) -> None:
+        self.material_gaps.append(gap)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
@@ -144,6 +154,7 @@ class StageStats:
             "failures": list(self.failures),
             "dropped": dict(self.dropped),
             "notes": list(self.notes),
+            "material_gaps": list(self.material_gaps),
         }
 
 
@@ -416,10 +427,13 @@ def _stage2_prices(
     universe_df: pd.DataFrame,
     price_provider,
     config: AppConfig,
+    fund_provider=None,
+    critical_set: Optional[set] = None,
 ) -> "tuple[pd.DataFrame, Dict[str, PriceSnapshot], StageStats]":
     started = time.perf_counter()
     stats = StageStats(name="2_prices")
     stats.input_count = len(universe_df)
+    critical_set = {str(t).strip().upper() for t in (critical_set or set())}
 
     price_records: Dict[str, PriceSnapshot] = {}
     rows: List[Dict[str, Any]] = []
@@ -456,6 +470,18 @@ def _stage2_prices(
             "return_pct": snap.return_pct,
             "volatility_pct": snap.volatility_pct,
         })
+
+    # --- Critical-ticker recovery (audit fix) ---
+    # Before a critical/important name is allowed to vanish as "no price data",
+    # investigate it: the provider chain already ran the full symbol ladder over
+    # every configured provider (+ optional stale cache), so we now confirm
+    # whether the COMPANY is real via a cross-provider fundamentals lookup and
+    # classify the gap honestly (price-provider gap vs. uncovered) instead of
+    # silently dropping it or implying delisting.
+    if config.critical_tickers.enable_stage2_recovery and critical_set:
+        _stage2_recover_critical(
+            price_records, stats, config, fund_provider, critical_set
+        )
 
     df = universe_df.merge(pd.DataFrame(rows), on="ticker", how="left")
 
@@ -495,6 +521,101 @@ def _stage2_prices(
         stats.input_count, stats.output_count,
     )
     return df, price_records, stats
+
+
+def _stage2_recover_critical(
+    price_records: Dict[str, PriceSnapshot],
+    stats: StageStats,
+    config: AppConfig,
+    fund_provider,
+    critical_set: set,
+) -> None:
+    """Investigate failed *critical* tickers and classify the gap honestly.
+
+    For each critical ticker whose price came back unusable, we record a
+    ``material_data_gap`` with: the per-provider attempt trail already collected
+    on the snapshot, a cross-provider fundamentals confirmation (does the
+    company still report fundamentals?), the resulting refined error type
+    (``PRICE_PROVIDER_GAP`` when fundamentals exist -> NOT delisting), and the
+    dynamic-criticality flags (large-cap / user-watchlist). This never fabricates
+    a price and never forces the ticker into the ranking -- it makes the gap
+    *visible and correctly labelled* instead of a silent ``NO_PRICE_DATA``.
+    """
+    from ..criticality import is_large_cap, user_watchlist_set
+
+    watchlist = user_watchlist_set(config.critical_tickers)
+    for ticker in sorted(critical_set):
+        snap = price_records.get(ticker)
+        if snap is None or getattr(snap, "status", "ok") == "ok":
+            continue  # not attempted, or priced fine -> no gap
+
+        original_type = getattr(snap, "error_type", None)
+        attempts = list(getattr(snap, "provider_attempts", None) or [])
+        # All variants empty (vs. a transport error) tells us the spelling, not
+        # the provider, was exhausted -- useful for honest classification.
+        all_variants_empty = bool(attempts) and all(
+            not a.get("success") and not _err.is_provider_side(a.get("error_type"))
+            for a in attempts
+        )
+
+        # Cross-provider confirmation: does the company report fundamentals?
+        fund_status = "skipped"
+        market_cap: Optional[float] = None
+        if fund_provider is not None:
+            try:
+                f = fund_provider.fetch(ticker)
+                fund_status = getattr(f, "status", "ok")
+                market_cap = getattr(f, "market_cap", None)
+            except Exception as exc:  # noqa: BLE001 - confirmation must not break the run
+                logger.warning("Critical-ticker fundamentals confirm raised for %s: %s", ticker, exc)
+                fund_status = "error"
+        has_other_data = fund_status == "ok"
+
+        refined_type = _err.reclassify_price_failure(
+            original_type,
+            has_other_data=has_other_data,
+            all_variants_empty=all_variants_empty,
+        )
+        large_cap = is_large_cap(market_cap, config.critical_tickers)
+
+        if has_other_data:
+            reason = (
+                f"{ticker}: price endpoint returned no data, but fundamentals are "
+                "available for the same canonical ticker -> a price-provider "
+                "coverage gap, NOT delisting."
+            )
+        elif _err.is_provider_side(original_type):
+            reason = (
+                f"{ticker}: price failed with a provider-side fault "
+                f"({original_type}); part of a provider/transport gap, not a "
+                "per-ticker problem."
+            )
+        else:
+            reason = (
+                f"{ticker}: price and fundamentals both returned no data after "
+                "trying every configured provider and symbol variant; treat as a "
+                "provider coverage gap pending corroboration (not asserted delisted)."
+            )
+
+        gap = {
+            "ticker": ticker,
+            "provider_symbol": getattr(snap, "provider_symbol", None),
+            "original_error_type": original_type,
+            "reclassified_error_type": refined_type,
+            "cross_provider_fundamentals": fund_status,
+            "company_confirmed_real": has_other_data,
+            "market_cap": _safe_num(market_cap),
+            "is_large_cap": bool(large_cap),
+            "is_user_watchlist": ticker in watchlist,
+            "all_symbol_variants_empty": all_variants_empty,
+            "provider_attempts": attempts,
+            "reason": reason,
+        }
+        stats.record_material_gap(gap)
+        # Surface the refined classification on the snapshot too (kept distinct
+        # from the raw provider error_type, which still drives systemic counting).
+        snap.error = reason
+        logger.warning("Material data gap on critical ticker %s -> %s", ticker, refined_type)
 
 
 # ---------------------------------------------------------------------------
@@ -944,8 +1065,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
         return 1
 
+    critical_set = resolve_static_critical_set(config.critical_tickers)
     after_prices_df, price_records, s2 = _stage2_prices(
-        universe_df, price_provider, config
+        universe_df, price_provider, config,
+        fund_provider=fund_provider, critical_set=critical_set,
     )
     stage_stats.append(s2)
 
@@ -995,7 +1118,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # a PARTIAL one (with warnings), or merely DIAGNOSTIC/INVALID. This is what
     # stops a systemic provider outage from masquerading as a clean ranking.
     coverage = assess_coverage(stage_stats, ranked, config)
-    status = determine_run_status(coverage, health_report, config)
+    materiality = assess_materiality(
+        stage_stats, ranked, config, health_report=health_report
+    )
+    status = determine_run_status(coverage, health_report, config, materiality)
 
     # Provider-chain + provenance summaries (improvements #7, #9).
     fallback_usage = _fallback_usage_summary({
@@ -1019,10 +1145,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     summary["run_status"] = status["run_status"]
     summary["ranking_validity"] = status["ranking_validity"]
+    summary["ranking_completeness_status"] = status.get("ranking_completeness_status")
     summary["invalid_ranking_reasons"] = status["invalid_ranking_reasons"]
     summary["coverage_warnings"] = status["warnings"]
     summary["recommendations_for_next_run"] = status["recommendations_for_next_run"]
     summary["data_coverage_summary"] = coverage
+    summary["materiality_summary"] = materiality
     summary["fallback_usage_summary"] = fallback_usage
     summary["cache_usage_summary"] = cache_usage
     # Consolidated provider provenance (improvement #7): configured_providers,
