@@ -1004,6 +1004,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary["data_coverage_summary"] = coverage
     summary["fallback_usage_summary"] = fallback_usage
     summary["cache_usage_summary"] = cache_usage
+    # Output-location pointers (improvement #8): the summary holds only the
+    # top-N slice, so name where the full ranking and human report live.
+    summary["full_results_path"] = str(csv_path)
+    summary["top_candidates_path"] = str(md_path)
     if health_report is not None:
         summary["provider_health_check_summary"] = health_report
     write_json(json_path, summary)
@@ -1266,11 +1270,25 @@ def _build_summary(
         # Allocation-eligibility fields (same set in CSV/JSON/Markdown).
         candidate.update(allocation_field_summary(row))
         candidates.append(candidate)
+    # Count-of-record fields (improvement #8) make it unambiguous that
+    # ``candidates`` holds only the reported top-N slice of a larger ranking,
+    # and how many of those names are allocation-eligible.
+    eligible_col = ranked.get("eligible_for_allocation")
+    ranked_eligible_count = (
+        int(pd.Series(eligible_col).astype(bool).sum())
+        if eligible_col is not None else 0
+    )
     return {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "mode": mode,
         "sample_limit": sample_limit,
         "top_n": int(config.run.top_n),
+        # --- Count-of-record fields (improvement #8) ---
+        # ``ranked_candidate_count`` is the full research ranking; ``candidates``
+        # below is only the top-N slice actually serialized into this summary.
+        "ranked_candidate_count": int(len(ranked)),
+        "reported_candidate_count": len(candidates),
+        "allocation_eligible_count": ranked_eligible_count,
         "providers": {
             "fundamentals": config.providers.fundamentals,
             "prices": config.providers.prices,
@@ -1282,6 +1300,9 @@ def _build_summary(
         "provider_failures": _provider_failure_summary(stage_stats),
         "stages": [s.to_dict() for s in stage_stats],
         "total_runtime_seconds": round(total_runtime, 2),
+        # ``candidates`` is the reported top-N slice (see reported_candidate_count),
+        # NOT the full ranking. The complete ranked table lives at
+        # ``full_results_path``; the human report at ``top_candidates_path``.
         "candidates": candidates,
     }
 
