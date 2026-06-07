@@ -150,3 +150,31 @@ These are the user's standing rules; every follow-on commit must respect them:
 Asset selection answers **"which assets are worth considering?"** A later
 allocation/rebalancing module answers **"how much capital, and when to adjust?"**
 This milestone keeps those two questions visibly separate in the output.
+
+## Resolution (what shipped)
+
+All five issues are now addressed; the milestone landed across nine commits:
+
+1. **Mixed-purpose headline (issue 1)** → `reports/top_candidates.md` is split
+   into sections A–E (portfolio-eligible shortlist, research ranking, speculative,
+   watchlist-only, excluded-from-allocation reasons). A separate
+   `eligible_for_allocation` flag and `allocation_adjusted_score` drive the
+   shortlist; nothing is dropped from the research ranking.
+2. **Raw sentiment in the composite (issue 2)** → the composite consumes a
+   confidence-adjusted `effective_sentiment_score`
+   (`neutral + confidence·(raw − neutral)`); `raw_sentiment_score` is still
+   reported. Toggle with `sentiment.use_confidence_adjusted_sentiment`.
+3. **Stale news only reported (issue 3)** → stale news now damps the *effective*
+   confidence and raises `STALE_NEWS` / `VERY_STALE_NEWS` / `LOW_SOURCE_DIVERSITY`.
+4. **Inconsistent provider reporting (issue 4)** → `build_provider_report()` is a
+   single source of truth (`configured_providers`, `provider_chain_by_data_type`,
+   `actual_provider_usage`, `cache_usage_by_stage`) reused by the summary JSON,
+   `provider_diagnostics.{json,md}`, and the `top_candidates.md` footer; unwrapped
+   providers show `—` instead of a misleading `0`.
+5. **Ambiguous `candidates` (issue 5)** → the summary now carries
+   `ranked_candidate_count`, `reported_candidate_count`,
+   `allocation_eligible_count`, `top_n`, `full_results_path`, and
+   `top_candidates_path`; `candidates` is documented as the reported top-N slice.
+
+See the README section *Research ranking vs. allocation eligibility* for the
+user-facing explanation.

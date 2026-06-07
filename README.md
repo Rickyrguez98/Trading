@@ -429,7 +429,86 @@ pillar so you can see *why* a ticker ranked where it did:
 - `missing_fields` / `missing_metric_count` — explicit accounting of what
   data was unavailable.
 
+Plus the **allocation-eligibility block** (see the next section):
+`eligible_for_allocation`, `allocation_adjusted_score`,
+`allocation_exclusion_reasons`, `exclusion_reason_from_allocation`,
+`risk_bucket`, `sentiment_quality_bucket`, `data_quality_bucket`,
+`candidate_role`, `recommended_next_step`, `watchlist_rank`.
+
 **A high final score is a starting point for research, not a recommendation.**
+
+## Research ranking vs. allocation eligibility
+
+Two different questions, kept deliberately separate so a high research score is
+never mistaken for "safe to buy":
+
+- **Asset selection** (this milestone) answers *"which assets are worth
+  considering?"* → the **research ranking**: every scored candidate, sorted by
+  `final_score`. Speculative and watchlist names stay here, **labeled, never
+  hidden**.
+- **Allocation / rebalancing** (a future milestone) answers *"how much capital,
+  and when to adjust?"* → it should consume only the **allocation shortlist**:
+  the subset with `eligible_for_allocation = true`, sorted by
+  `allocation_adjusted_score`.
+
+`reports/top_candidates.md` is split by decision purpose into five sections:
+**A. Portfolio-eligible shortlist** (the table to use for allocation),
+**B. Research ranking** (all candidates, research-only), **C. Speculative
+candidates**, **D. Watchlist-only candidates**, and **E. Excluded-from-allocation
+reasons** for the top-ranked names that did not make the shortlist.
+
+### What makes a candidate allocation-eligible
+
+By default only **core** and **growth** candidates that clear every gate are
+eligible; **speculative** and **watchlist** names are excluded by default (flip
+`allocation.allow_speculative_for_allocation` / `allow_watchlist_for_allocation`
+to override). The gates (under `allocation:` in the YAML) are:
+
+- **Risk** — volatility ≤ `max_allocation_volatility` (default 0.50, *stricter*
+  than the research `HIGH_VOLATILITY` ceiling of 0.80), `risk_penalty` ≤
+  `max_allocation_risk_penalty`, no `WEAK_PRICE_TREND`, and (optionally)
+  non-negative recent return.
+- **Data quality** — at most `max_missing_metric_count_for_allocation` missing
+  fields and a present market cap.
+- **Sentiment** — *only when the name actually has news* — confidence ≥
+  `min_sentiment_confidence_for_allocation` and fresh-news ratio ≥
+  `min_fresh_news_ratio_for_allocation`. A no-news name is **not** blocked (its
+  effective sentiment is neutral); a thin/stale feed that could mislead is.
+
+Why keep speculative names at all? Because hiding them would destroy useful
+research signal. The point is not to *delete* risk — it is to make it
+**impossible to size a risky name by accident**: it stays in the ranking, fully
+labeled, but never lands in the shortlist unless you deliberately allow it.
+
+### How confidence and stale news shape the score
+
+Sentiment feeds the composite through a **confidence-adjusted effective score**,
+not the raw value: `effective = neutral + confidence·(raw − neutral)`
+(`neutral = 50`). A confident 85/100 stays near 85; a low-confidence 85/100 is
+pulled back toward neutral, so a thin or noisy feed cannot swing the ranking
+(`use_confidence_adjusted_sentiment: true`; `raw_sentiment_score` is still
+reported for transparency). Stale news damps confidence further — below
+`stale_news_fresh_ratio_threshold` the effective confidence is scaled down by how
+fresh the feed is — and raises `STALE_NEWS` / `VERY_STALE_NEWS` /
+`LOW_SOURCE_DIVERSITY` flags.
+
+### The four allocation buckets
+
+`candidate_role` maps each research `selection_bucket` to an allocation role, and
+`recommended_next_step` says what a human or a future optimizer should do:
+
+| `selection_bucket` | `candidate_role` | Default `recommended_next_step` |
+|--------------------|------------------|---------------------------------|
+| `high_quality_core_candidate` | `core_candidate` | `eligible_for_portfolio_optimizer` (if it clears the gates) |
+| `growth_candidate` | `satellite_growth_candidate` | `eligible_for_portfolio_optimizer` / `risk_review_needed` |
+| `speculative_candidate` | `speculative_research_only` | `exclude_from_allocation_by_default` |
+| `watchlist_only` | `watchlist_only` | `needs_manual_review` |
+
+`allocation_adjusted_score` starts from `final_score` and subtracts penalties for
+high volatility, speculative momentum, weak trend, watchlist/speculative bucket,
+low sentiment confidence, stale news, and excess risk penalty — so a high-risk
+name with a strong research score sorts *below* a steadier one in the shortlist.
+This means **the shortlist is not just the top of the research ranking**.
 
 ## Run status and provider reliability
 
@@ -550,6 +629,13 @@ This milestone deliberately stops at **selection** — producing a transparent,
 explainable ranked shortlist — and does **not** size positions. But the output
 is designed to feed a future allocation / rebalancing milestone:
 
+- **`eligible_for_allocation` + `allocation_adjusted_score`** are the primary
+  hand-off: a rebalancer should size only from the eligible shortlist, sorted by
+  the adjusted score, and treat the full ranking as research context. See
+  [Research ranking vs. allocation eligibility](#research-ranking-vs-allocation-eligibility).
+- **`candidate_role` + `recommended_next_step`** route each name (optimizer /
+  manual review / sentiment refresh / risk review / default-exclude) without the
+  allocator re-deriving the policy.
 - **`selection_bucket`** gives an allocator ready-made risk tiers. A future
   rebalancer can cap or scale exposure per bucket (e.g. core gets full weight,
   speculative is capped, watchlist is excluded until reviewed) instead of
