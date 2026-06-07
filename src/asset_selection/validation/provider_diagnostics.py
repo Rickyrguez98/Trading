@@ -30,6 +30,11 @@ _ERROR_GLOSS = {
     "NO_NEWS_DATA": "no recent news (not a failure on its own)",
     "PROVIDER_EMPTY_RESPONSE": "provider returned an empty payload",
     "POSSIBLY_DELISTED": "no data after normalization; may be delisted",
+    "PRICE_ENDPOINT_NO_DATA": "price endpoint returned nothing (a price-feed miss)",
+    "PROVIDER_SYMBOL_RESOLUTION_FAILED": "every symbol variant tried came back empty",
+    "PRICE_PROVIDER_GAP": "price gap but fundamentals exist -> coverage gap, not delisting",
+    "PROVIDER_COVERAGE_GAP": "free provider does not cover this name",
+    "CRITICAL_TICKER_PRICE_FAILURE": "an important/mega-cap name lost its price (material)",
     "PROVIDER_RATE_LIMITED": "provider rate-limited the request",
     "PROVIDER_TIMEOUT": "request timed out",
     "PROVIDER_BLOCKED": "provider blocked the request (auth/forbidden)",
@@ -122,10 +127,29 @@ def build_provider_diagnostics(
         fallback_usage=fallback_usage or {},
         cache_usage=cache_usage or {},
     )
+    # Materiality (audit fix): pull the critical-ticker gap detail straight off
+    # the status verdict so the diagnostics name every missing mega-cap instead
+    # of letting aggregate coverage hide it.
+    materiality = {
+        k: status.get(k)
+        for k in (
+            "ranking_completeness_status",
+            "critical_ticker_failures",
+            "hard_critical_ticker_failures",
+            "failed_large_cap_tickers",
+            "failed_high_liquidity_tickers",
+            "failed_user_watchlist_tickers",
+            "critical_failures_with_company_confirmed_real",
+            "minor_non_material_price_gaps",
+            "material_data_gaps",
+        )
+        if status.get(k) is not None
+    }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_status": status.get("run_status"),
         "ranking_validity": status.get("ranking_validity"),
+        "ranking_completeness_status": status.get("ranking_completeness_status"),
         "is_trusted": status.get("is_trusted"),
         "invalid_ranking_reasons": list(status.get("invalid_ranking_reasons", [])),
         "warnings": list(status.get("warnings", [])),
@@ -136,6 +160,7 @@ def build_provider_diagnostics(
         "provider_report": provider_report,
         "provider_health_check_summary": health_report or {},
         "data_coverage_summary": coverage or {},
+        "materiality_summary": materiality,
         "provider_failure_summary": provider_failures or {},
         "fallback_usage_summary": fallback_usage or {},
         "cache_usage_summary": cache_usage or {},
@@ -201,6 +226,17 @@ def render_run_status_banner(
                      f"(ranking_validity: {rv}).")
         lines.append("> The data was insufficient or a provider failed "
                      "systemically. Treat the table below as diagnostics only.")
+    completeness = status.get("ranking_completeness_status")
+    if completeness and completeness != "COMPLETE":
+        lines.append(f"> _Ranking completeness:_ `{completeness}`.")
+        names: List[str] = []
+        for key in ("hard_critical_ticker_failures", "critical_ticker_failures"):
+            vals = status.get(key)
+            if vals:
+                names = [str(v) for v in vals] if isinstance(vals, list) else [str(vals)]
+                break
+        if names:
+            lines.append("> Material data gap for: " + ", ".join(names) + ".")
     for r in status.get("invalid_ranking_reasons", []) or []:
         lines.append(f"> - {r}")
     recs = status.get("recommendations_for_next_run", []) or []
@@ -225,6 +261,7 @@ def _render_markdown(diag: Dict[str, Any]) -> str:
         f"## Run status: {rs}",
         "",
         f"- **ranking_validity:** `{rv}`",
+        f"- **ranking_completeness:** `{diag.get('ranking_completeness_status') or 'COMPLETE'}`",
         f"- **trusted ranking:** {'yes' if trusted else 'NO'}",
         "",
     ]
@@ -297,6 +334,78 @@ def _render_markdown(diag: Dict[str, Any]) -> str:
         for et, n in sorted(by_err.items(), key=lambda kv: -kv[1]):
             lines.append(f"| `{et}` | {n} | {_ERROR_GLOSS.get(et, '')} |")
         lines.append("")
+
+    # --- Material data gaps (audit fix: never let coverage hide a mega-cap) ---
+    # A critical/liquid name that lost its price is reported by NAME here, with
+    # the full per-provider attempt trail, so 99.8% headline coverage can never
+    # silently bury a missing NVDA.
+    mat = diag.get("materiality_summary") or {}
+    completeness = diag.get("ranking_completeness_status") or mat.get(
+        "ranking_completeness_status"
+    )
+    gaps = list(mat.get("material_data_gaps") or [])
+    if completeness and completeness != "COMPLETE":
+        lines += ["## Material data gaps", "",
+                  f"- **ranking_completeness_status:** `{completeness}`"]
+        for label, key in (
+            ("critical ticker failures", "critical_ticker_failures"),
+            ("hard critical failures", "hard_critical_ticker_failures"),
+            ("failed large-cap", "failed_large_cap_tickers"),
+            ("failed high-liquidity", "failed_high_liquidity_tickers"),
+            ("failed user-watchlist", "failed_user_watchlist_tickers"),
+            ("critical failures with company confirmed real",
+             "critical_failures_with_company_confirmed_real"),
+        ):
+            vals = mat.get(key)
+            if vals:
+                shown = ", ".join(str(v) for v in vals) if isinstance(vals, list) else vals
+                lines.append(f"- **{label}:** {shown}")
+        minor = mat.get("minor_non_material_price_gaps")
+        if minor:
+            shown = ", ".join(str(v) for v in minor) if isinstance(minor, list) else minor
+            lines.append(f"- _minor (non-material) price gaps:_ {shown}")
+        lines.append("")
+
+    if gaps:
+        lines += ["### Per-ticker material gap detail", "",
+                  "Each row is a critical/liquid name whose price could not be "
+                  "retrieved. `confirmed_real` means a cross-provider fundamentals "
+                  "lookup succeeded, so this is a price-feed gap, **not** a "
+                  "delisting.", "",
+                  "| Ticker | Original error | Reclassified | Fundamentals | Confirmed real | Large cap | Watchlist |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for g in gaps:
+            lines.append(
+                f"| `{g.get('ticker')}` "
+                f"| `{g.get('original_error_type') or '—'}` "
+                f"| `{g.get('reclassified_error_type') or '—'}` "
+                f"| {g.get('cross_provider_fundamentals') or '—'} "
+                f"| {'yes' if g.get('company_confirmed_real') else 'no'} "
+                f"| {'yes' if g.get('is_large_cap') else 'no'} "
+                f"| {'yes' if g.get('is_user_watchlist') else 'no'} |"
+            )
+        lines.append("")
+        # Per-ticker provider attempt trail: which symbol was tried at which
+        # provider, and what came back. This is the "show every attempt, not
+        # just the final result" requirement made concrete.
+        for g in gaps:
+            attempts = list(g.get("provider_attempts") or [])
+            if not attempts:
+                continue
+            lines += [f"#### `{g.get('ticker')}` — provider attempt trail", "",
+                      "| Provider | Symbol tried | Variant | Success | Error | Note |",
+                      "| --- | --- | --- | --- | --- | --- |"]
+            for a in attempts:
+                err = a.get("error_type") or "—"
+                lines.append(
+                    f"| {a.get('provider_name') or '—'} "
+                    f"| `{a.get('provider_symbol') or '—'}` "
+                    f"| `{a.get('symbol_variant_attempted') or '—'}` "
+                    f"| {'yes' if a.get('success') else 'no'} "
+                    f"| `{err}` "
+                    f"| {a.get('response_summary') or a.get('error_message') or '—'} |"
+                )
+            lines.append("")
 
     # --- Configured providers + fallback chain (consistent provenance block) ---
     report = diag.get("provider_report") or {}
