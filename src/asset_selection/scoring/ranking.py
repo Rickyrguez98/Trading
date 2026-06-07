@@ -26,6 +26,7 @@ _DISPLAY_COLUMNS: List[str] = [
     "fresh_ratio",
     "unique_ratio",
     "sentiment_confidence",
+    "effective_sentiment_confidence",
     "positive_ratio",
     "negative_ratio",
     "source_diversity",
@@ -97,6 +98,8 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
         head["volatility_pct"] = head["volatility_pct"].apply(_fmt_signed_pct)
     if "sentiment_confidence" in head.columns:
         head["sentiment_confidence"] = head["sentiment_confidence"].apply(_fmt_confidence)
+    if "fresh_ratio" in head.columns:
+        head["fresh_ratio"] = head["fresh_ratio"].apply(_fmt_confidence)
 
     if "flags" in head.columns:
         head["flags"] = head["flags"].apply(lambda v: ", ".join(v) if isinstance(v, list) else (v or ""))
@@ -121,6 +124,8 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
         "risk_penalty",
         "selection_bucket",
         "article_count",
+        "stale_count",
+        "fresh_ratio",
         "sentiment_confidence",
         "top_driver_pillar",
         "top_drag_pillar",
@@ -141,6 +146,9 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
     md.append("- **STRONG_FUNDAMENTALS_BAD_SENTIMENT** — quality business, negative recent news.")
     md.append("- **NO_NEWS** — no recent articles available; sentiment score is neutral by default.")
     md.append("- **LOW_SENTIMENT_CONFIDENCE** — few articles or low source diversity; treat sentiment as noisy.")
+    md.append("- **STALE_NEWS** — most recent coverage is aging (low fresh_ratio); sentiment weight is damped.")
+    md.append("- **VERY_STALE_NEWS** — nearly all coverage is stale; sentiment is pulled toward neutral.")
+    md.append("- **LOW_SOURCE_DIVERSITY** — sentiment rests on too few distinct sources; treat as a single voice.")
     md.append("- **WEAK_PRICE_TREND** — recent return is in the bottom of the cross-section; treat with caution.")
     md.append("- **THIN_FUNDAMENTALS** — many missing fundamental fields; score is less reliable.")
     md.append("- **MISSING_MARKET_CAP** — could not read market cap; size/liquidity filters degraded.")
