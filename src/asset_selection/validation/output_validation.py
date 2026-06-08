@@ -32,10 +32,15 @@ _PILLAR_COLS = (
 
 @dataclass
 class ValidationCheck:
-    """One named check. ``severity`` is the worst outcome it can report."""
+    """One named check. ``status`` is the worst outcome it reports.
+
+    ``error`` is reserved for an *integrity* failure -- output that would mislead
+    a reader (e.g. a FinBERT score present when FinBERT never ran). ``warn`` is a
+    quality concern to weigh; ``ok`` is informational. No status ever drops a row.
+    """
 
     name: str
-    status: str               # "ok" | "warn"
+    status: str               # "ok" | "warn" | "error"
     message: str
     count: int = 0
     examples: List[Dict[str, Any]] = field(default_factory=list)
@@ -80,6 +85,13 @@ def _ok(name: str, message: str) -> ValidationCheck:
 def _warn(name: str, message: str, examples: List[Dict[str, Any]]) -> ValidationCheck:
     return ValidationCheck(
         name=name, status="warn", message=message,
+        count=len(examples), examples=examples[:25],
+    )
+
+
+def _error(name: str, message: str, examples: List[Dict[str, Any]]) -> ValidationCheck:
+    return ValidationCheck(
+        name=name, status="error", message=message,
         count=len(examples), examples=examples[:25],
     )
 
@@ -307,6 +319,170 @@ def _check_sentiment_models(
     )
 
 
+def _check_finbert_availability(
+    ranked: pd.DataFrame, summary: Dict[str, Any]
+) -> ValidationCheck:
+    """Reconcile what was *claimed* about FinBERT with what actually ran.
+
+    This is the anti-fabrication guard. It is an ``error`` (integrity failure)
+    only when the output would mislead a reader -- a FinBERT score present on a
+    candidate while the run reports FinBERT unavailable AND zero FinBERT articles
+    scored. Otherwise it reports honestly: FinBERT not requested (ok), requested
+    but unavailable and degraded to VADER (warn), or loaded and used (ok).
+    """
+    name = "finbert_availability"
+    s = (summary or {}).get("sentiment_summary") or {}
+    if not s:
+        return _ok(name, "No sentiment-model summary recorded.")
+
+    configured = str(s.get("configured_model", "vader")).lower()
+    requested = bool(s.get("finbert_attempted")) or configured in ("finbert", "comparison", "ensemble")
+    available = bool(s.get("finbert_available"))
+    scored_finbert = int(s.get("articles_scored_finbert", 0) or 0)
+    scored_vader = int(s.get("articles_scored_vader", 0) or 0)
+
+    # Integrity check: a FinBERT score must never appear when FinBERT did not run.
+    if not available and scored_finbert == 0 and "finbert_sentiment_score" in ranked.columns:
+        fabricated = [
+            {"ticker": row.get("ticker"),
+             "finbert_sentiment_score": _num(row.get("finbert_sentiment_score"))}
+            for _, row in ranked.iterrows()
+            if _num(row.get("finbert_sentiment_score")) is not None
+        ]
+        if fabricated:
+            return _error(
+                name,
+                f"{len(fabricated)} candidate(s) carry a finbert_sentiment_score "
+                "while the run reports FinBERT unavailable and 0 FinBERT articles "
+                "scored. A FinBERT score must never be fabricated.",
+                fabricated,
+            )
+
+    if requested and not available:
+        return _warn(
+            name,
+            f"FinBERT was requested (configured_model='{configured}') but is "
+            "unavailable; the run degraded to VADER and scored "
+            f"{scored_finbert} FinBERT article(s). "
+            + str(s.get("finbert_unavailable_reason") or ""),
+            [{"ticker": "(run)", "issue": "FINBERT_UNAVAILABLE",
+              "detail": s.get("finbert_unavailable_reason")
+              or "transformers/torch not installed or model failed to load."}],
+        )
+
+    if available and scored_finbert == 0 and scored_vader > 0:
+        return _warn(
+            name,
+            "FinBERT loaded but scored 0 articles while VADER scored "
+            f"{scored_vader}. Verify the FinBERT path actually executed.",
+            [{"ticker": "(run)", "issue": "FINBERT_LOADED_BUT_UNUSED",
+              "detail": "finbert_available=true but articles_scored_finbert=0."}],
+        )
+
+    if not requested:
+        return _ok(name, "FinBERT not requested; VADER-only run (the default).")
+    return _ok(
+        name,
+        f"FinBERT available and scored {scored_finbert} article(s) "
+        f"on device '{s.get('finbert_device_used')}'.",
+    )
+
+
+def _check_sentiment_dominance(ranked: pd.DataFrame, cfg: AppConfig) -> ValidationCheck:
+    """Guarantee sentiment never out-weighs fundamentals in the composite.
+
+    A milestone hard rule: improving sentiment must not let it dominate. This
+    re-audits the *effective* composite weights. Sentiment weighing at/above the
+    fundamentals weight is an integrity ``error`` (the model would be sentiment-
+    led); weighing above half the fundamentals family is a ``warn``.
+    """
+    name = "sentiment_dominance"
+    weights = dict(getattr(cfg.composite, "weights", {}) or {})
+    if not weights:
+        return _ok(name, "No composite weights configured to assess.")
+
+    sentiment_w = float(weights.get("sentiment", 0.0) or 0.0)
+    fundamentals_w = float(weights.get("fundamentals", 0.0) or 0.0)
+    family_w = sum(
+        float(weights.get(k, 0.0) or 0.0)
+        for k in ("fundamentals", "growth", "quality", "valuation")
+    )
+    detail = {
+        "sentiment_weight": round(sentiment_w, 4),
+        "fundamentals_weight": round(fundamentals_w, 4),
+        "fundamentals_family_weight": round(family_w, 4),
+    }
+    if sentiment_w >= fundamentals_w or sentiment_w >= family_w:
+        return _error(
+            name,
+            f"Sentiment weight ({sentiment_w:g}) is >= the fundamentals weight "
+            f"({fundamentals_w:g}) / family ({family_w:g}). Sentiment must not "
+            "dominate fundamentals; lower composite.weights.sentiment.",
+            [detail],
+        )
+    if sentiment_w > family_w * 0.5:
+        return _warn(
+            name,
+            f"Sentiment weight ({sentiment_w:g}) exceeds half the fundamentals "
+            f"family ({family_w:g}). It does not dominate, but is unusually high.",
+            [detail],
+        )
+    return _ok(
+        name,
+        f"Fundamentals dominate: sentiment weight {sentiment_w:g} < fundamentals "
+        f"{fundamentals_w:g} (family {family_w:g}).",
+    )
+
+
+def _check_sentiment_output_completeness(
+    ranked: pd.DataFrame, summary: Dict[str, Any]
+) -> ValidationCheck:
+    """Ensure the expanded sentiment fields actually made it into the output.
+
+    A silent field drop (e.g. a missing ``sentiment_model_used`` column, or a
+    summary missing the article counts) would make the report un-auditable, so we
+    surface it as a ``warn`` rather than letting it pass unnoticed.
+    """
+    name = "sentiment_output_completeness"
+    s = (summary or {}).get("sentiment_summary") or {}
+    if not s:
+        # No sentiment run recorded in this summary -> nothing to audit here.
+        return _ok(name, "No sentiment summary in this run; completeness N/A.")
+
+    problems: List[Dict[str, Any]] = []
+    required_summary = (
+        "configured_model", "sentiment_model_used", "finbert_available",
+        "articles_scored_vader", "articles_scored_finbert", "final_sentiment_source",
+    )
+    missing_summary = [k for k in required_summary if k not in s]
+    if missing_summary:
+        problems.append({
+            "scope": "sentiment_summary",
+            "missing": ", ".join(missing_summary),
+        })
+
+    if not ranked.empty:
+        required_cols = (
+            "sentiment_score", "vader_sentiment_score", "sentiment_model_used",
+            "sentiment_model_agreement", "final_sentiment_score",
+        )
+        missing_cols = [c for c in required_cols if c not in ranked.columns]
+        if missing_cols:
+            problems.append({
+                "scope": "ranked_candidates",
+                "missing": ", ".join(missing_cols),
+            })
+
+    if problems:
+        return _warn(
+            name,
+            "Some expected sentiment fields are missing from the output; the "
+            "report may be hard to audit. See examples for which fields/scope.",
+            problems,
+        )
+    return _ok(name, "All expected sentiment fields are present in the output.")
+
+
 def _check_single_pillar_dominance(ranked: pd.DataFrame) -> ValidationCheck:
     """Flag candidates whose fundamentals_score rests on one pillar alone."""
     name = "single_pillar_dominance"
@@ -360,14 +536,20 @@ def validate_outputs(
         _check_missing_market_cap(ranked),
         _check_overestimated_confidence(ranked, config),
         _check_sentiment_models(ranked, summary or {}),
+        _check_finbert_availability(ranked, summary or {}),
+        _check_sentiment_dominance(ranked, config),
+        _check_sentiment_output_completeness(ranked, summary or {}),
         _check_single_pillar_dominance(ranked),
     ]
     warnings = [c for c in checks if c.status == "warn"]
+    errors = [c for c in checks if c.status == "error"]
+    overall = "error" if errors else ("warn" if warnings else "ok")
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "n_candidates": int(len(ranked)),
         "n_warnings": len(warnings),
-        "overall_status": "warn" if warnings else "ok",
+        "n_errors": len(errors),
+        "overall_status": overall,
         "checks": [c.to_dict() for c in checks],
     }
 
@@ -393,7 +575,8 @@ def _render_markdown(report: Dict[str, Any]) -> str:
         "> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.",
         "",
         f"**Overall status: {status}** "
-        f"({report.get('n_warnings', 0)} warning(s) over "
+        f"({report.get('n_errors', 0)} error(s), "
+        f"{report.get('n_warnings', 0)} warning(s) over "
         f"{report.get('n_candidates', 0)} ranked candidate(s)).",
         "",
         "These checks re-audit the produced output the way a skeptical reviewer "
@@ -403,15 +586,16 @@ def _render_markdown(report: Dict[str, Any]) -> str:
         "| Check | Status | Count | Detail |",
         "| --- | --- | --- | --- |",
     ]
+    _marks = {"error": "ERROR", "warn": "WARN", "ok": "ok"}
     for c in report.get("checks", []):
-        mark = "WARN" if c.get("status") == "warn" else "ok"
+        mark = _marks.get(c.get("status"), "ok")
         msg = str(c.get("message", "")).replace("\n", " ")
         lines.append(f"| {c.get('name')} | {mark} | {c.get('count', 0)} | {msg} |")
     lines.append("")
 
-    # Detail blocks for any check that fired.
+    # Detail blocks for any check that fired (warn or error).
     for c in report.get("checks", []):
-        if c.get("status") != "warn" or not c.get("examples"):
+        if c.get("status") not in ("warn", "error") or not c.get("examples"):
             continue
         lines.append(f"## {c.get('name')}")
         lines.append("")
