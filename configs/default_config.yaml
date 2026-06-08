@@ -155,7 +155,26 @@ prices:
   momentum_penalty_strength: 20.0
 
 sentiment:
-  model: vader                # vader | finbert (optional, requires extras)
+  model: vader                # vader | finbert | comparison
+  # Run VADER + FinBERT side by side regardless of `model` (reports disagreement).
+  compare_models: false
+  comparison_models:
+    - vader
+    - finbert
+  # FinBERT is OPTIONAL. It is never fabricated: if the [finbert] extras
+  # (transformers + torch) are missing, or the model can't load, the run
+  # degrades to VADER and says so via FINBERT_UNAVAILABLE / VADER_ONLY_SENTIMENT.
+  finbert_enabled: false
+  finbert_model_name: ProsusAI/finbert
+  fallback_to_vader_if_finbert_unavailable: true
+  # In comparison mode, which score feeds the composite: vader | finbert | ensemble.
+  final_sentiment_source: vader
+  ensemble_vader_weight: 0.5
+  ensemble_finbert_weight: 0.5
+  # Ticker-level |vader - finbert| (0..100) above this -> SENTIMENT_MODEL_DISAGREEMENT.
+  sentiment_disagreement_threshold: 25.0
+  # Mean per-article FinBERT confidence below this -> LOW_FINBERT_CONFIDENCE.
+  low_finbert_confidence_threshold: 0.30
   # Articles older than this are ignored.
   max_age_days: 30
   # Exponential half-life (in days) for recency weighting.

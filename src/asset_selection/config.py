@@ -185,7 +185,32 @@ class PricesConfig:
 
 @dataclass
 class SentimentConfig:
+    # ``model`` selects the backend the composite ultimately consumes:
+    #   "vader"      -- lexicon model, always available, no extra deps
+    #   "finbert"    -- finance-tuned transformer (optional [finbert] extra)
+    #   "comparison" -- score with BOTH and pick a final via final_sentiment_source
     model: str = "vader"
+    # Independent of ``model``: when true, ALWAYS run VADER + FinBERT side by side
+    # and report the disagreement, even if ``model`` is a single backend.
+    compare_models: bool = False
+    comparison_models: List[str] = field(default_factory=lambda: ["vader", "finbert"])
+    # FinBERT is optional and never fabricated. ``finbert_enabled`` force-loads it
+    # so its scores appear in the report columns even in a VADER-final run.
+    finbert_enabled: bool = False
+    finbert_model_name: str = "ProsusAI/finbert"
+    # If FinBERT is requested (model=finbert) but its deps/model are unavailable,
+    # fall back to VADER instead of failing -- and SAY SO via flags.
+    fallback_to_vader_if_finbert_unavailable: bool = True
+    # In comparison mode this picks the FINAL score fed to the composite:
+    #   "vader" | "finbert" | "ensemble"  (ensemble = weighted blend below).
+    final_sentiment_source: str = "vader"
+    ensemble_vader_weight: float = 0.5
+    ensemble_finbert_weight: float = 0.5
+    # Ticker-level |vader - finbert| (0..100 scale) above this is a large
+    # disagreement -> SENTIMENT_MODEL_DISAGREEMENT flag.
+    sentiment_disagreement_threshold: float = 25.0
+    # Mean per-article FinBERT confidence below this -> LOW_FINBERT_CONFIDENCE flag.
+    low_finbert_confidence_threshold: float = 0.30
     max_age_days: int = 30
     recency_halflife_days: float = 7.0
     min_articles_for_confidence: int = 3
