@@ -14,7 +14,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
 from ..data_providers.base import NewsItem
 from .text_preprocessing import clean_text
@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
+
+@dataclass
+class ScoreResult:
+    """One article's polarity plus (optionally) the model's class probabilities.
+
+    ``compound`` is always on [-1, +1] (positive_probability - negative_probability
+    for FinBERT; VADER's compound for VADER). The probability fields are populated
+    only by a model that emits a real class distribution (FinBERT). ``error`` holds
+    a captured scoring failure so a single bad record never aborts a batch and is
+    never silently fabricated as a real score.
+    """
+    compound: float
+    positive_probability: Optional[float] = None
+    neutral_probability: Optional[float] = None
+    negative_probability: Optional[float] = None
+    error: Optional[str] = None
+
 
 @dataclass
 class ArticleSentiment:
@@ -49,6 +66,13 @@ class ArticleSentiment:
     vader_label: Optional[str] = None
     finbert_label: Optional[str] = None
     model_used: Optional[str] = None
+    # FinBERT class probabilities (populated only when a real FinBERT scored this
+    # record; None for VADER-only records -- never fabricated).
+    finbert_positive_probability: Optional[float] = None
+    finbert_neutral_probability: Optional[float] = None
+    finbert_negative_probability: Optional[float] = None
+    # A captured (not raised) per-article scoring failure, if any.
+    scoring_error: Optional[str] = None
 
 
 @dataclass
@@ -84,6 +108,25 @@ class SentimentModel(ABC):
     def score(self, text: str) -> float:
         """Return a compound polarity score in [-1, +1] for the input string."""
 
+    def score_many(self, texts: Sequence[str]) -> List["ScoreResult"]:
+        """Score a batch of texts, returning a :class:`ScoreResult` per item.
+
+        Default implementation calls :meth:`score` once per text and carries no
+        class probabilities. Backends with a real batched path (FinBERT) override
+        this for throughput and to expose the class distribution. Errors are
+        captured per item -- a single bad record never aborts the batch and is
+        never fabricated as a real score.
+        """
+        results: List[ScoreResult] = []
+        for text in texts:
+            try:
+                results.append(ScoreResult(compound=float(self.score(text))))
+            except Exception as exc:  # noqa: BLE001 - capture, never fabricate
+                results.append(
+                    ScoreResult(compound=0.0, error=f"{type(exc).__name__}: {exc}")
+                )
+        return results
+
 
 class VaderSentimentModel(SentimentModel):
     """VADER lexicon — general-purpose English sentiment. Light and free."""
@@ -99,41 +142,191 @@ class VaderSentimentModel(SentimentModel):
         return float(self._analyzer.polarity_scores(text)["compound"])
 
 
-class FinBertSentimentModel(SentimentModel):
-    """FinBERT — finance-tuned. Heavy (~440MB) and slow on CPU.
+def _resolve_finbert_device(torch_module: Any, requested: str) -> str:
+    """Resolve a concrete torch device string from a (possibly ``auto``) request.
 
-    Install: ``pip install '.[finbert]'``. Lazy-loaded so the default
-    pipeline doesn't pay the import cost.
+    ``auto`` prefers CUDA, then Apple-Silicon MPS, then CPU. An explicit request
+    is honoured only if that backend is actually available; otherwise it degrades
+    to CPU (we never crash because a GPU was asked for but isn't present).
+
+    Pulled out as a module-level pure function (taking ``torch`` as an argument)
+    so it can be unit-tested with a fake torch and no real GPU.
+    """
+    requested = (requested or "auto").strip().lower()
+
+    def _cuda_ok() -> bool:
+        try:
+            return bool(torch_module.cuda.is_available())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _mps_ok() -> bool:
+        try:
+            mps = getattr(getattr(torch_module, "backends", None), "mps", None)
+            return bool(mps is not None and mps.is_available())
+        except Exception:  # noqa: BLE001
+            return False
+
+    if requested == "cuda":
+        return "cuda" if _cuda_ok() else "cpu"
+    if requested == "mps":
+        return "mps" if _mps_ok() else "cpu"
+    if requested == "cpu":
+        return "cpu"
+    # auto (or anything unrecognized): best available, descending.
+    if _cuda_ok():
+        return "cuda"
+    if _mps_ok():
+        return "mps"
+    return "cpu"
+
+
+class FinBertSentimentModel(SentimentModel):
+    """FinBERT — finance-tuned transformer. Heavy (~440MB) and slow on CPU.
+
+    Install: ``pip install '.[finbert]'``. Lazy-loaded so the default pipeline
+    never pays the import/download cost. We load the model + tokenizer directly
+    (no high-level ``pipeline``) so we can:
+
+      * run a real softmax over the logits and expose the full class distribution
+        (``positive``/``neutral``/``negative`` probabilities), and
+      * compute a signed compound = ``P(positive) - P(negative)`` on [-1, +1],
+        which maps cleanly onto the existing ``50 + 50*compound`` 0..100 scale.
+
+    Label order is read from ``model.config.id2label`` rather than hard-coded, so
+    a re-labelled checkpoint still maps correctly.
     """
 
-    def __init__(self, model_name: str = "ProsusAI/finbert") -> None:
+    def __init__(
+        self,
+        model_name: str = "ProsusAI/finbert",
+        *,
+        batch_size: int = 8,
+        max_length: int = 128,
+        device: str = "auto",
+    ) -> None:
         try:
+            # FinBERT is torch-only by design (requirements-finbert.txt declares
+            # torch + transformers, never TensorFlow/Flax). transformers will,
+            # however, auto-probe for a TF/Flax backend at import time if one is
+            # merely *present* on the path -- and a broken/incompatible TF install
+            # can then crash the import of the torch model classes. We never use
+            # those backends, so disable the probe (setdefault respects an explicit
+            # user override). This must be set BEFORE `import transformers`.
+            import os
+
+            os.environ.setdefault("USE_TF", "0")
+            os.environ.setdefault("USE_FLAX", "0")
+
+            import torch  # type: ignore[import-not-found]
             from transformers import (  # type: ignore[import-not-found]
                 AutoModelForSequenceClassification,
                 AutoTokenizer,
-                pipeline,
             )
         except ImportError as exc:
             raise ImportError(
-                "FinBERT requires the [finbert] extras. "
+                "FinBERT requires the [finbert] extras (transformers + torch). "
                 "Install with: pip install '.[finbert]'"
             ) from exc
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self._pipe = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
+        self._torch = torch
+        self.model_name = model_name
+        self.batch_size = max(1, int(batch_size))
+        self.max_length = max(8, int(max_length))
+        self.device_used = _resolve_finbert_device(torch, device)
+
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self._model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        self._model.to(self.device_used)
+        self._model.eval()
+
+        # Map label name -> column index from the model config (don't hard-code).
+        id2label = {
+            int(k): str(v).lower() for k, v in self._model.config.id2label.items()
+        }
+        self._label_index = {name: idx for idx, name in id2label.items()}
+
+    def _idx(self, name: str) -> Optional[int]:
+        # Tolerate label spellings like 'label_positive' / 'pos'.
+        for key, idx in self._label_index.items():
+            if name in key:
+                return idx
+        return None
+
+    def score_batch(self, texts: Sequence[str]) -> List[ScoreResult]:
+        """Score a single (already non-empty) batch with one forward pass."""
+        torch = self._torch
+        enc = self._tokenizer(
+            list(texts),
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        enc = {k: v.to(self.device_used) for k, v in enc.items()}
+        with torch.no_grad():
+            logits = self._model(**enc).logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+        probs_list = probs.detach().cpu().tolist()
+
+        pos_i = self._idx("positive")
+        neg_i = self._idx("negative")
+        neu_i = self._idx("neutral")
+
+        results: List[ScoreResult] = []
+        for row in probs_list:
+            p_pos = float(row[pos_i]) if pos_i is not None else 0.0
+            p_neg = float(row[neg_i]) if neg_i is not None else 0.0
+            p_neu = float(row[neu_i]) if neu_i is not None else 0.0
+            results.append(
+                ScoreResult(
+                    compound=p_pos - p_neg,
+                    positive_probability=p_pos,
+                    neutral_probability=p_neu,
+                    negative_probability=p_neg,
+                )
+            )
+        return results
+
+    def score_many(self, texts: Sequence[str]) -> List[ScoreResult]:
+        """Batched scoring. Empty texts map to neutral; errors are captured.
+
+        Empty strings are mapped to a neutral result *without* running the model
+        (empty-text-safe). Non-empty texts are chunked into ``batch_size`` groups;
+        a forward-pass failure on a chunk is captured per item (``error`` set) so
+        one bad batch never aborts the run and is never fabricated.
+        """
+        texts = list(texts)
+        results: List[Optional[ScoreResult]] = [None] * len(texts)
+        todo = [i for i, t in enumerate(texts) if t and str(t).strip()]
+        for i in range(len(texts)):
+            if i not in set(todo):  # cheap for small lists; clarity over micro-opt
+                results[i] = ScoreResult(
+                    compound=0.0,
+                    positive_probability=0.0,
+                    neutral_probability=1.0,
+                    negative_probability=0.0,
+                )
+
+        for start in range(0, len(todo), self.batch_size):
+            chunk_idx = todo[start : start + self.batch_size]
+            chunk_texts = [texts[i] for i in chunk_idx]
+            try:
+                batch_results = self.score_batch(chunk_texts)
+                for i, res in zip(chunk_idx, batch_results):
+                    results[i] = res
+            except Exception as exc:  # noqa: BLE001 - capture, never fabricate
+                err = f"{type(exc).__name__}: {exc}"
+                logger.warning("FinBERT batch scoring failed: %s", err)
+                for i in chunk_idx:
+                    results[i] = ScoreResult(compound=0.0, error=err)
+
+        return [r if r is not None else ScoreResult(compound=0.0) for r in results]
 
     def score(self, text: str) -> float:
         if not text:
             return 0.0
-        result = self._pipe(text[:512])[0]  # FinBERT context limit
-        label = str(result.get("label", "")).lower()
-        confidence = float(result.get("score", 0.0))
-        if "positive" in label:
-            return +confidence
-        if "negative" in label:
-            return -confidence
-        return 0.0
+        return self.score_many([text])[0].compound
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +335,10 @@ class FinBertSentimentModel(SentimentModel):
 
 def get_sentiment_model(name: str = "vader") -> SentimentModel:
     name = (name or "vader").lower()
-    if name in ("vader", "comparison"):
-        # "comparison" is resolved by build_sentiment_runtime (which loads BOTH
-        # backends); the single-model factory returns the always-available base.
+    if name in ("vader", "comparison", "ensemble"):
+        # "comparison"/"ensemble" are resolved by build_sentiment_runtime (which
+        # loads BOTH backends); the single-model factory returns the
+        # always-available base so callers never crash on a missing extra.
         return VaderSentimentModel()
     if name == "finbert":
         return FinBertSentimentModel()
@@ -171,23 +365,39 @@ def score_articles(
     articles: Iterable[NewsItem],
     model: SentimentModel,
 ) -> List[ArticleSentiment]:
-    """Score each article and return a list of ArticleSentiment."""
-    scored: List[ArticleSentiment] = []
+    """Score each article (batched) and return a list of ArticleSentiment.
+
+    Articles whose cleaned headline+summary is empty are skipped. Remaining texts
+    are scored via :meth:`SentimentModel.score_many` so a real FinBERT runs them
+    in batches and carries class probabilities; VADER falls back to per-text.
+    """
+    kept: List[NewsItem] = []
+    texts: List[str] = []
     for art in articles:
         text = clean_text(" ".join(filter(None, [art.headline, art.summary])))
         if not text:
             continue
-        compound = model.score(text)
+        kept.append(art)
+        texts.append(text)
+
+    results = model.score_many(texts)
+
+    scored: List[ArticleSentiment] = []
+    for art, res in zip(kept, results):
         scored.append(
             ArticleSentiment(
                 ticker=art.ticker,
                 headline=art.headline,
-                compound=compound,
-                label=_label(compound),
+                compound=res.compound,
+                label=_label(res.compound),
                 source=art.source,
                 published_at=art.published_at,
                 url=art.url,
                 retrieved_at=art.retrieved_at,
+                finbert_positive_probability=res.positive_probability,
+                finbert_neutral_probability=res.neutral_probability,
+                finbert_negative_probability=res.negative_probability,
+                scoring_error=res.error,
             )
         )
     return scored
