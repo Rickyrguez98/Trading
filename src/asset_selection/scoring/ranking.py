@@ -19,6 +19,12 @@ _DISPLAY_COLUMNS: List[str] = [
     "sentiment_score",
     "raw_sentiment_score",
     "effective_sentiment_score",
+    "vader_sentiment_score",
+    "finbert_sentiment_score",
+    "sentiment_score_delta",
+    "sentiment_model_agreement",
+    "final_sentiment_score",
+    "sentiment_model_used",
     "article_count",
     "unique_article_count",
     "duplicate_count",
@@ -79,7 +85,9 @@ _SHORTLIST_COLS = [
 ]
 _RESEARCH_COLS = [
     "rank", "ticker", "company_name", "final_score", "fundamentals_score",
-    "sentiment_score", "effective_sentiment_score", "selection_bucket",
+    "sentiment_score", "effective_sentiment_score",
+    "vader_sentiment_score", "finbert_sentiment_score",
+    "sentiment_model_agreement", "selection_bucket",
     "eligible_for_allocation", "allocation_adjusted_score",
     "return_pct", "volatility_pct", "flags",
 ]
@@ -107,6 +115,8 @@ def _prettify_for_display(df: pd.DataFrame) -> pd.DataFrame:
     for col in (
         "final_score", "allocation_adjusted_score", "fundamentals_score",
         "sentiment_score", "raw_sentiment_score", "effective_sentiment_score",
+        "vader_sentiment_score", "finbert_sentiment_score",
+        "sentiment_score_delta", "final_sentiment_score",
         "growth_score", "quality_score", "valuation_score", "risk_penalty",
     ):
         if col in head.columns:

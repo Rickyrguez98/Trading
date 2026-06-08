@@ -68,10 +68,10 @@ from ..scoring.composite_score import (
     flag_rows,
 )
 from ..scoring.ranking import format_top_candidates_markdown, rank_candidates
-from ..sentiment.sentiment_model import (
-    aggregate_ticker_sentiment,
-    get_sentiment_model,
-    score_articles,
+from ..sentiment.comparison import (
+    build_run_sentiment_summary,
+    build_sentiment_runtime,
+    resolve_ticker_sentiment,
 )
 from ..universe import build_universe, save_universe, universe_counts_by_exchange
 from ..validation import (
@@ -728,21 +728,16 @@ def _stage3_fundamentals(
 def _stage4_sentiment(
     df: pd.DataFrame,
     news_provider,
-    sentiment_model,
+    sentiment_runtime,
     config: AppConfig,
-) -> "tuple[pd.DataFrame, StageStats]":
+) -> "tuple[pd.DataFrame, StageStats, Dict[str, Any]]":
     started = time.perf_counter()
     stats = StageStats(name="4_sentiment")
     stats.input_count = len(df)
 
     scfg = config.sentiment
-    model_factor = (
-        scfg.finbert_confidence_factor
-        if scfg.model == "finbert"
-        else scfg.vader_confidence_factor
-    )
 
-    sentiment_rows: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
     iterator = _progress(df["ticker"].tolist(), desc="Stage 4: news+sentiment")
     for ticker in iterator:
         try:
@@ -755,41 +750,24 @@ def _stage4_sentiment(
                 error_type=_err.classify_exception(exc),
             )
 
-        scored = score_articles(articles, sentiment_model)
-        agg = aggregate_ticker_sentiment(
-            ticker,
-            scored,
-            recency_halflife_days=scfg.recency_halflife_days,
-            min_articles_for_confidence=scfg.min_articles_for_confidence,
-            confidence_full_article_count=scfg.confidence_full_article_count,
-            confidence_full_source_count=scfg.confidence_full_source_count,
-            stale_after_days=scfg.stale_after_days,
-            model_confidence_factor=model_factor,
-            model_name=scfg.model,
-        )
-        sentiment_rows.append({
-            "ticker": ticker,
-            "sentiment_score": agg.sentiment_score,
-            "article_count": agg.article_count,
-            "unique_article_count": agg.unique_article_count,
-            "duplicate_count": agg.duplicate_count,
-            "stale_count": agg.stale_count,
-            "fresh_ratio": agg.fresh_ratio,
-            "unique_ratio": agg.unique_ratio,
-            "positive_ratio": agg.positive_ratio,
-            "negative_ratio": agg.negative_ratio,
-            "neutral_ratio": agg.neutral_ratio,
-            "source_diversity": agg.source_diversity,
-            "sentiment_confidence": agg.confidence,
-            "sentiment_model": agg.model_name,
-            "news_titles": [a.headline for a in agg.articles[:10]],
-        })
+        # Single-model OR comparison (VADER vs FinBERT) per the config. FinBERT
+        # is never fabricated -- if it is unavailable the row carries VADER's
+        # score plus FINBERT_UNAVAILABLE / VADER_ONLY_SENTIMENT flags.
+        rows.append(resolve_ticker_sentiment(ticker, articles, sentiment_runtime, scfg))
 
-    sentiment_df = pd.DataFrame(sentiment_rows)
+    run_summary = build_run_sentiment_summary(sentiment_runtime, rows)
+
+    # Drop private bookkeeping (``_*``) keys before building the frame.
+    public_rows = [
+        {k: v for k, v in r.items() if not k.startswith("_")} for r in rows
+    ]
+    sentiment_df = pd.DataFrame(public_rows)
     merged = df.merge(sentiment_df, on="ticker", how="left")
 
     # Default fills for tickers that came back with nothing.
-    merged["sentiment_score"] = merged["sentiment_score"].fillna(50.0)
+    for col in ("sentiment_score", "final_sentiment_score", "vader_sentiment_score"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(scfg.neutral_sentiment_score)
     merged["article_count"] = merged["article_count"].fillna(0).astype(int)
     for col, default in (
         ("unique_article_count", 0),
@@ -807,8 +785,13 @@ def _stage4_sentiment(
 
     stats.output_count = len(merged)
     stats.duration_seconds = time.perf_counter() - started
-    logger.info("Stage 4: sentiment computed for %d tickers.", stats.output_count)
-    return merged, stats
+    logger.info(
+        "Stage 4: sentiment computed for %d tickers (model=%s, comparison=%s, "
+        "finbert_available=%s).",
+        stats.output_count, run_summary.get("sentiment_model_used"),
+        run_summary.get("comparison_mode"), run_summary.get("finbert_available"),
+    )
+    return merged, stats, run_summary
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +835,18 @@ def _stage5_compose_and_rank(
         very_stale_news_fresh_ratio_threshold=config.sentiment.very_stale_news_fresh_ratio_threshold,
         low_source_diversity_threshold=config.sentiment.low_source_diversity_threshold,
     )
+    # Merge the sentiment-model comparison flags (SENTIMENT_MODEL_DISAGREEMENT,
+    # FINBERT_UNAVAILABLE, VADER_ONLY_SENTIMENT, LOW_FINBERT_CONFIDENCE) into the
+    # canonical per-row flags so they surface in the reports.
+    if "sentiment_flags" in df.columns:
+        merged_flags: List[List[str]] = []
+        for existing, extra in zip(df["flags"], df["sentiment_flags"]):
+            base = list(existing or [])
+            for f in (extra or []):
+                if f and f not in base:
+                    base.append(f)
+            merged_flags.append(base)
+        df["flags"] = merged_flags
     ranked = rank_candidates(df, top_n=config.run.top_n)
     # Separate the research ranking from the allocation shortlist: tag every
     # candidate with eligibility + an allocation-adjusted score (never drops rows).
@@ -945,14 +940,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     price_provider = build_prices_provider(config, make_cache, make_rate_limiter)
     news_provider = build_news_provider(config, make_cache, make_rate_limiter)
 
-    try:
-        sentiment_model = get_sentiment_model(config.sentiment.model)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Sentiment model %s failed to load (%s); falling back to vader.",
-            config.sentiment.model, exc,
-        )
-        sentiment_model = get_sentiment_model("vader")
+    # Resolve VADER (always) and, if requested, FinBERT. Never crashes and never
+    # fabricates FinBERT: an unavailable FinBERT degrades to VADER with explicit
+    # flags. ``comparison`` mode loads both and compares them per ticker.
+    sentiment_runtime = build_sentiment_runtime(config.sentiment)
 
     # --- Provider health check (benchmark mega-caps) ---
     health_report: Optional[Dict[str, Any]] = None
@@ -1087,8 +1078,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _write_universe_summary(config, mode, exchange_breakdown, stage_stats)
         return 1
 
-    after_sentiment_df, s4 = _stage4_sentiment(
-        after_fund_df, news_provider, sentiment_model, config
+    after_sentiment_df, s4, sentiment_run_summary = _stage4_sentiment(
+        after_fund_df, news_provider, sentiment_runtime, config
     )
     stage_stats.append(s4)
 
@@ -1110,7 +1101,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary = _build_summary(
         ranked, config, mode=mode, sample_limit=sample_limit,
         stage_stats=stage_stats, exchange_breakdown=exchange_breakdown,
-        total_runtime=total_runtime,
+        total_runtime=total_runtime, sentiment_run_summary=sentiment_run_summary,
     )
 
     # --- Ranking-validity gating: is this ranking trustworthy? ---
@@ -1170,6 +1161,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     banner = render_run_status_banner(status, coverage)
     md = (
         banner
+        + render_sentiment_model_note(sentiment_run_summary)
         + format_top_candidates_markdown(ranked, top_n=config.run.top_n)
         + render_provider_provenance_note(provider_report)
     )
@@ -1351,6 +1343,58 @@ def _write_universe_summary(
     write_json(output_dir / "universe_summary.json", payload)
 
 
+def render_sentiment_model_note(sentiment_summary: Optional[Dict[str, Any]]) -> str:
+    """A short Markdown block naming the sentiment model(s) used in this run.
+
+    Surfaces, per the spec: the model used, whether FinBERT was available, how
+    many articles each model scored, the average VADER/FinBERT scores, and the
+    model-disagreement count. Honest by construction -- if FinBERT was requested
+    but unavailable, it says so rather than implying a finance model ran.
+    """
+    s = sentiment_summary or {}
+    if not s:
+        return ""
+    used = s.get("sentiment_model_used", "vader")
+    comparison = bool(s.get("comparison_mode"))
+    finbert_avail = bool(s.get("finbert_available"))
+    lines = [
+        "## Sentiment model",
+        "",
+        f"- **Final model used:** `{used}`"
+        + (" (comparison mode)" if comparison else ""),
+        f"- **Configured model:** `{s.get('configured_model', 'vader')}`",
+        f"- **FinBERT available:** {'yes' if finbert_avail else 'no'}",
+    ]
+    reason = s.get("finbert_unavailable_reason")
+    if not finbert_avail and reason:
+        lines.append(f"  - _FinBERT not used: {reason}_")
+    lines += [
+        f"- **Articles scored — VADER:** {s.get('articles_scored_vader', 0)} · "
+        f"**FinBERT:** {s.get('articles_scored_finbert', 0)}",
+        f"- **Avg sentiment — VADER:** {s.get('avg_vader_sentiment_score')} · "
+        f"**FinBERT:** {s.get('avg_finbert_sentiment_score')}",
+        f"- **Model disagreements (large):** "
+        f"{s.get('sentiment_model_disagreement_count', 0)}",
+    ]
+    disagree = s.get("tickers_with_large_disagreement") or []
+    if disagree:
+        lines.append(
+            "  - _Tickers with large VADER/FinBERT disagreement: "
+            + ", ".join(str(t) for t in disagree[:15])
+            + ("…" if len(disagree) > 15 else "")
+            + "_"
+        )
+    lines += [
+        "",
+        "> Sentiment is bounded and confidence-adjusted, so fundamentals remain "
+        "the dominant driver of `final_score` by default. See "
+        "`docs/SENTIMENT_MODELS.md`.",
+        "",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _build_summary(
     ranked: pd.DataFrame,
     config: AppConfig,
@@ -1360,6 +1404,7 @@ def _build_summary(
     stage_stats: List[StageStats],
     exchange_breakdown: Dict[str, int],
     total_runtime: float,
+    sentiment_run_summary: Optional[Dict[str, Any]] = None,
 ) -> dict:
     if ranked.empty:
         return {
@@ -1369,6 +1414,7 @@ def _build_summary(
             "provider_failures": _provider_failure_summary(stage_stats),
             "stages": [s.to_dict() for s in stage_stats],
             "exchange_breakdown": exchange_breakdown,
+            "sentiment_summary": sentiment_run_summary or {},
             "total_runtime_seconds": round(total_runtime, 2),
         }
 
@@ -1401,6 +1447,14 @@ def _build_summary(
             "sentiment_effective_confidence": _safe_num(row.get("effective_sentiment_confidence")),
             "sentiment_source_diversity": int(row.get("source_diversity", 0) or 0),
             "sentiment_model": row.get("sentiment_model") or config.sentiment.model,
+            # --- VADER vs FinBERT comparison (improvement #4) ---
+            "vader_sentiment_score": _safe_num(row.get("vader_sentiment_score")),
+            "finbert_sentiment_score": _safe_num(row.get("finbert_sentiment_score")),
+            "sentiment_score_delta": _safe_num(row.get("sentiment_score_delta")),
+            "sentiment_model_agreement": row.get("sentiment_model_agreement") or None,
+            "final_sentiment_score": _safe_num(row.get("final_sentiment_score")),
+            "sentiment_model_used": row.get("sentiment_model_used")
+            or row.get("sentiment_model") or config.sentiment.model,
             "fundamentals_score": _safe_num(row.get("fundamentals_score")),
             "growth_score": _safe_num(row.get("growth_score")),
             "quality_score": _safe_num(row.get("quality_score")),
@@ -1452,6 +1506,8 @@ def _build_summary(
             "news": config.providers.news,
         },
         "sentiment_model": config.sentiment.model,
+        # Run-level VADER/FinBERT comparison block (improvement #7).
+        "sentiment_summary": sentiment_run_summary or {},
         "weights": config.composite.weights,
         "exchange_breakdown": exchange_breakdown,
         "provider_failures": _provider_failure_summary(stage_stats),
