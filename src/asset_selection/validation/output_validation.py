@@ -253,6 +253,60 @@ def _check_overestimated_confidence(ranked: pd.DataFrame, cfg: AppConfig) -> Val
     return _ok(name, "No sentiment confidence looks overstated.")
 
 
+def _check_sentiment_models(
+    ranked: pd.DataFrame, summary: Dict[str, Any]
+) -> ValidationCheck:
+    """Report the VADER/FinBERT comparison status honestly.
+
+    Fires a warning (something to weigh, never a row drop) when FinBERT was
+    requested but is unavailable in comparison mode, or when the two models
+    disagree on some tickers. When no comparison was configured it is a benign
+    'ok' naming the single model that ran.
+    """
+    name = "sentiment_model_comparison"
+    s = (summary or {}).get("sentiment_summary") or {}
+    if not s:
+        return _ok(name, "No sentiment-model summary recorded.")
+
+    used = s.get("sentiment_model_used", "vader")
+    comparison = bool(s.get("comparison_mode"))
+    finbert_avail = bool(s.get("finbert_available"))
+    disagree = [t for t in (s.get("tickers_with_large_disagreement") or []) if t]
+    examples: List[Dict[str, Any]] = []
+
+    if comparison and not finbert_avail:
+        examples.append({
+            "ticker": "(run)",
+            "issue": "FINBERT_UNAVAILABLE",
+            "detail": s.get("finbert_unavailable_reason")
+            or "FinBERT requested in comparison mode but not usable; "
+               "scored with VADER only.",
+        })
+    for t in disagree:
+        examples.append({
+            "ticker": t,
+            "issue": "SENTIMENT_MODEL_DISAGREEMENT",
+            "detail": "VADER and FinBERT differ beyond the configured threshold.",
+        })
+
+    if examples:
+        return _warn(
+            name,
+            f"Sentiment ran as '{used}' (comparison={comparison}, "
+            f"finbert_available={finbert_avail}). "
+            f"{s.get('sentiment_model_disagreement_count', 0)} large "
+            "VADER/FinBERT disagreement(s). Treat flagged tickers' sentiment as "
+            "model-dependent; fundamentals still dominate the composite.",
+            examples,
+        )
+    return _ok(
+        name,
+        f"Sentiment ran as '{used}' "
+        f"(comparison={comparison}, finbert_available={finbert_avail}); "
+        "no large model disagreements.",
+    )
+
+
 def _check_single_pillar_dominance(ranked: pd.DataFrame) -> ValidationCheck:
     """Flag candidates whose fundamentals_score rests on one pillar alone."""
     name = "single_pillar_dominance"
@@ -305,6 +359,7 @@ def validate_outputs(
         _check_extreme_volatility(ranked, config),
         _check_missing_market_cap(ranked),
         _check_overestimated_confidence(ranked, config),
+        _check_sentiment_models(ranked, summary or {}),
         _check_single_pillar_dominance(ranked),
     ]
     warnings = [c for c in checks if c.status == "warn"]
