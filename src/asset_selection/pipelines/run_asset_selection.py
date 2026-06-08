@@ -258,6 +258,19 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--sentiment-model", dest="sentiment_model",
+        choices=("vader", "finbert", "comparison", "ensemble"), default=None,
+        help=(
+            "Override the sentiment backend for this run: 'vader' (default, "
+            "always available), 'finbert' (optional [finbert] extras; falls back "
+            "to VADER if unavailable), 'comparison' (score BOTH and report "
+            "disagreement; final source from final_sentiment_source), or "
+            "'ensemble' (score BOTH and blend via the ensemble_* weights). "
+            "FinBERT is never fabricated -- a missing model degrades to VADER and "
+            "is reported via FINBERT_UNAVAILABLE / VADER_ONLY_SENTIMENT."
+        ),
+    )
+    p.add_argument(
         "--allow-partial-ranking", dest="allow_partial_ranking",
         action="store_true", default=None,
         help=(
@@ -875,6 +888,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.cache.enabled = False
     if args.top is not None:
         config.run.top_n = args.top
+    if args.sentiment_model:
+        config.sentiment.model = args.sentiment_model
     if args.output_dir:
         config.run.output_dir = args.output_dir
     if args.use_cache_on_provider_failure:
@@ -1363,19 +1378,40 @@ def render_sentiment_model_note(sentiment_summary: Optional[Dict[str, Any]]) -> 
         f"- **Final model used:** `{used}`"
         + (" (comparison mode)" if comparison else ""),
         f"- **Configured model:** `{s.get('configured_model', 'vader')}`",
+        f"- **Final sentiment source:** `{s.get('final_sentiment_source', 'vader')}`",
         f"- **FinBERT available:** {'yes' if finbert_avail else 'no'}",
     ]
+    if s.get("finbert_model_name"):
+        device = s.get("finbert_device_used")
+        device_note = f" on `{device}`" if device else ""
+        lines.append(f"  - _Model:_ `{s.get('finbert_model_name')}`{device_note}")
     reason = s.get("finbert_unavailable_reason")
     if not finbert_avail and reason:
         lines.append(f"  - _FinBERT not used: {reason}_")
+    if s.get("fallback_to_vader_used"):
+        lines.append(
+            "  - _Fell back to VADER for the final score (FinBERT requested but "
+            "unusable) — reported, not fabricated._"
+        )
     lines += [
         f"- **Articles scored — VADER:** {s.get('articles_scored_vader', 0)} · "
         f"**FinBERT:** {s.get('articles_scored_finbert', 0)}",
         f"- **Avg sentiment — VADER:** {s.get('avg_vader_sentiment_score')} · "
         f"**FinBERT:** {s.get('avg_finbert_sentiment_score')}",
-        f"- **Model disagreements (large):** "
-        f"{s.get('sentiment_model_disagreement_count', 0)}",
+        f"- **Model disagreements — strong:** "
+        f"{s.get('sentiment_model_disagreement_count', 0)} · "
+        f"**mild:** {s.get('mild_disagreement_count', 0)}",
     ]
+    errors = int(s.get("finbert_scoring_error_count", 0) or 0)
+    if errors:
+        lines.append(f"- **FinBERT scoring errors:** {errors} article(s)")
+    breakdown = s.get("agreement_breakdown") or {}
+    if comparison and breakdown:
+        shown = ", ".join(
+            f"{k}={v}" for k, v in breakdown.items() if v
+        )
+        if shown:
+            lines.append(f"  - _Agreement breakdown:_ {shown}")
     disagree = s.get("tickers_with_large_disagreement") or []
     if disagree:
         lines.append(
@@ -1450,11 +1486,20 @@ def _build_summary(
             # --- VADER vs FinBERT comparison (improvement #4) ---
             "vader_sentiment_score": _safe_num(row.get("vader_sentiment_score")),
             "finbert_sentiment_score": _safe_num(row.get("finbert_sentiment_score")),
+            "vader_sentiment_confidence": _safe_num(row.get("vader_sentiment_confidence")),
+            "finbert_sentiment_confidence": _safe_num(row.get("finbert_sentiment_confidence")),
+            "finbert_positive_probability": _safe_num(row.get("finbert_positive_probability")),
+            "finbert_neutral_probability": _safe_num(row.get("finbert_neutral_probability")),
+            "finbert_negative_probability": _safe_num(row.get("finbert_negative_probability")),
             "sentiment_score_delta": _safe_num(row.get("sentiment_score_delta")),
             "sentiment_model_agreement": row.get("sentiment_model_agreement") or None,
             "final_sentiment_score": _safe_num(row.get("final_sentiment_score")),
             "sentiment_model_used": row.get("sentiment_model_used")
             or row.get("sentiment_model") or config.sentiment.model,
+            "finbert_device_used": row.get("finbert_device_used") or None,
+            "sentiment_model_fallback_used": bool(row.get("sentiment_model_fallback_used"))
+            if row.get("sentiment_model_fallback_used") is not None else None,
+            "finbert_scoring_error_count": int(row.get("finbert_scoring_error_count", 0) or 0),
             "fundamentals_score": _safe_num(row.get("fundamentals_score")),
             "growth_score": _safe_num(row.get("growth_score")),
             "quality_score": _safe_num(row.get("quality_score")),
