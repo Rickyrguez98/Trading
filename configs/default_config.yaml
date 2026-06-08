@@ -155,7 +155,7 @@ prices:
   momentum_penalty_strength: 20.0
 
 sentiment:
-  model: vader                # vader | finbert | comparison
+  model: vader                # vader | finbert | comparison | ensemble
   # Run VADER + FinBERT side by side regardless of `model` (reports disagreement).
   compare_models: false
   comparison_models:
@@ -166,13 +166,19 @@ sentiment:
   # degrades to VADER and says so via FINBERT_UNAVAILABLE / VADER_ONLY_SENTIMENT.
   finbert_enabled: false
   finbert_model_name: ProsusAI/finbert
+  # FinBERT runtime knobs (only used when a real FinBERT model loads).
+  finbert_batch_size: 8       # articles per forward pass (throughput vs memory)
+  finbert_max_length: 128     # token truncation length for headline+summary
+  finbert_device: auto        # auto -> cuda -> mps (Apple Silicon) -> cpu; or force cpu/cuda/mps
   fallback_to_vader_if_finbert_unavailable: true
-  # In comparison mode, which score feeds the composite: vader | finbert | ensemble.
+  # In comparison/ensemble mode, which score feeds the composite: vader | finbert | ensemble.
+  # (model: ensemble forces 'ensemble' here regardless of this value.)
   final_sentiment_source: vader
-  ensemble_vader_weight: 0.5
-  ensemble_finbert_weight: 0.5
-  # Ticker-level |vader - finbert| (0..100) above this -> SENTIMENT_MODEL_DISAGREEMENT.
-  sentiment_disagreement_threshold: 25.0
+  ensemble_vader_weight: 0.4
+  ensemble_finbert_weight: 0.6
+  # Ticker-level |vader - finbert| (0..100) at/above this -> SENTIMENT_MODEL_DISAGREEMENT
+  # (strong disagreement); at/above half of it is a mild disagreement (no flag).
+  model_disagreement_threshold: 20.0
   # Mean per-article FinBERT confidence below this -> LOW_FINBERT_CONFIDENCE.
   low_finbert_confidence_threshold: 0.30
   # Articles older than this are ignored.

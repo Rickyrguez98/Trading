@@ -189,6 +189,7 @@ class SentimentConfig:
     #   "vader"      -- lexicon model, always available, no extra deps
     #   "finbert"    -- finance-tuned transformer (optional [finbert] extra)
     #   "comparison" -- score with BOTH and pick a final via final_sentiment_source
+    #   "ensemble"   -- score with BOTH and blend via the ensemble_* weights
     model: str = "vader"
     # Independent of ``model``: when true, ALWAYS run VADER + FinBERT side by side
     # and report the disagreement, even if ``model`` is a single backend.
@@ -198,17 +199,29 @@ class SentimentConfig:
     # so its scores appear in the report columns even in a VADER-final run.
     finbert_enabled: bool = False
     finbert_model_name: str = "ProsusAI/finbert"
+    # FinBERT runtime knobs (only used when a real FinBERT model is loaded).
+    #   batch_size  -- articles scored per forward pass (throughput vs memory)
+    #   max_length  -- token truncation length for headline+summary
+    #   device      -- "auto" picks cuda -> mps (Apple Silicon) -> cpu; or force
+    #                  "cpu" / "cuda" / "mps".
+    finbert_batch_size: int = 8
+    finbert_max_length: int = 128
+    finbert_device: str = "auto"
     # If FinBERT is requested (model=finbert) but its deps/model are unavailable,
     # fall back to VADER instead of failing -- and SAY SO via flags.
     fallback_to_vader_if_finbert_unavailable: bool = True
     # In comparison mode this picks the FINAL score fed to the composite:
     #   "vader" | "finbert" | "ensemble"  (ensemble = weighted blend below).
     final_sentiment_source: str = "vader"
-    ensemble_vader_weight: float = 0.5
-    ensemble_finbert_weight: float = 0.5
-    # Ticker-level |vader - finbert| (0..100 scale) above this is a large
-    # disagreement -> SENTIMENT_MODEL_DISAGREEMENT flag.
-    sentiment_disagreement_threshold: float = 25.0
+    ensemble_vader_weight: float = 0.4
+    ensemble_finbert_weight: float = 0.6
+    # Ticker-level |vader - finbert| (0..100 scale) at/above this is a large
+    # disagreement -> SENTIMENT_MODEL_DISAGREEMENT flag + strong_disagreement.
+    # ``model_disagreement_threshold`` is the canonical knob (per the sentiment
+    # spec); ``sentiment_disagreement_threshold`` is a legacy alias kept so older
+    # configs/tests keep working. Read both via :attr:`disagreement_threshold`.
+    model_disagreement_threshold: float = 20.0
+    sentiment_disagreement_threshold: Optional[float] = None
     # Mean per-article FinBERT confidence below this -> LOW_FINBERT_CONFIDENCE flag.
     low_finbert_confidence_threshold: float = 0.30
     max_age_days: int = 30
@@ -248,6 +261,18 @@ class SentimentConfig:
     very_stale_news_fresh_ratio_threshold: float = 0.20
     # Distinct non-duplicate sources below this fires LOW_SOURCE_DIVERSITY.
     low_source_diversity_threshold: int = 2
+
+    @property
+    def disagreement_threshold(self) -> float:
+        """The active |vader - finbert| disagreement threshold (0..100 scale).
+
+        Prefers the legacy ``sentiment_disagreement_threshold`` when a caller set
+        it explicitly (keeps older configs/tests stable); otherwise uses the
+        canonical ``model_disagreement_threshold``.
+        """
+        if self.sentiment_disagreement_threshold is not None:
+            return float(self.sentiment_disagreement_threshold)
+        return float(self.model_disagreement_threshold)
 
 
 @dataclass
