@@ -1,0 +1,19 @@
+# Optional FinBERT sentiment backend.
+#
+# FinBERT is NEVER required for the base pipeline -- VADER is the always-available
+# default. Install these extras only if you want the finance-tuned transformer
+# (ProsusAI/finbert) for `--sentiment-model finbert` / `comparison` / `ensemble`.
+#
+# Heavy: torch + transformers pull in ~2GB and the model weights (~440MB) are
+# downloaded on first use, so this needs network access the first time.
+#
+# Install with EITHER:
+#   pip install -r requirements-finbert.txt
+# or (preferred, matches the packaging extra):
+#   pip install -e ".[finbert]"
+#
+# If these are absent the run degrades to VADER and says so via the
+# FINBERT_UNAVAILABLE / VADER_ONLY_SENTIMENT flags -- it never fabricates a score.
+
+torch>=2.1
+transformers>=4.40
