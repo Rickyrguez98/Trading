@@ -40,6 +40,15 @@ class ArticleSentiment:
     is_duplicate: bool = False       # same headline/url already seen for this ticker
     is_stale: bool = False           # older than the configured staleness window
     age_days: Optional[float] = None
+    # --- Per-article dual-model comparison (populated only in comparison runs) ---
+    # ``compound``/``label`` above always hold the score of the model that scored
+    # THIS record; the fields below let one record carry BOTH models' views so the
+    # report can show vader vs finbert side by side without re-scoring.
+    vader_score: Optional[float] = None
+    finbert_score: Optional[float] = None
+    vader_label: Optional[str] = None
+    finbert_label: Optional[str] = None
+    model_used: Optional[str] = None
 
 
 @dataclass
@@ -97,7 +106,7 @@ class FinBertSentimentModel(SentimentModel):
     pipeline doesn't pay the import cost.
     """
 
-    def __init__(self, model_name: str = "yiyanghkust/finbert-tone") -> None:
+    def __init__(self, model_name: str = "ProsusAI/finbert") -> None:
         try:
             from transformers import (  # type: ignore[import-not-found]
                 AutoModelForSequenceClassification,
@@ -132,7 +141,10 @@ class FinBertSentimentModel(SentimentModel):
 # ---------------------------------------------------------------------------
 
 def get_sentiment_model(name: str = "vader") -> SentimentModel:
-    if name == "vader":
+    name = (name or "vader").lower()
+    if name in ("vader", "comparison"):
+        # "comparison" is resolved by build_sentiment_runtime (which loads BOTH
+        # backends); the single-model factory returns the always-available base.
         return VaderSentimentModel()
     if name == "finbert":
         return FinBertSentimentModel()
