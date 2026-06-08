@@ -182,8 +182,8 @@ def test_large_disagreement_sets_flag():
     cfg = SentimentConfig(model="comparison", sentiment_disagreement_threshold=10.0)
     rt = _injected_runtime(DummyModel([0.0]), DummyModel([-1.0]))
     row = resolve_ticker_sentiment("ZZZ", _fresh_articles(3), rt, cfg)
-    # vader -> 50, finbert -> 0 -> delta 50 > 10.
-    assert row["sentiment_model_agreement"] == "disagree"
+    # vader -> 50, finbert -> 0 -> delta 50 >> 10 -> strong disagreement.
+    assert row["sentiment_model_agreement"] == "strong_disagreement"
     assert "SENTIMENT_MODEL_DISAGREEMENT" in row["sentiment_flags"]
     assert row["sentiment_score_delta"] is not None and row["sentiment_score_delta"] > 10.0
 
@@ -192,7 +192,8 @@ def test_agreement_does_not_flag():
     cfg = SentimentConfig(model="comparison", sentiment_disagreement_threshold=25.0)
     rt = _injected_runtime(DummyModel([0.5]), DummyModel([0.5]))
     row = resolve_ticker_sentiment("ZZZ", _fresh_articles(3), rt, cfg)
-    assert row["sentiment_model_agreement"] == "agree"
+    # Both models -> 75 (positive), zero delta -> agreement, positive direction.
+    assert row["sentiment_model_agreement"] == "agreement_positive"
     assert "SENTIMENT_MODEL_DISAGREEMENT" not in row["sentiment_flags"]
 
 
