@@ -9,7 +9,7 @@ description = "Research prototype: free-data Asset Selection Algorithm for U.S.-
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Trading Research" }]
+authors = [{ name = "Ricardo Rodriguez", email = "if722544@iteso.mx" }]
 keywords = ["quant", "equities", "asset-selection", "research"]
 classifiers = [
     "Development Status :: 3 - Alpha",

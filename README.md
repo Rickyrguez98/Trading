@@ -45,7 +45,7 @@ the current pipeline does **not** depend on.
 | Fundamentals  | `yfinance` (Yahoo Finance, unofficial)      | Unofficial API; rate-limited; some fields are best-effort; no SLA. Empty responses are recorded as `status="empty"`, not silently treated as illiquidity. |
 | Prices        | `yfinance`, with a **Stooq** CSV backup     | yfinance is unofficial/rate-limited; Stooq is a keyless fallback that fires when yfinance fails. Used for liquidity filters, not for execution decisions. |
 | News          | `yfinance` news endpoint                    | Caps at ~10 articles/ticker from a narrow set of sources. Duplicates and stale items are detected and down-weighted; breadth is still limited. Replaceable provider. **A news outage never invalidates a ranking** — it only lowers sentiment confidence. |
-| Sentiment     | VADER (lexicon-based)                       | General-purpose lexicon; **not** finance-tuned. Confidence is capped below FinBERT's. FinBERT is plug-compatible (`pip install '.[finbert]'`). |
+| Sentiment     | VADER (lexicon-based), FinBERT (optional)   | VADER is general-purpose and **not** finance-tuned; its confidence is capped below FinBERT's. FinBERT (`ProsusAI/finbert`) is finance-tuned and plug-compatible (`pip install '.[finbert]'`). A `comparison` mode runs both and reports their disagreement; FinBERT is never required and never fabricated. See [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md). |
 
 All providers implement a common interface so paid or alternative sources
 (Finnhub, AlphaVantage, FMP, NewsAPI, MarketAux, SEC EDGAR direct, FinBERT)
@@ -281,7 +281,10 @@ The code is the ultimate authority; this is the explained-to-a-human view.
   summaries for each ticker. Articles older than `sentiment.max_age_days`
   are dropped.
 - VADER (default) or FinBERT (optional, `pip install '.[finbert]'`) scores
-  each remaining article on `[-1, +1]`.
+  each remaining article on `[-1, +1]`. A **comparison mode** runs both and
+  reports their disagreement without ever fabricating a FinBERT result — see
+  [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md) for VADER vs FinBERT,
+  installing the extras, and running `vader` / `finbert` / `comparison`.
 - Per ticker we compute:
   - **average compound** sentiment,
   - **recency-weighted compound** via an exponential half-life
@@ -306,6 +309,17 @@ The code is the ultimate authority; this is the explained-to-a-human view.
   than fundamentals). Low confidence below
   `sentiment.low_confidence_threshold` raises the `LOW_SENTIMENT_CONFIDENCE`
   flag; zero articles raise `NO_NEWS` instead.
+- **VADER vs FinBERT comparison.** Set `sentiment.model: comparison` (or
+  `sentiment.compare_models: true`) to score every article with both models,
+  compare them per ticker, and pick the final score via
+  `sentiment.final_sentiment_source` (`vader` / `finbert` / `ensemble`). The
+  run reports `vader_sentiment_score`, `finbert_sentiment_score`,
+  `sentiment_score_delta`, and `sentiment_model_agreement`, and raises
+  `SENTIMENT_MODEL_DISAGREEMENT`, `LOW_FINBERT_CONFIDENCE`, and — when the
+  optional extras are missing — `FINBERT_UNAVAILABLE` / `VADER_ONLY_SENTIMENT`.
+  FinBERT is **never required** and **never fabricated**: if `transformers` /
+  `torch` are not installed the run degrades to VADER and says so. Full guide:
+  [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md).
 
 ### 2. How historical prices are used
 - The price provider (`yfinance` by default) downloads `lookback_days` of
