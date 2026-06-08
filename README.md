@@ -101,6 +101,22 @@ cp .env.example .env             # optional, only if you later add API keys
 The editable install (`-e`) puts the `asset_selection` package on your path.
 If you prefer not to install, prefix commands with `PYTHONPATH=src`.
 
+### 4. (Optional) Install the FinBERT sentiment backend
+
+VADER (the default) needs **no** extra dependencies. FinBERT is opt-in and
+heavy (it pulls `torch` + `transformers` and downloads ~440 MB of model
+weights on first use). Install it only if you want the finance-tuned
+transformer or the VADER-vs-FinBERT comparison/ensemble modes:
+
+```bash
+pip install -e ".[finbert]"          # adds torch + transformers
+# or:                                  pip install -r requirements-finbert.txt
+```
+
+If these extras are absent, anything that asks for FinBERT degrades to VADER
+and says so (flags `FINBERT_UNAVAILABLE` / `VADER_ONLY_SENTIMENT`) — it never
+fabricates a FinBERT score. Full guide: [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md).
+
 > **Note on `tabulate`.** The Markdown reports use pandas' `.to_markdown()`,
 > which needs `tabulate`. It is included in the dev extras; if you used the
 > minimal install and see a tabulate error, run `pip install tabulate`.
@@ -154,6 +170,39 @@ notation (`BRK.B`, `BF.B`); the provider layer maps them to yfinance's
 hyphen notation (`BRK-B`, `BF-B`) internally while keeping the canonical
 ticker unchanged in the output.
 
+### Choosing the sentiment model
+
+The sentiment backend defaults to **VADER** (always available, no extra
+deps). Set it in the YAML (`sentiment.model`) or override it per run with
+`--sentiment-model {vader,finbert,comparison,ensemble}` (the CLI flag wins).
+`finbert`, `comparison`, and `ensemble` require the optional extras
+(`pip install -e ".[finbert]"`); without them they degrade to VADER and say so.
+
+```bash
+# 1. VADER only (default — no extra dependencies)
+python -m asset_selection.pipelines.run_asset_selection \
+    --universe sample --limit 50 --top 20 --sentiment-model vader
+
+# 2. FinBERT only (finance-tuned transformer; needs the [finbert] extras)
+python -m asset_selection.pipelines.run_asset_selection \
+    --universe sample --limit 50 --top 20 --sentiment-model finbert
+
+# 3. Comparison — score every article with BOTH and report disagreement
+python -m asset_selection.pipelines.run_asset_selection \
+    --universe sample --limit 50 --top 20 --sentiment-model comparison
+
+# 4. Ensemble — feed a weighted VADER+FinBERT blend into the composite
+python -m asset_selection.pipelines.run_asset_selection \
+    --universe sample --limit 50 --top 20 --sentiment-model ensemble
+```
+
+Whichever you pick, sentiment stays a **bounded, secondary** input — it can
+never out-weigh fundamentals (enforced by the `sentiment_dominance`
+validation check). FinBERT chooses its device automatically
+(`auto → cuda → mps → cpu`; override with `sentiment.finbert_device`). See
+[`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md) for the full matrix of
+modes, flags, agreement categories, and outputs.
+
 ### All flags
 
 | Flag                                 | Meaning |
@@ -173,6 +222,7 @@ ticker unchanged in the output.
 | `--use-cache-on-provider-failure`    | Backup Plan C: when every live provider fails for a ticker, serve a fresh-enough cached record labeled `stale_cache` instead of reporting no data. Off by default. |
 | `--max-cache-age-days N`             | Max age of a cache entry allowed to back a failed live fetch under the flag above (default: `robustness.max_cache_age_days`, 7). |
 | `--provider TYPE=NAME[,NAME...]`     | Override the provider(s) per data type, e.g. `--provider prices=yfinance,stooq`. A comma list sets the fallback order (first = primary). Types: `prices`, `fundamentals`, `news`. |
+| `--sentiment-model MODEL`            | Override the sentiment backend for this run: `vader` (default, always available), `finbert`, `comparison`, or `ensemble`. The last three need the `[finbert]` extras; without them the run degrades to VADER and flags it. Wins over the YAML `sentiment.model`. |
 
 After it finishes, look at:
 
@@ -755,9 +805,15 @@ pipeline — see [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md).
 ## Development
 
 ```bash
-pytest                       # run the test suite
-ruff check src tests          # lint
+pytest                                   # run the full test suite
+PYTHONPATH=src python -m pytest -q       # if you did not install with -e
+PYTHONPATH=src python -m pytest tests/test_sentiment_finbert.py -q  # sentiment layer only
+ruff check src tests                     # lint
 ```
+
+The sentiment tests are **mock-based** — they never download the FinBERT
+model, so the whole suite runs in seconds with or without the `[finbert]`
+extras installed.
 
 ## License
 
