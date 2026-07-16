@@ -14,16 +14,34 @@ because Yahoo rate-limited us would be a lie. ``POSSIBLY_DELISTED`` exists only
 for callers that have such evidence; the classifiers here never emit it.
 
 This module is pure (no third-party imports) so it is trivially testable.
+
+The generic transport-level taxonomy (rate limits, timeouts, parse errors, …)
+and its classifiers now live in :mod:`trading_common.errors` so other research
+modules share one implementation; they are re-exported here so every existing
+``errors.PROVIDER_*`` / ``errors.classify_*`` reference keeps working.
 """
 from __future__ import annotations
 
 from typing import Optional
 
+from trading_common.errors import (  # noqa: F401  (re-exported, part of this API)
+    OK,
+    PROVIDER_BLOCKED,
+    PROVIDER_EMPTY_RESPONSE,
+    PROVIDER_HTTP_ERROR,
+    PROVIDER_JSON_PARSE_ERROR,
+    PROVIDER_RATE_LIMITED,
+    PROVIDER_SIDE_ERRORS,
+    PROVIDER_TIMEOUT,
+    PROVIDER_UNKNOWN_ERROR,
+    classify_error_text,
+    classify_exception,
+    is_provider_side,
+)
+
 # ---------------------------------------------------------------------------
 # Taxonomy (string constants -- JSON-friendly, stable across versions)
 # ---------------------------------------------------------------------------
-
-OK = "OK"
 
 # Ticker-side problems (the symbol, not the provider).
 INVALID_TICKER = "INVALID_TICKER"
@@ -33,7 +51,6 @@ UNSUPPORTED_PROVIDER_SYMBOL = "UNSUPPORTED_PROVIDER_SYMBOL"
 NO_PRICE_DATA = "NO_PRICE_DATA"
 NO_FUNDAMENTAL_DATA = "NO_FUNDAMENTAL_DATA"
 NO_NEWS_DATA = "NO_NEWS_DATA"
-PROVIDER_EMPTY_RESPONSE = "PROVIDER_EMPTY_RESPONSE"
 
 # --- Price-coverage taxonomy (audit fix) -----------------------------------
 # These refine a bare NO_PRICE_DATA once we have *context* about the ticker.
@@ -62,26 +79,6 @@ CRITICAL_TICKER_PRICE_FAILURE = "CRITICAL_TICKER_PRICE_FAILURE"
 # empty/parse response.
 POSSIBLY_DELISTED = "POSSIBLY_DELISTED"
 
-# Provider-side / transport failures (systemic when they hit many tickers).
-PROVIDER_RATE_LIMITED = "PROVIDER_RATE_LIMITED"
-PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
-PROVIDER_BLOCKED = "PROVIDER_BLOCKED"
-PROVIDER_JSON_PARSE_ERROR = "PROVIDER_JSON_PARSE_ERROR"
-PROVIDER_HTTP_ERROR = "PROVIDER_HTTP_ERROR"
-PROVIDER_UNKNOWN_ERROR = "PROVIDER_UNKNOWN_ERROR"
-
-# Error types that indicate the *provider* (not the ticker) is at fault. A high
-# rate of these across benchmark mega-caps is the signature of a systemic
-# outage rather than a per-ticker miss.
-PROVIDER_SIDE_ERRORS = frozenset({
-    PROVIDER_RATE_LIMITED,
-    PROVIDER_TIMEOUT,
-    PROVIDER_BLOCKED,
-    PROVIDER_JSON_PARSE_ERROR,
-    PROVIDER_HTTP_ERROR,
-    PROVIDER_UNKNOWN_ERROR,
-})
-
 # Refinements of a bare price miss. These are coverage/feed gaps, NOT transport
 # outages and NOT delisting -- they classify *where* a price gap sits once we
 # know whether other data for the same ticker succeeded.
@@ -103,66 +100,9 @@ EMPTY_DATA_ERRORS = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Classifiers
+# Classifiers (generic classify_exception / classify_error_text re-exported
+# above from trading_common.errors; only domain-specific ones live here)
 # ---------------------------------------------------------------------------
-
-# Substrings we look for in an exception's string form. Ordered by specificity.
-_RATE_LIMIT_HINTS = ("429", "too many requests", "rate limit", "rate-limit", "ratelimited")
-_TIMEOUT_HINTS = ("timed out", "timeout", "read timed out", "connection timed out")
-_BLOCKED_HINTS = (
-    "forbidden", "403", "401", "unauthorized", "access denied",
-    "connection refused", "connection reset", "connection aborted",
-    "name or service not known", "failed to resolve", "nameresolution",
-    "max retries", "ssl", "certificate",
-)
-_JSON_HINTS = (
-    "expecting value", "json", "jsondecode", "extra data",
-    "unterminated string", "delimiter",
-)
-_HTTP_HINTS = ("http", "status code", "5xx", "500", "502", "503", "504", "bad gateway")
-
-
-def classify_exception(exc: BaseException) -> str:
-    """Map a raised exception to an error-type constant.
-
-    The mapping is heuristic but deliberately conservative: anything we cannot
-    confidently bucket becomes ``PROVIDER_UNKNOWN_ERROR`` (a provider-side
-    bucket), never a ticker problem and never "delisted".
-    """
-    return _classify_blob(type(exc).__name__.lower(), str(exc).lower())
-
-
-def classify_error_text(text: Optional[str]) -> str:
-    """Classify a free-text error string (e.g. a record's ``error`` field).
-
-    Used when we only have the stored message, not the live exception object
-    (e.g. when re-reading a provider record during a health check).
-    """
-    if not text:
-        return PROVIDER_UNKNOWN_ERROR
-    low = text.lower()
-    # A stored message is often "ExcType: message"; treat the whole thing as the
-    # message body and let the same hints fire.
-    return _classify_blob(low, low)
-
-
-def _classify_blob(name: str, msg: str) -> str:
-    blob = f"{name} {msg}"
-    # JSON-parse first: Yahoo's block returns "Expecting value: line 1 ..." and
-    # the *type* is often a JSONDecodeError / ValueError. This is the signature
-    # of the systemic failure we saw live.
-    if "jsondecode" in name or any(h in msg for h in _JSON_HINTS):
-        return PROVIDER_JSON_PARSE_ERROR
-    if any(h in blob for h in _RATE_LIMIT_HINTS):
-        return PROVIDER_RATE_LIMITED
-    if "timeout" in name or any(h in msg for h in _TIMEOUT_HINTS):
-        return PROVIDER_TIMEOUT
-    if any(h in blob for h in _BLOCKED_HINTS):
-        return PROVIDER_BLOCKED
-    if "httperror" in name or any(h in msg for h in _HTTP_HINTS):
-        return PROVIDER_HTTP_ERROR
-    return PROVIDER_UNKNOWN_ERROR
-
 
 def classify_empty(data_type: str, *, remapped: bool = False) -> str:
     """Classify a successful-but-empty payload for ``data_type``.
