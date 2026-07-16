@@ -49,6 +49,7 @@ finbert = [
 
 [project.scripts]
 asset-selection = "asset_selection.pipelines.run_asset_selection:main"
+binary-options-selection = "binary_options_selection.pipelines.run_binary_options_selection:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
