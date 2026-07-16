@@ -53,34 +53,37 @@ def classify_session(now: datetime, cfg: MarketSessionConfig) -> SessionState:
         )
 
     local_iso = local.isoformat(timespec="seconds")
+    detail: Optional[str] = None
     if local.weekday() >= 5:  # Saturday/Sunday
-        return SessionState(MARKET_CLOSED, local_iso, cfg.timezone, False, "weekend")
-
-    t = local.time()
-    regular_open = _parse_hhmm(cfg.regular_open)
-    regular_close = _parse_hhmm(cfg.regular_close)
-    pre_open = _parse_hhmm(cfg.premarket_open)
-    after_close = _parse_hhmm(cfg.afterhours_close)
-
-    if regular_open <= t < regular_close:
-        state = MARKET_OPEN
-        allowed = True
-    elif pre_open <= t < regular_open:
-        state = MARKET_PRE
-        allowed = cfg.session == "extended" and cfg.allow_premarket
-    elif regular_close <= t < after_close:
-        state = MARKET_AFTER
-        allowed = cfg.session == "extended" and cfg.allow_afterhours
-    else:
         state = MARKET_CLOSED
         allowed = False
+        detail = "weekend"
+    else:
+        t = local.time()
+        regular_open = _parse_hhmm(cfg.regular_open)
+        regular_close = _parse_hhmm(cfg.regular_close)
+        pre_open = _parse_hhmm(cfg.premarket_open)
+        after_close = _parse_hhmm(cfg.afterhours_close)
+
+        if regular_open <= t < regular_close:
+            state = MARKET_OPEN
+            allowed = True
+        elif pre_open <= t < regular_open:
+            state = MARKET_PRE
+            allowed = cfg.session == "extended" and cfg.allow_premarket
+        elif regular_close <= t < after_close:
+            state = MARKET_AFTER
+            allowed = cfg.session == "extended" and cfg.allow_afterhours
+        else:
+            state = MARKET_CLOSED
+            allowed = False
 
     if not cfg.require_open_market:
         # Research mode: analysis is allowed, but the state is still reported
         # honestly so a closed-market row can never masquerade as live.
         allowed = True
 
-    return SessionState(state, local_iso, cfg.timezone, allowed, None)
+    return SessionState(state, local_iso, cfg.timezone, allowed, detail)
 
 
 def expiry_for(reference_time: datetime, horizon_minutes: int) -> datetime:
