@@ -20,7 +20,6 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from . import errors as err
 from ..config import SUPPORTED_INTERVALS
 from ..utils.timeutils import (
     candle_close_time,
@@ -29,6 +28,7 @@ from ..utils.timeutils import (
     parse_utc,
     utc_now,
 )
+from . import errors as err
 from .base import Candle, IntradayCandlesProvider, IntradaySeries
 
 logger = logging.getLogger(__name__)

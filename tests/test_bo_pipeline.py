@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-
 from binary_options_selection.pipelines.run_binary_options_selection import (
     build_arg_parser,
     main,

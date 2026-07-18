@@ -31,19 +31,17 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-
 from trading_common.cache import Cache
 from trading_common.io import ensure_dir, write_csv, write_json
 from trading_common.rate_limiter import RateLimiter
 
 from ..config import (
+    SUPPORTED_INTERVALS,
     BinaryOptionsConfig,
     ConfigValidationError,
-    SUPPORTED_INTERVALS,
     horizon_group,
     load_config,
     validate_config,

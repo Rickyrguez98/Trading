@@ -5,7 +5,6 @@ import random
 from datetime import timedelta
 
 import pytest
-
 from binary_options_selection.data_providers.base import Candle
 from binary_options_selection.features import indicators as ind
 from binary_options_selection.features.engine import FeatureBundle, compute_features
@@ -301,6 +300,7 @@ def test_expected_edge_refuses_heuristic_confidence():
 
 def test_live_pipeline_never_imports_label_module():
     import inspect
+
     import binary_options_selection.pipelines.run_binary_options_selection as pipe
     src = inspect.getsource(pipe)
     assert "labels" not in src  # outcome labels stay out of live signal generation

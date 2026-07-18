@@ -1,10 +1,9 @@
 """Time handling, market sessions, candle validation, and provider behavior."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
-
 from binary_options_selection.config import MarketSessionConfig
 from binary_options_selection.data_providers import errors as err
 from binary_options_selection.data_providers.yfinance_intraday import (
@@ -31,8 +30,7 @@ from binary_options_selection.utils.timeutils import (
 from binary_options_selection.validation.candles import assess_series
 from trading_common.cache import Cache
 
-from tests.bo_fixtures import INTERVAL_SEC, NOW, flat, make_candles, make_config, make_series
-
+from tests.bo_fixtures import NOW, flat, make_candles, make_config, make_series
 
 # ---------------------------------------------------------------------------
 # timeutils
@@ -130,7 +128,7 @@ def test_stale_series_flagged_and_capped():
         make_series("T", make_candles(step=flat)), cfg, NOW + timedelta(hours=2)
     )
     assert q.stale and "STALE_INTRADAY_DATA" in q.flags
-    assert q.data_quality_score <= 40 and not q.usable is None
+    assert q.data_quality_score <= 40 and q.usable is not None
 
 
 def test_duplicates_and_order_detected():

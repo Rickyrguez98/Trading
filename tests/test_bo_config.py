@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import pytest
-
 from binary_options_selection.config import (
-    ConfigValidationError,
     HORIZON_GROUP_EXTENDED,
     HORIZON_GROUP_SHORT,
+    ConfigValidationError,
     horizon_group,
     load_config,
     validate_config,

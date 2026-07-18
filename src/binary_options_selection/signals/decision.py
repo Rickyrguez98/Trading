@@ -19,10 +19,10 @@ from datetime import datetime
 from typing import List, Optional
 
 from ..config import (
-    BinaryOptionsConfig,
     HORIZON_MAX_MINUTES,
     HORIZON_MIN_MINUTES,
     SUPPORTED_INTERVALS,
+    BinaryOptionsConfig,
 )
 from ..data_providers.base import Candle
 from ..market_session import MARKET_OPEN, SessionState, classify_session
