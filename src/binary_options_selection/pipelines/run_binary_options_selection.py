@@ -62,6 +62,7 @@ from ..signals.decision import (
     assess_liquidity,
     decide_signal,
 )
+from .. import reporting
 from ..signals.payout import break_even_win_probability
 from ..universe import UniverseResult, resolve_universe
 from ..utils.timeutils import iso_utc, utc_now
@@ -243,9 +244,10 @@ def run_pipeline(
     cli_watchlist_file: Optional[str] = None,
     provider: Optional[IntradayCandlesProvider] = None,
     now: Optional[datetime] = None,
+    config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the staged pipeline. ``provider`` and ``now`` are injectable so
-    tests run deterministically offline."""
+    tests run deterministically offline; ``config_path`` feeds the manifest."""
     now = now or utc_now()
     run_id = uuid.uuid4().hex[:12]
     generated_at = iso_utc(now)
@@ -503,11 +505,101 @@ def run_pipeline(
     # --- Stage 9: outputs ----------------------------------------------------
     s9 = StageStats("9_outputs")
     with _Timer(s9):
-        paths = _write_outputs(
-            cfg, rows, stages, assessment, universe, series_by_symbol,
-            quality_by_symbol, health_summary, session, run_id, generated_at,
-            payout_ratio, break_even,
-        )
+        run_dir = ensure_dir(reporting.run_dir_for(cfg, run_id))
+        paths = reporting.write_signal_csvs(cfg, rows)
+        catalog_notes = list(catalog.notes)
+        for name, subset, title, with_matrix in (
+            ("signals_all", rows, "Binary options signals — all horizons", True),
+            ("signals_short_term",
+             [r for r in rows if r["horizon_group"] == "short_term"],
+             "Binary options signals — short term (5-15 min)", False),
+            ("signals_extended_intraday",
+             [r for r in rows if r["horizon_group"] == "extended_intraday"],
+             "Binary options signals — extended intraday (30-120 min)", False),
+        ):
+            md = reporting.render_signals_md(
+                cfg, subset, assessment, generated_at, title=title,
+                horizons=cfg.horizons.minutes, catalog_notes=catalog_notes,
+                include_matrix=with_matrix,
+            )
+            (run_dir / f"{name}.md").write_text(md, encoding="utf-8")
+            paths[f"{name}_md"] = str(run_dir / f"{name}.md")
+
+        signal_counts: Dict[str, int] = {}
+        reason_counts: Dict[str, int] = {}
+        for r in rows:
+            signal_counts[r["signal"]] = signal_counts.get(r["signal"], 0) + 1
+            if r["no_trade_reason"]:
+                reason_counts[r["no_trade_reason"]] = (
+                    reason_counts.get(r["no_trade_reason"], 0) + 1
+                )
+        summary = {
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "module": "binary_options_selection",
+            "run_status": assessment.run_status,
+            "run_assessment": assessment.to_dict(),
+            "market_state": session.state,
+            "exchange_local_time": session.exchange_local_time,
+            "timezone": session.timezone,
+            "research_mode": research_mode,
+            "universe": {
+                "mode": universe.mode,
+                "symbols": universe.symbols,
+                "dropped": universe.dropped,
+                "notes": universe.notes,
+                "error": universe.error,
+            },
+            "catalog": {
+                "provider": catalog.snapshot.provider if catalog.snapshot else None,
+                "platform": catalog.snapshot.platform if catalog.snapshot else None,
+                "path": catalog.snapshot.path if catalog.snapshot else None,
+                "instruments": len(catalog.instrument_by_symbol),
+                "stale": catalog.stale,
+                "age_seconds": (
+                    catalog.snapshot.age_seconds(now) if catalog.snapshot else None
+                ),
+                "notes": catalog.notes,
+            },
+            "horizons_minutes": cfg.horizons.minutes,
+            "horizon_matrix": reporting.horizon_matrix(rows, cfg.horizons.minutes),
+            "interval": cfg.candles.interval,
+            "market_data_provider": cfg.providers.intraday,
+            "signal_counts": signal_counts,
+            "no_trade_reason_counts": reason_counts,
+            "stages": [st.to_dict() for st in stages],
+            "candidates": rows,
+        }
+        write_json(run_dir / "run_summary.json", summary)
+        paths["run_summary_json"] = str(run_dir / "run_summary.json")
+
+        diag = {
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "market_data_provider": cfg.providers.intraday,
+            "catalog_provider": catalog.snapshot.provider if catalog.snapshot else None,
+            "health_check": health_summary.to_dict() if health_summary else None,
+            "catalog": summary["catalog"],
+            "symbols": [
+                {
+                    **series_by_symbol[sym].to_meta(),
+                    "data_quality_score": (
+                        quality_by_symbol[sym].data_quality_score
+                        if sym in quality_by_symbol else None
+                    ),
+                    "stale": (
+                        quality_by_symbol[sym].stale if sym in quality_by_symbol else None
+                    ),
+                    "usable": (
+                        quality_by_symbol[sym].usable if sym in quality_by_symbol else None
+                    ),
+                }
+                for sym in sorted(series_by_symbol)
+            ],
+        }
+        paths.update(reporting.write_json_and_md(
+            run_dir, "provider_diagnostics", diag, reporting.render_diagnostics_md(diag)
+        ))
         s9.output_count = len(paths)
     stages.append(s9)
 
@@ -515,12 +607,32 @@ def run_pipeline(
     validation_result = None
     if cfg.validation.enabled:
         validation_result = validate_outputs(rows, run_status=assessment.run_status)
-        out_dir = ensure_dir(cfg.run.output_dir)
-        write_json(out_dir / "binary_options_output_validation.json", validation_result)
-        (out_dir / "binary_options_output_validation.md").write_text(
-            render_validation_md(validation_result), encoding="utf-8"
-        )
+        paths.update(reporting.write_json_and_md(
+            run_dir, "output_validation", validation_result,
+            render_validation_md(validation_result),
+        ))
         logger.info("Output validation: %s", validation_result["overall_status"])
+
+    # --- Run manifest + latest/ refresh ---------------------------------------
+    finished = utc_now()
+    manifest = reporting.build_run_manifest(
+        cfg=cfg,
+        run_id=run_id,
+        started_at=generated_at,
+        finished_at=iso_utc(finished),
+        duration_seconds=(finished - now).total_seconds(),
+        config_path=config_path,
+        catalog_path=cfg.instrument_catalog.path,
+        catalog_hash=catalog.snapshot.catalog_hash if catalog.snapshot else None,
+        market_data_provider=cfg.providers.intraday,
+        catalog_provider=catalog.snapshot.provider if catalog.snapshot else None,
+        output_paths=paths,
+        run_status=assessment.run_status,
+    )
+    write_json(run_dir / "run_manifest.json", manifest)
+    paths["run_manifest_json"] = str(run_dir / "run_manifest.json")
+    paths["latest_dir"] = reporting.refresh_latest(cfg, run_id)
+    paths["run_dir"] = str(run_dir)
 
     return {
         "run_id": run_id,
@@ -530,6 +642,7 @@ def run_pipeline(
         "paths": paths,
         "validation": validation_result,
         "session": session,
+        "manifest": manifest,
     }
 
 
@@ -704,235 +817,6 @@ def _rank_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # Outputs
 # ---------------------------------------------------------------------------
 
-def _write_outputs(
-    cfg, rows, stages, assessment, universe, series_by_symbol,
-    quality_by_symbol, health_summary, session, run_id, generated_at,
-    payout_ratio, break_even,
-) -> Dict[str, str]:
-    out_dir = ensure_dir(cfg.run.output_dir)
-    processed_dir = ensure_dir(cfg.run.processed_dir)
-    paths: Dict[str, str] = {}
-
-    # CSV (list/dict fields serialized for flat storage)
-    csv_rows = []
-    for r in rows:
-        c = dict(r)
-        for k in ("primary_drivers", "primary_conflicts", "warning_flags"):
-            c[k] = "; ".join(c[k]) if c[k] else ""
-        for k in ("family_contributions", "missing_families", "feature_values"):
-            c[k] = "; ".join(f"{a}={b}" for a, b in c[k].items()) if c[k] else ""
-        csv_rows.append(c)
-    csv_path = processed_dir / "binary_options_candidates.csv"
-    write_csv(csv_path, pd.DataFrame(csv_rows))
-    paths["candidates_csv"] = str(csv_path)
-
-    # Markdown report
-    md_path = out_dir / "binary_options_candidates.md"
-    md_path.write_text(
-        _render_report_md(cfg, rows, assessment, generated_at, payout_ratio, break_even),
-        encoding="utf-8",
-    )
-    paths["candidates_md"] = str(md_path)
-
-    # JSON summary
-    signal_counts: Dict[str, int] = {}
-    reason_counts: Dict[str, int] = {}
-    for r in rows:
-        signal_counts[r["signal"]] = signal_counts.get(r["signal"], 0) + 1
-        if r["no_trade_reason"]:
-            reason_counts[r["no_trade_reason"]] = reason_counts.get(r["no_trade_reason"], 0) + 1
-    summary = {
-        "run_id": run_id,
-        "generated_at": generated_at,
-        "module": "binary_options_selection",
-        "run_status": assessment.run_status,
-        "run_assessment": assessment.to_dict(),
-        "market_state": session.state,
-        "exchange_local_time": session.exchange_local_time,
-        "timezone": session.timezone,
-        "universe": {
-            "mode": universe.mode,
-            "symbols": universe.symbols,
-            "dropped": universe.dropped,
-            "notes": universe.notes,
-            "error": universe.error,
-        },
-        "horizons_minutes": cfg.horizons.minutes,
-        "interval": cfg.candles.interval,
-        "provider": cfg.providers.intraday,
-        "signal_counts": signal_counts,
-        "no_trade_reason_counts": reason_counts,
-        "payout": {
-            "payout_ratio": payout_ratio,
-            "break_even_win_probability": break_even,
-            "note": (
-                "Break-even is contextual only. Confidence scores are heuristics, "
-                "not calibrated probabilities; profitability cannot be inferred "
-                "without calibrated probabilities and actual contract terms."
-            ),
-        },
-        "stages": [s.to_dict() for s in stages],
-        "candidates": rows,
-    }
-    summary_path = out_dir / "binary_options_summary.json"
-    write_json(summary_path, summary)
-    paths["summary_json"] = str(summary_path)
-
-    # Provider diagnostics
-    diag = {
-        "run_id": run_id,
-        "generated_at": generated_at,
-        "provider": cfg.providers.intraday,
-        "health_check": health_summary.to_dict() if health_summary else None,
-        "symbols": [
-            {
-                **series_by_symbol[sym].to_meta(),
-                "data_quality_score": (
-                    quality_by_symbol[sym].data_quality_score
-                    if sym in quality_by_symbol else None
-                ),
-                "stale": (
-                    quality_by_symbol[sym].stale if sym in quality_by_symbol else None
-                ),
-                "usable": (
-                    quality_by_symbol[sym].usable if sym in quality_by_symbol else None
-                ),
-            }
-            for sym in sorted(series_by_symbol)
-        ],
-    }
-    diag_json = out_dir / "binary_options_provider_diagnostics.json"
-    write_json(diag_json, diag)
-    paths["diagnostics_json"] = str(diag_json)
-    diag_md = out_dir / "binary_options_provider_diagnostics.md"
-    diag_md.write_text(_render_diagnostics_md(diag), encoding="utf-8")
-    paths["diagnostics_md"] = str(diag_md)
-    return paths
-
-
-def _render_report_md(cfg, rows, assessment, generated_at, payout_ratio, break_even) -> str:
-    lines: List[str] = ["# Binary options selection — research signals", ""]
-    lines.append(render_status_banner(assessment, generated_at))
-    lines.append("")
-    lines.append("## How to read this report")
-    lines.append("")
-    lines.append(
-        "- Each row is one **underlying x expiration horizon** with its own "
-        "features and score; a 5-minute and a 60-minute signal on the same "
-        "symbol are independent answers."
-    )
-    lines.append(
-        "- `CALL` = the weighted intraday evidence points to a settlement above "
-        "the reference price; `PUT` = below it; `NO_TRADE` = the evidence is too "
-        "close, too weak, contradictory, stale, or the data/session is unsuitable. "
-        "NO_TRADE is a first-class answer, not an error."
-    )
-    lines.append(
-        "- `confidence_score` (0-1) is a bounded **heuristic** combining signal "
-        "margin, contradiction, data quality, feature coverage, and the "
-        "volatility regime. It is **not a calibrated probability** and must not "
-        "be treated as a win rate."
-    )
-    if payout_ratio is not None:
-        lines.append(
-            f"- Configured payout ratio {payout_ratio}: break-even win probability "
-            f"= 1 / (1 + {payout_ratio}) = **{break_even:.1%}** — context only; "
-            "profitability cannot be inferred from heuristic scores."
-        )
-    lines.append(
-        "- `data_age` is the age of the latest completed candle at generation "
-        "time; stale rows are never presented as live signals."
-    )
-    lines.append("")
-
-    actionable = [r for r in rows if r["signal"] != SIGNAL_NO_TRADE]
-    no_trade = [r for r in rows if r["signal"] == SIGNAL_NO_TRADE]
-
-    lines.append(f"## Ranked signals ({len(actionable)})")
-    lines.append("")
-    if actionable:
-        top = actionable[: cfg.run.top_n]
-        header = (
-            "| # | symbol | horizon | signal | strength | validity | dir | call | put "
-            "| conf | quality | age (s) | drivers | conflicts | warnings |"
-        )
-        lines.append(header)
-        lines.append("|" + "---|" * 15)
-        for i, r in enumerate(top, 1):
-            lines.append(
-                f"| {i} | {r['symbol']} | {r['horizon_minutes']}m "
-                f"({r['horizon_group']}) | **{r['signal']}** | {r['signal_strength']} "
-                f"| {r['signal_validity']} | {r['directional_score']:+.1f} "
-                f"| {r['call_score']:.1f} | {r['put_score']:.1f} "
-                f"| {r['confidence_score']:.2f} | {r['data_quality_score']:.0f} "
-                f"| {r['data_age_seconds'] if r['data_age_seconds'] is not None else '—'} "
-                f"| {', '.join(r['primary_drivers']) or '—'} "
-                f"| {', '.join(r['primary_conflicts']) or '—'} "
-                f"| {', '.join(r['warning_flags']) or '—'} |"
-            )
-    else:
-        lines.append(
-            "_No actionable signals. This is a normal outcome — see the NO_TRADE "
-            "breakdown below for the reasons._"
-        )
-    lines.append("")
-
-    lines.append(f"## NO_TRADE rows ({len(no_trade)})")
-    lines.append("")
-    reason_counts: Dict[str, int] = {}
-    for r in no_trade:
-        reason_counts[r["no_trade_reason"]] = reason_counts.get(r["no_trade_reason"], 0) + 1
-    if reason_counts:
-        lines.append("| reason | rows |")
-        lines.append("|---|---|")
-        for reason, n in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            lines.append(f"| {reason} | {n} |")
-    else:
-        lines.append("_None._")
-    lines.append("")
-    lines.append("---")
-    lines.append(
-        "> **Disclaimer.** Research and educational output only. Not financial "
-        "advice. Binary options are high-risk instruments and many platforms "
-        "operate under weak regulation; nothing here executes trades, sizes "
-        "stakes, or promises any outcome. Past intraday patterns do not "
-        "guarantee future results."
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _render_diagnostics_md(diag: Dict[str, Any]) -> str:
-    lines = [
-        "# Binary options provider diagnostics",
-        "",
-        f"Run `{diag['run_id']}` — provider **{diag['provider']}** — {diag['generated_at']}",
-        "",
-    ]
-    hc = diag.get("health_check")
-    if hc:
-        lines.append(
-            f"Health probe: {hc['ok_count']} ok / {hc['fail_count']} failed"
-            + (" — **SYSTEMIC FAILURE**" if hc["systemic_failure"] else "")
-        )
-        lines.append("")
-    lines.append(
-        "| symbol | status | error_type | source | candles | latest close | "
-        "quality | stale | usable |"
-    )
-    lines.append("|" + "---|" * 9)
-    for s in diag["symbols"]:
-        lines.append(
-            f"| {s['symbol']} | {s['status']} | {s['error_type'] or '—'} "
-            f"| {s['data_source'] or '—'} | {s['candle_count']} "
-            f"| {s['latest_candle_close'] or '—'} "
-            f"| {s['data_quality_score'] if s['data_quality_score'] is not None else '—'} "
-            f"| {s['stale']} | {s['usable']} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1065,6 +949,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         cli_tickers=args.tickers,
         cli_watchlist_file=args.watchlist,
         provider=provider,
+        config_path=args.config,
     )
     assessment = result["assessment"]
     print(f"Run {result['run_id']}: status={assessment.run_status}; "

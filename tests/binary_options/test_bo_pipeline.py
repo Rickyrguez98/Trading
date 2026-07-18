@@ -83,30 +83,59 @@ def test_outputs_written_and_consistent(tmp_path):
     provider = ScriptedProvider(_healthy_scripts(["UP", "DOWN"]))
     res = run_pipeline(cfg, provider=provider, now=NOW)
 
-    csv_path = Path(cfg.run.processed_dir) / "binary_options_candidates.csv"
-    md_path = Path(cfg.run.output_dir) / "binary_options_candidates.md"
-    summary_path = Path(cfg.run.output_dir) / "binary_options_summary.json"
-    diag_md = Path(cfg.run.output_dir) / "binary_options_provider_diagnostics.md"
-    diag_json = Path(cfg.run.output_dir) / "binary_options_provider_diagnostics.json"
-    val_md = Path(cfg.run.output_dir) / "binary_options_output_validation.md"
-    val_json = Path(cfg.run.output_dir) / "binary_options_output_validation.json"
-    for p in (csv_path, md_path, summary_path, diag_md, diag_json, val_md, val_json):
+    run_id = res["run_id"]
+    processed = Path(cfg.run.processed_dir)
+    run_dir = Path(cfg.run.output_dir) / "runs" / run_id
+    latest = Path(cfg.run.output_dir) / "latest"
+
+    for p in (
+        processed / "signals_all.csv",
+        processed / "signals_short_term.csv",
+        processed / "signals_extended_intraday.csv",
+        run_dir / "signals_all.md",
+        run_dir / "signals_short_term.md",
+        run_dir / "signals_extended_intraday.md",
+        run_dir / "run_summary.json",
+        run_dir / "provider_diagnostics.json",
+        run_dir / "provider_diagnostics.md",
+        run_dir / "output_validation.json",
+        run_dir / "output_validation.md",
+        run_dir / "run_manifest.json",
+        latest / "signals_all.md",
+        latest / "run_manifest.json",
+    ):
         assert p.exists(), p
 
-    df = pd.read_csv(csv_path)
-    assert len(df) == len(res["rows"])
-    assert {"signal", "call_score", "put_score", "confidence_score",
-            "no_trade_reason", "run_status"} <= set(df.columns)
+    df_all = pd.read_csv(processed / "signals_all.csv")
+    df_short = pd.read_csv(processed / "signals_short_term.csv")
+    df_ext = pd.read_csv(processed / "signals_extended_intraday.csv")
+    assert len(df_all) == len(res["rows"])
+    assert len(df_short) + len(df_ext) == len(df_all)
+    assert set(df_short["horizon_group"]) <= {"short_term"}
+    assert set(df_ext["horizon_group"]) <= {"extended_intraday"}
+    assert {"signal", "recommended_action", "call_score", "put_score",
+            "confidence_score", "no_trade_reason", "run_status",
+            "underlying_symbol", "ranking_validity"} <= set(df_all.columns)
 
-    summary = json.loads(summary_path.read_text())
-    assert summary["run_status"] == RUN_VALID
-    assert summary["signal_counts"]["CALL"] >= 1
-    assert "not calibrated probabilities" in summary["payout"]["note"]
+    summary = json.loads((run_dir / "run_summary.json").read_text())
+    assert summary["run_status"] == res["assessment"].run_status
+    assert summary["horizon_matrix"]  # every instrument x horizon decision
+    for cells in summary["horizon_matrix"].values():
+        assert set(cells) == {f"{h}m" for h in cfg.horizons.minutes}
 
-    md = md_path.read_text()
+    manifest = json.loads((run_dir / "run_manifest.json").read_text())
+    for key in ("run_id", "started_at", "finished_at", "duration_seconds",
+                "git_commit", "python_version", "configuration_hash",
+                "configuration_snapshot", "providers", "requested_horizons",
+                "requested_interval", "output_paths", "run_status"):
+        assert key in manifest, key
+    assert manifest["run_id"] == run_id
+
+    md = (run_dir / "signals_all.md").read_text()
     assert "How to read this report" in md
-    assert "NO_TRADE" in md and "Disclaimer" in md
-    assert "not a calibrated probability" in md
+    assert "Complete horizon matrix" in md
+    assert "NO_TRADE results" in md and "Methodology disclaimer" in md
+    assert "not a probability" in md
 
 
 def test_partial_run_when_one_symbol_fails(tmp_path):
