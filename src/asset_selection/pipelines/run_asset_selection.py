@@ -172,8 +172,8 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--config", default="configs/default_config.yaml",
-        help="Path to YAML config (default: configs/default_config.yaml)."
+        "--config", default="configs/us_equities/default.yaml",
+        help="Path to YAML config (default: configs/us_equities/default.yaml)."
     )
     p.add_argument(
         "--universe", choices=("full", "sample", "custom"), default=None,

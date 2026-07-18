@@ -33,7 +33,7 @@ def _row(**overrides):
 
 
 def test_composite_clipped_to_0_100():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     df = pd.DataFrame([
         _row(fundamentals_score=100, growth_score=100, quality_score=100,
              valuation_score=100, sentiment_score=100,
@@ -48,7 +48,7 @@ def test_composite_clipped_to_0_100():
 
 
 def test_fundamentals_dominate_sentiment_at_default_weights():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     a = _row(ticker="GOOD_FUND_BAD_NEWS", fundamentals_score=85,
              growth_score=80, quality_score=80, valuation_score=70,
              sentiment_score=20, article_count=10)
@@ -66,7 +66,7 @@ def test_fundamentals_dominate_sentiment_at_default_weights():
 
 
 def test_flag_speculative_hype_and_review():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     df = pd.DataFrame([
         _row(ticker="HYPE", fundamentals_score=30, sentiment_score=80, article_count=10),
         _row(ticker="REVIEW", fundamentals_score=80, sentiment_score=25, article_count=10),
@@ -81,7 +81,7 @@ def test_flag_speculative_hype_and_review():
 
 
 def test_risk_penalty_increases_with_low_liquidity_and_missing_data():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     healthy = _row(ticker="HEALTHY", market_cap=5e10, avg_dollar_volume=5e8,
                    volatility_pct=0.25, missing_metric_count=0)
     fragile = _row(ticker="FRAGILE", market_cap=1e7, avg_dollar_volume=1e4,
@@ -93,7 +93,7 @@ def test_risk_penalty_increases_with_low_liquidity_and_missing_data():
 
 def test_negative_momentum_increases_risk_and_flags(tmp_path):
     """Closes test gap from the audit: price history must influence the score."""
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     df = pd.DataFrame([
         _row(ticker="UP", return_pct=0.20),
         _row(ticker="FLAT", return_pct=0.0),
@@ -115,7 +115,7 @@ def test_negative_momentum_increases_risk_and_flags(tmp_path):
 
 def test_sentiment_difference_changes_final_ranking():
     """Identical fundamentals + price; only sentiment differs -> rank flips."""
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     a = _row(ticker="POS_NEWS", sentiment_score=90, article_count=10)
     b = _row(ticker="NEG_NEWS", sentiment_score=10, article_count=10)
     df = pd.DataFrame([a, b])
@@ -128,7 +128,7 @@ def test_sentiment_difference_changes_final_ranking():
 
 
 def test_low_sentiment_confidence_flag_fires():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     df = pd.DataFrame([
         _row(ticker="THIN", article_count=1, sentiment_confidence=0.1),
         _row(ticker="DEEP", article_count=8, sentiment_confidence=0.9),
@@ -144,7 +144,7 @@ def test_low_sentiment_confidence_flag_fires():
 
 
 def test_top_driver_and_drag_are_emitted():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     df = pd.DataFrame([
         _row(ticker="MIXED", growth_score=90, quality_score=60,
              valuation_score=20, balance_sheet_score=50, cash_flow_score=55),
@@ -160,7 +160,7 @@ def test_top_driver_and_drag_are_emitted():
 def test_ranking_explainable_every_top_row_has_reason_and_flag_list():
     from asset_selection.scoring.ranking import rank_candidates
 
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     df = pd.DataFrame([
         _row(ticker="A"), _row(ticker="B"), _row(ticker="C"),
     ])

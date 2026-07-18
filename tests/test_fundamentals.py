@@ -58,7 +58,7 @@ def _records():
 
 def test_normalize_metrics_handles_missing():
     df = fundamentals_dataframe(_records())
-    cfg = load_config("configs/default_config.yaml").scoring
+    cfg = load_config("configs/us_equities/default.yaml").scoring
     out = normalize_metrics(df, ["roe", "net_margin", "pe_ratio"], cfg)
     assert set(out.index) == {"A", "B", "C", "D", "E"}
     # E has all missing -> all NaN
@@ -70,14 +70,14 @@ def test_normalize_metrics_handles_missing():
 
 def test_valuation_inversion_means_cheaper_is_better():
     df = fundamentals_dataframe(_records())
-    cfg = load_config("configs/default_config.yaml").scoring
+    cfg = load_config("configs/us_equities/default.yaml").scoring
     out = normalize_metrics(df, ["pe_ratio"], cfg)
     # A has pe=15 (cheap); B has pe=40 (expensive) -> A's score must beat B's.
     assert out.loc["A", "pe_ratio"] > out.loc["B", "pe_ratio"]
 
 
 def test_score_fundamentals_penalizes_missing_data_ticker():
-    cfg = load_config("configs/default_config.yaml").scoring
+    cfg = load_config("configs/us_equities/default.yaml").scoring
     scores = score_fundamentals(_records(), cfg)
     s = scores.set_index("ticker")
     # The ticker with no disclosed fundamentals must not rank highest.
@@ -86,7 +86,7 @@ def test_score_fundamentals_penalizes_missing_data_ticker():
 
 
 def test_score_fundamentals_orders_high_quality_first():
-    cfg = load_config("configs/default_config.yaml").scoring
+    cfg = load_config("configs/us_equities/default.yaml").scoring
     scores = score_fundamentals(_records(), cfg)
     s = scores.set_index("ticker")
     # A (great growth + margins + cheap) should outscore C (negatives across the board).
@@ -94,7 +94,7 @@ def test_score_fundamentals_orders_high_quality_first():
 
 
 def test_score_fundamentals_adds_explainability_columns():
-    cfg = load_config("configs/default_config.yaml").scoring
+    cfg = load_config("configs/us_equities/default.yaml").scoring
     scores = score_fundamentals(_records(), cfg)
     s = scores.set_index("ticker")
     for col in (

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
-_DEFAULT_CONFIG_PATH = Path("configs/binary_options_config.yaml")
+_DEFAULT_CONFIG_PATH = Path("configs/binary_options/default.yaml")
 
 # ---------------------------------------------------------------------------
 # Domain constants
@@ -81,8 +81,17 @@ class ConfigValidationError(ValueError):
 @dataclass
 class RunConfig:
     top_n: int = 20
-    output_dir: str = "reports"
-    processed_dir: str = "data/processed"
+    output_dir: str = "reports/binary_options"
+    processed_dir: str = "data/binary_options/processed"
+    input_dir: str = "data/binary_options/input"
+
+    def __post_init__(self) -> None:
+        # Migrate flat legacy paths onto the domain-separated layout so the
+        # two research products can never write into each other's outputs.
+        if self.output_dir == "reports":
+            self.output_dir = "reports/binary_options"
+        if self.processed_dir == "data/processed":
+            self.processed_dir = "data/binary_options/processed"
 
 
 @dataclass
@@ -95,7 +104,7 @@ class UniverseConfig:
     watchlist: List[str] = field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "SPY"])
     watchlist_file: Optional[str] = None
     # Path to data/processed/asset_selection_results.csv (or compatible).
-    asset_selection_input: str = "data/processed/asset_selection_results.csv"
+    asset_selection_input: str = "data/us_equities/processed/asset_selection_results.csv"
     # When consuming the asset-selection output, keep at most this many of the
     # top-ranked names (0/None disables the cap).
     asset_selection_top_k: Optional[int] = 25
@@ -160,7 +169,7 @@ class ProvidersConfig:
 @dataclass
 class CacheConfig:
     enabled: bool = True
-    dir: str = "data/cache"
+    dir: str = "data/binary_options/cache"
     # Interval-aware TTL: ttl = clamp(interval_seconds * ttl_interval_fraction,
     # min_ttl_seconds, max_ttl_seconds). Intraday data must never inherit the
     # multi-day TTLs of the fundamentals pipeline.
@@ -362,7 +371,7 @@ def load_config(
     Resolution order:
         1. explicit ``source`` argument (path or dict)
         2. ``BINARY_OPTIONS_CONFIG`` env var (path)
-        3. ``configs/binary_options_config.yaml``
+        3. ``configs/binary_options/default.yaml``
         4. dataclass defaults (no file required)
 
     Raises :class:`ConfigValidationError` (listing every problem) unless
@@ -397,6 +406,16 @@ def _resolve_path(source: Union[str, Path, None]) -> Optional[Path]:
         return Path(env)
     if _DEFAULT_CONFIG_PATH.exists():
         return _DEFAULT_CONFIG_PATH
+    if _LEGACY_CONFIG_PATH.exists():
+        import warnings
+
+        warnings.warn(
+            f"{_LEGACY_CONFIG_PATH} is deprecated; move it to "
+            f"{_DEFAULT_CONFIG_PATH} (see docs/shared/migration.md)",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return _LEGACY_CONFIG_PATH
     return None
 
 

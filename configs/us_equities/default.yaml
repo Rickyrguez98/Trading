@@ -14,8 +14,8 @@ run:
   # Number of top-ranked tickers written to the Markdown report.
   top_n: 25
   # Where the pipeline writes its CSV/JSON/MD outputs.
-  output_dir: reports
-  processed_dir: data/processed
+  output_dir: reports/us_equities
+  processed_dir: data/us_equities/processed
 
 # Staged-funnel limits. Set any value to null to skip that stage's cap.
 # A full-universe run typically goes 4700 -> 500 -> 150 -> rank.
@@ -129,7 +129,7 @@ critical_tickers:
 
 cache:
   enabled: true
-  dir: data/cache
+  dir: data/us_equities/cache
   # Per-provider TTL in seconds. Fundamentals change slowly; news changes fast.
   ttl_seconds:
     fundamentals: 86400       # 24h

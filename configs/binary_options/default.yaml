@@ -11,8 +11,8 @@
 
 run:
   top_n: 20
-  output_dir: reports
-  processed_dir: data/processed
+  output_dir: reports/binary_options
+  processed_dir: data/binary_options/processed
 
 universe:
   # "custom"          -- the explicit `tickers` list (or --tickers on the CLI)
@@ -24,7 +24,7 @@ universe:
   tickers: []
   watchlist: [AAPL, MSFT, NVDA, SPY]
   watchlist_file: null
-  asset_selection_input: data/processed/asset_selection_results.csv
+  asset_selection_input: data/us_equities/processed/asset_selection_results.csv
   asset_selection_top_k: 25
   max_symbols: 50
   # Benchmark for market-context features (fetched alongside the universe).
@@ -73,7 +73,7 @@ providers:
 
 cache:
   enabled: true
-  dir: data/cache
+  dir: data/binary_options/cache
   # Interval-aware TTL: ttl = clamp(interval_seconds * fraction, min, max).
   # Intraday data must never inherit multi-day cache assumptions.
   ttl_interval_fraction: 0.5

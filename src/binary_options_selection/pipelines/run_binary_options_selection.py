@@ -714,7 +714,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--config", default=None, help="Path to YAML config "
-                   "(default configs/binary_options_config.yaml).")
+                   "(default configs/binary_options/default.yaml).")
     p.add_argument("--tickers", nargs="+", default=None, metavar="SYM",
                    help="Explicit underlyings; implies --universe custom.")
     p.add_argument("--watchlist", default=None, metavar="PATH",

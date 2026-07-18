@@ -162,9 +162,10 @@ def temp_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # The pipeline writes to relative paths under cwd. Move there.
     monkeypatch.chdir(tmp_path)
     # Copy the default config so the pipeline can load it from the tmp cwd.
-    src_cfg = Path(__file__).resolve().parent.parent / "configs" / "default_config.yaml"
-    (tmp_path / "configs").mkdir()
-    shutil.copy(src_cfg, tmp_path / "configs" / "default_config.yaml")
+    src_cfg = (Path(__file__).resolve().parent.parent
+               / "configs" / "us_equities" / "default.yaml")
+    (tmp_path / "configs" / "us_equities").mkdir(parents=True)
+    shutil.copy(src_cfg, tmp_path / "configs" / "us_equities" / "default.yaml")
     return tmp_path
 
 
@@ -176,7 +177,7 @@ def test_pipeline_runs_end_to_end_with_mocked_providers(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
             "--top", "3",
             "--no-cache",
@@ -185,9 +186,9 @@ def test_pipeline_runs_end_to_end_with_mocked_providers(temp_workdir: Path):
 
     assert rc == 0, "Pipeline must exit 0 on the happy path."
 
-    csv = temp_workdir / "data" / "processed" / "asset_selection_results.csv"
-    md = temp_workdir / "reports" / "top_candidates.md"
-    js = temp_workdir / "reports" / "asset_selection_summary.json"
+    csv = temp_workdir / "data" / "us_equities" / "processed" / "asset_selection_results.csv"
+    md = temp_workdir / "reports" / "us_equities" / "top_candidates.md"
+    js = temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json"
     assert csv.exists() and csv.stat().st_size > 0, "CSV must be written and non-empty."
     assert md.exists() and md.stat().st_size > 0, "Markdown must be written and non-empty."
     assert js.exists() and js.stat().st_size > 0, "JSON summary must be written."
@@ -236,7 +237,7 @@ def test_pipeline_does_not_crash_when_all_news_empty(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_EmptyNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "MSFT",
             "--top", "2",
             "--no-cache",
@@ -244,7 +245,7 @@ def test_pipeline_does_not_crash_when_all_news_empty(temp_workdir: Path):
         ])
 
     assert rc == 0
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     for c in js["candidates"]:
         assert "NO_NEWS" in c["warning_flags"]
         assert c["sentiment_article_count"] == 0
@@ -265,13 +266,13 @@ def test_summary_includes_stage_stats_and_exchange_breakdown(temp_workdir: Path)
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
 
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     assert js["mode"] == "custom"
     stage_names = [s["name"] for s in js["stages"]]
     assert stage_names == [
@@ -285,7 +286,7 @@ def test_summary_includes_stage_stats_and_exchange_breakdown(temp_workdir: Path)
         assert "duration_seconds" in s
 
     uni_summary = json.loads(
-        (temp_workdir / "reports" / "universe_summary.json").read_text()
+        (temp_workdir / "reports" / "us_equities" / "universe_summary.json").read_text()
     )
     assert uni_summary["mode"] == "custom"
     assert [s["name"] for s in uni_summary["stages"]] == stage_names
@@ -324,7 +325,7 @@ def test_news_runs_only_after_fundamentals_prescreen(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_SpyNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "TINY", "MSFT",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
             # Isolate stage-4 gating: the pre-run health check legitimately
@@ -365,13 +366,13 @@ def test_sample_mode_respects_limit(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--universe", "sample", "--limit", "3",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
 
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     assert js["mode"] == "sample"
     assert js["sample_limit"] == 3
     s1 = js["stages"][0]
@@ -416,13 +417,13 @@ def test_full_mode_does_not_silently_cap_at_50(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_NoOpPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--universe", "full",
             "--top", "5", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
 
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     assert js["mode"] == "full"
     s1 = next(s for s in js["stages"] if s["name"] == "1_universe")
     assert s1["output_count"] == 800, (
@@ -441,12 +442,12 @@ def test_custom_mode_uses_provided_tickers(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "NVDA", "AMD",
             "--top", "2", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     assert js["mode"] == "custom"
     assert {c["ticker"] for c in js["candidates"]} == {"NVDA", "AMD"}
 
@@ -465,13 +466,13 @@ def test_pipeline_emits_quality_fields_and_validation_report(temp_workdir: Path)
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
 
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     new_fields = {
         "selection_bucket",
         "sentiment_unique_article_count", "sentiment_duplicate_count",
@@ -489,8 +490,8 @@ def test_pipeline_emits_quality_fields_and_validation_report(temp_workdir: Path)
     assert by_ticker["AAPL"]["sentiment_confidence"] < 1.0
 
     # The validation report must be written and parseable.
-    val_json = temp_workdir / "reports" / "output_validation.json"
-    val_md = temp_workdir / "reports" / "output_validation.md"
+    val_json = temp_workdir / "reports" / "us_equities" / "output_validation.json"
+    val_md = temp_workdir / "reports" / "us_equities" / "output_validation.md"
     assert val_json.exists() and val_md.exists()
     report = json.loads(val_json.read_text())
     assert report["overall_status"] in {"ok", "warn"}
@@ -525,12 +526,12 @@ def test_custom_mode_preserves_class_share_ticker(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "BRK.B", "BF.B",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     tickers = {c["ticker"] for c in js["candidates"]}
     assert "BRK.B" in tickers and "BF.B" in tickers, (
         f"Class-share canonical spelling was lost: {tickers}"
@@ -550,13 +551,13 @@ def test_run_status_surfaced_in_summary_banner_and_diagnostics(temp_workdir: Pat
          patch("asset_selection.data_providers.get_prices_provider", return_value=_PatchedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
             "--top", "3", "--no-cache", "--log-level", "ERROR",
         ])
     assert rc == 0
 
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     assert js["run_status"] == "VALID"
     assert js["ranking_validity"] == "VALID_RANKING"
     # The new robustness summary blocks must all be present.
@@ -566,11 +567,11 @@ def test_run_status_surfaced_in_summary_banner_and_diagnostics(temp_workdir: Pat
     ):
         assert key in js, f"summary missing {key}"
 
-    md = (temp_workdir / "reports" / "top_candidates.md").read_text()
+    md = (temp_workdir / "reports" / "us_equities" / "top_candidates.md").read_text()
     assert "Run status: VALID" in md, "Markdown must be prefixed with a status banner."
 
-    diag_json = temp_workdir / "reports" / "provider_diagnostics.json"
-    diag_md = temp_workdir / "reports" / "provider_diagnostics.md"
+    diag_json = temp_workdir / "reports" / "us_equities" / "provider_diagnostics.json"
+    diag_md = temp_workdir / "reports" / "us_equities" / "provider_diagnostics.md"
     assert diag_json.exists() and diag_md.exists()
     diag = json.loads(diag_json.read_text())
     assert diag["run_status"] == "VALID" and diag["is_trusted"] is True
@@ -594,7 +595,7 @@ def test_systemic_price_outage_refuses_to_rank(temp_workdir: Path):
          patch("asset_selection.data_providers.get_prices_provider", return_value=_BlockedPrices), \
          patch("asset_selection.data_providers.get_news_provider", return_value=_PatchedNews):
         rc = r.main([
-            "--config", "configs/default_config.yaml",
+            "--config", "configs/us_equities/default.yaml",
             "--tickers", "AAPL", "MSFT", "GOOGL",
             "--top", "3", "--no-cache", "--log-level", "CRITICAL",
         ])
@@ -602,20 +603,20 @@ def test_systemic_price_outage_refuses_to_rank(temp_workdir: Path):
     # Systemic failure -> diagnostic-only, non-zero exit, no ranking.
     assert rc == 2
 
-    js = json.loads((temp_workdir / "reports" / "asset_selection_summary.json").read_text())
+    js = json.loads((temp_workdir / "reports" / "us_equities" / "asset_selection_summary.json").read_text())
     assert js["run_status"] == "INVALID"
     assert js["ranking_validity"] == "INVALID_PROVIDER_FAILURE"
     assert js["candidates"] == []
 
     # The health probe must blame the provider, not the tickers.
-    health = json.loads((temp_workdir / "reports" / "provider_health.json").read_text())
+    health = json.loads((temp_workdir / "reports" / "us_equities" / "provider_health.json").read_text())
     assert health["price_systemic_failure"] is True
     price_errors = health["by_data_type"]["price"]["error_types"]
     assert "PROVIDER_JSON_PARSE_ERROR" in price_errors
     assert "INVALID_TICKER" not in price_errors
 
     # The diagnostic report exists and is marked untrusted.
-    diag_md = (temp_workdir / "reports" / "provider_diagnostics.md").read_text()
+    diag_md = (temp_workdir / "reports" / "us_equities" / "provider_diagnostics.md").read_text()
     assert "NOT A TRUSTED RANKING" in diag_md or "INVALID" in diag_md
-    top_md = (temp_workdir / "reports" / "top_candidates.md").read_text()
+    top_md = (temp_workdir / "reports" / "us_equities" / "top_candidates.md").read_text()
     assert "No ranking produced" in top_md

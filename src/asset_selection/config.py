@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
-_DEFAULT_CONFIG_PATH = Path("configs/default_config.yaml")
+# Canonical domain config location; the flat legacy path is still honoured
+# (with a deprecation warning) so existing setups keep working.
+_DEFAULT_CONFIG_PATH = Path("configs/us_equities/default.yaml")
+_LEGACY_CONFIG_PATH = Path("configs/default_config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,14 @@ class RunConfig:
     # old YAML configs don't break, but the staged pipeline ignores it in
     # "full" mode. Mapped onto sample_limit when mode == 'sample'.
     max_tickers: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # Domain separation: US-equities outputs live under domain paths so
+        # they can never collide with binary-options outputs.
+        if self.output_dir == "reports":
+            self.output_dir = "reports/us_equities"
+        if self.processed_dir == "data/processed":
+            self.processed_dir = "data/us_equities/processed"
 
 
 @dataclass
@@ -163,7 +174,7 @@ class RobustnessConfig:
 @dataclass
 class CacheConfig:
     enabled: bool = True
-    dir: str = "data/cache"
+    dir: str = "data/us_equities/cache"
     ttl_seconds: Dict[str, int] = field(
         default_factory=lambda: {
             "fundamentals": 86400,
@@ -437,7 +448,7 @@ def load_config(source: Union[str, Path, Dict[str, Any], None] = None) -> AppCon
     Resolution order:
         1. explicit ``source`` argument (path or dict)
         2. ``ASSET_SELECTION_CONFIG`` env var (path)
-        3. ``configs/default_config.yaml``
+        3. ``configs/us_equities/default.yaml``
         4. dataclass defaults (no file required)
     """
     raw: Dict[str, Any]
@@ -462,6 +473,16 @@ def _resolve_path(source: Union[str, Path, None]) -> Optional[Path]:
         return Path(env)
     if _DEFAULT_CONFIG_PATH.exists():
         return _DEFAULT_CONFIG_PATH
+    if _LEGACY_CONFIG_PATH.exists():
+        import warnings
+
+        warnings.warn(
+            f"{_LEGACY_CONFIG_PATH} is deprecated; move it to "
+            f"{_DEFAULT_CONFIG_PATH} (see docs/shared/migration.md)",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return _LEGACY_CONFIG_PATH
     return None
 
 

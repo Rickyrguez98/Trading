@@ -33,7 +33,7 @@ from asset_selection.validation import (
     write_provider_diagnostics,
 )
 
-CFG = load_config("configs/default_config.yaml")
+CFG = load_config("configs/us_equities/default.yaml")
 
 # Columns compute_allocation_fields reads. Anything omitted defaults sanely.
 _BASE = dict(
@@ -101,7 +101,7 @@ def test_watchlist_not_eligible_by_default():
 
 
 def test_speculative_and_watchlist_allowed_via_config_override():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     cfg.allocation.allow_speculative_for_allocation = True
     cfg.allocation.allow_watchlist_for_allocation = True
     df = pd.DataFrame([
@@ -249,7 +249,7 @@ def test_low_confidence_pulls_sentiment_toward_neutral():
 
 
 def test_confidence_adjustment_is_config_reversible():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     cfg.sentiment.use_confidence_adjusted_sentiment = False
     df = pd.DataFrame([
         dict(ticker="X", sentiment_score=85.0, sentiment_confidence=0.1,
@@ -408,7 +408,7 @@ def test_allocation_field_summary_is_json_safe():
 def test_summary_reports_ranked_vs_reported_counts():
     from asset_selection.pipelines.run_asset_selection import _build_summary
 
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     cfg.run.top_n = 2
     out = _mixed_ranked()
     summary = _build_summary(

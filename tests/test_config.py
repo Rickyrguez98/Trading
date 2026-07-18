@@ -9,7 +9,7 @@ from asset_selection.config import AppConfig, load_config
 
 
 def test_load_default_config_from_disk():
-    cfg = load_config("configs/default_config.yaml")
+    cfg = load_config("configs/us_equities/default.yaml")
     assert isinstance(cfg, AppConfig)
     assert cfg.run.top_n > 0
     assert cfg.composite.weights["fundamentals"] >= cfg.composite.weights["sentiment"], (

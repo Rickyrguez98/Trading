@@ -13,7 +13,7 @@ from binary_options_selection.config import (
 
 
 def test_default_yaml_loads_and_validates():
-    cfg = load_config("configs/binary_options_config.yaml")
+    cfg = load_config("configs/binary_options/default.yaml")
     assert cfg.horizons.minutes == [5, 10, 15, 30, 60, 90, 120]
     assert cfg.candles.interval == "5m"
     assert validate_config(cfg) == []

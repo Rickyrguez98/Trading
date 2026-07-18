@@ -14,11 +14,11 @@ lint:
 
 run:
 	python -m asset_selection.pipelines.run_asset_selection \
-	    --config configs/default_config.yaml --limit 50 --top 20
+	    --config configs/us_equities/default.yaml --limit 50 --top 20
 
 run-binary-options:
 	python -m binary_options_selection.pipelines.run_binary_options_selection \
-	    --config configs/binary_options_config.yaml --top 20
+	    --config configs/binary_options/default.yaml --top 20
 
 clean:
 	rm -rf data/cache/* data/processed/* reports/*.md reports/*.json
