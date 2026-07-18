@@ -72,6 +72,24 @@ providers:
   intraday: yfinance          # default free provider (delayed; documented limits)
   priority: []                # ordered fallback chain; only implemented providers
 
+instrument_catalog:
+  # Path to YOUR verified platform catalog (YAML or CSV). See
+  # configs/binary_options/instruments.example.yaml for the schema. Without a
+  # verified catalog every row is NO_TRADE (INSTRUMENT_AVAILABILITY_UNKNOWN)
+  # -- market data existing for a symbol never implies a tradable contract.
+  path: null                       # e.g. data/binary_options/input/instruments.yaml
+  provider: auto                   # auto | yaml | csv (auto picks by extension)
+  platform: null                   # optional platform filter
+  max_catalog_age_seconds: 900     # older catalog -> NO_TRADE (CATALOG_STALE)
+  exclude_otc: true                # OTC contracts excluded unless explicitly enabled
+  asset_types: []                  # optional filter; empty = all supported types
+  # Contract economics gates (payout ratio = NET profit per unit staked):
+  minimum_acceptable_payout: 0.0   # below this -> NO_TRADE (PAYOUT_BELOW_MINIMUM)
+  maximum_payout_age_seconds: 3600 # older payout data -> NO_TRADE (PAYOUT_STALE)
+  # Platform-vs-market-data quote alignment:
+  max_quote_diff_bps: 50           # above this divergence -> NO_TRADE (QUOTE_MISMATCH)
+  max_platform_quote_age_seconds: 300
+
 cache:
   enabled: true
   dir: data/binary_options/cache

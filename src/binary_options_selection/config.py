@@ -83,6 +83,11 @@ class ConfigValidationError(ValueError):
 @dataclass
 class RunConfig:
     top_n: int = 20
+    # Research mode relaxes contract-availability requirements (generic
+    # watchlists, missing payout data). Actionable output still requires a
+    # verified catalog; research mode only changes NO_TRADE reasons into
+    # analyzable research rows and is always visibly reported.
+    research_mode: bool = False
     output_dir: str = "reports/binary_options"
     processed_dir: str = "data/binary_options/processed"
     input_dir: str = "data/binary_options/input"
@@ -166,6 +171,33 @@ class ProvidersConfig:
     # Ordered fallback chain; empty means use `intraday` alone. Only providers
     # that are genuinely implemented may appear here (validated).
     priority: List[str] = field(default_factory=list)
+
+
+@dataclass
+class InstrumentCatalogConfig:
+    """Verified platform-contract catalog policy.
+
+    Without a verified catalog the pipeline must not pretend contracts exist:
+    every row becomes NO_TRADE (INSTRUMENT_AVAILABILITY_UNKNOWN). A generic
+    watchlist is available only as an explicit research mode.
+    """
+    # Path to the manual YAML/CSV catalog (see instruments.example.yaml).
+    path: Optional[str] = None
+    provider: str = "auto"                    # auto | yaml | csv
+    platform: Optional[str] = None            # optional platform filter
+    # Catalog freshness: older than this -> every row NO_TRADE (CATALOG_STALE).
+    max_catalog_age_seconds: float = 900.0
+    # OTC contracts are excluded by default; enabling them always carries a
+    # visible OTC warning on each affected row.
+    exclude_otc: bool = True
+    # Optional asset-type filter (subset of the supported types); empty = all.
+    asset_types: List[str] = field(default_factory=list)
+    # --- contract economics gates ---
+    minimum_acceptable_payout: float = 0.0    # net profit per unit staked
+    maximum_payout_age_seconds: float = 3600.0
+    # --- platform-vs-market-data quote alignment ---
+    max_quote_diff_bps: float = 50.0
+    max_platform_quote_age_seconds: float = 300.0
 
 
 @dataclass
@@ -345,6 +377,7 @@ class BinaryOptionsConfig:
     candles: CandlesConfig = field(default_factory=CandlesConfig)
     market_session: MarketSessionConfig = field(default_factory=MarketSessionConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+    instrument_catalog: InstrumentCatalogConfig = field(default_factory=InstrumentCatalogConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     rate_limits: Dict[str, float] = field(default_factory=lambda: {"yfinance": 0.4})
     liquidity: LiquidityConfig = field(default_factory=LiquidityConfig)
@@ -435,6 +468,9 @@ def _from_dict(raw: Dict[str, Any]) -> BinaryOptionsConfig:
             **_filtered(MarketSessionConfig, section("market_session"))
         ),
         providers=ProvidersConfig(**_filtered(ProvidersConfig, section("providers"))),
+        instrument_catalog=InstrumentCatalogConfig(
+            **_filtered(InstrumentCatalogConfig, section("instrument_catalog"))
+        ),
         cache=CacheConfig(**_filtered(CacheConfig, section("cache"))),
         rate_limits=dict(section("rate_limits") or {"yfinance": 0.4}),
         liquidity=LiquidityConfig(**_filtered(LiquidityConfig, section("liquidity"))),
@@ -655,6 +691,28 @@ def validate_config(cfg: BinaryOptionsConfig) -> List[str]:
             problems.append(f"{label} must be within [0, 1]")
     if not (0.0 <= cfg.data_quality.min_data_quality_score <= 100.0):
         problems.append("data_quality.min_data_quality_score must be within [0, 100]")
+
+    # --- instrument catalog ---
+    ic = cfg.instrument_catalog
+    if ic.provider not in ("auto", "yaml", "csv"):
+        problems.append(f"instrument_catalog.provider '{ic.provider}' not in (auto, yaml, csv)")
+    for label, val in (
+        ("max_catalog_age_seconds", ic.max_catalog_age_seconds),
+        ("maximum_payout_age_seconds", ic.maximum_payout_age_seconds),
+        ("max_platform_quote_age_seconds", ic.max_platform_quote_age_seconds),
+        ("max_quote_diff_bps", ic.max_quote_diff_bps),
+    ):
+        if float(val) < 0:
+            problems.append(f"instrument_catalog.{label} must be >= 0")
+    if ic.minimum_acceptable_payout < 0:
+        problems.append("instrument_catalog.minimum_acceptable_payout must be >= 0")
+    from .catalog.models import SUPPORTED_ASSET_TYPES as _TYPES
+    for t in ic.asset_types:
+        if t not in _TYPES:
+            problems.append(
+                f"instrument_catalog.asset_types entry '{t}' unsupported "
+                f"(supported: {', '.join(_TYPES)})"
+            )
 
     # --- sentiment ---
     if cfg.sentiment.min_horizon_minutes < HORIZON_MIN_MINUTES:

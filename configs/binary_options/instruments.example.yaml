@@ -1,0 +1,75 @@
+# EXAMPLE instrument catalog — NOT live contracts.
+#
+# No binary-options platform is integrated with this repository. This file
+# documents the manual catalog schema you must fill in yourself from your
+# platform's actually listed instruments. Every entry below is illustrative
+# and must never be treated as a real, currently tradable contract.
+#
+# Copy to data/binary_options/input/instruments.yaml, replace every value
+# with data you verified on your platform, and set catalog_timestamp to the
+# moment YOU captured it. Catalogs older than
+# instrument_catalog.max_catalog_age_seconds make every row
+# NO_TRADE (CATALOG_STALE).
+#
+# Validate with:
+#   python -m binary_options_selection.pipelines.run_binary_options_selection \
+#       --instrument-catalog data/binary_options/input/instruments.yaml \
+#       --validate-catalog-only
+#
+# Field reference: docs/binary_options/instrument-catalog.md
+# payout ratio = NET profit per unit staked on a win (0.85 = 85% profit).
+
+platform: example_platform            # your platform's name (identifier only)
+catalog_timestamp: "2026-07-18T13:00:00Z"
+
+instruments:
+  # --- equity underlying (example values) ---
+  - platform_asset_id: EX-AAPL
+    platform_asset_name: "Apple (example)"
+    underlying_symbol: AAPL
+    provider_symbol: AAPL             # market-data symbol for the intraday provider
+    underlying_name: "Apple Inc."
+    asset_type: equity
+    market: NASDAQ
+    currency: USD
+    available_now: true
+    contract_status: open             # open | closed | suspended
+    available_expirations_minutes: [5, 10, 15, 30, 60]
+    payout_by_expiration: {5: 0.80, 10: 0.82, 15: 0.85, 30: 0.85, 60: 0.87}
+    minimum_trade: 1
+    maximum_trade: 1000
+    platform_reference_price: 199.42  # optional platform-side quote
+    reference_price_timestamp: "2026-07-18T12:59:55Z"
+    quote_source: example_platform
+    exchange_timezone: America/New_York
+    is_otc: false
+
+  # --- forex underlying (example values) ---
+  - platform_asset_id: EX-EURUSD
+    platform_asset_name: "EUR/USD (example)"
+    underlying_symbol: EURUSD
+    provider_symbol: "EURUSD=X"       # yfinance forex mapping
+    asset_type: forex
+    market: FX
+    currency: USD
+    available_now: true
+    contract_status: open
+    available_expirations_minutes: [5, 10, 15, 30, 60, 90, 120]
+    payout_by_expiration: {5: 0.78, 10: 0.80, 15: 0.82, 30: 0.84, 60: 0.85, 90: 0.85, 120: 0.85}
+    exchange_timezone: UTC
+    is_otc: false
+
+  # --- crypto underlying (example values) ---
+  - platform_asset_id: EX-BTCUSD
+    platform_asset_name: "BTC/USD (example)"
+    underlying_symbol: BTCUSD
+    provider_symbol: "BTC-USD"        # yfinance crypto mapping
+    asset_type: cryptocurrency
+    market: CRYPTO
+    currency: USD
+    available_now: true
+    contract_status: open
+    available_expirations_minutes: [5, 15, 30, 60, 120]
+    payout_by_expiration: {5: 0.75, 15: 0.80, 30: 0.82, 60: 0.84, 120: 0.85}
+    exchange_timezone: UTC
+    is_otc: true                      # excluded unless exclude_otc is disabled
