@@ -294,11 +294,16 @@ def run_pipeline(
                         bundle, data_quality_score=quality.data_quality_score, cfg=cfg
                     )
                     vol_flags = bundle.flags
+                    feature_values = {
+                        k: (round(v, 4) if isinstance(v, float) else v)
+                        for k, v in bundle.values.items() if v is not None
+                    }
                 else:
                     scores = DirectionalScores(
                         horizon_minutes=horizon, horizon_group=horizon_group(horizon)
                     )
                     vol_flags = []
+                    feature_values = {}
                 reference_time = quality.latest_complete_close
                 expiry = (
                     expiry_for(reference_time, horizon)
@@ -318,6 +323,7 @@ def run_pipeline(
                     expiry=expiry if reference_time is not None else None,
                     horizon=horizon, payout_ratio=payout_ratio,
                     break_even=break_even, timezone_name=cfg.market_session.timezone,
+                    feature_values=feature_values,
                 ))
         s5.output_count = len(rows)
         for r in rows:
@@ -391,7 +397,7 @@ def run_pipeline(
 def _build_row(
     *, run_id, generated_at, symbol, company, series, quality, scores,
     decision, session_state, interval, reference_time, expiry, horizon,
-    payout_ratio, break_even, timezone_name,
+    payout_ratio, break_even, timezone_name, feature_values,
 ) -> Dict[str, Any]:
     return {
         "run_id": run_id,
@@ -435,6 +441,7 @@ def _build_row(
         "no_trade_reason": decision.no_trade_reason,
         "family_contributions": dict(scores.contributions),
         "missing_families": dict(scores.missing_families),
+        "feature_values": dict(feature_values),
         "missing_candle_count": quality.missing_count,
         "duplicate_candle_count": quality.duplicate_count,
         "payout_ratio": payout_ratio,
@@ -481,7 +488,7 @@ def _write_outputs(
         c = dict(r)
         for k in ("primary_drivers", "primary_conflicts", "warning_flags"):
             c[k] = "; ".join(c[k]) if c[k] else ""
-        for k in ("family_contributions", "missing_families"):
+        for k in ("family_contributions", "missing_families", "feature_values"):
             c[k] = "; ".join(f"{a}={b}" for a, b in c[k].items()) if c[k] else ""
         csv_rows.append(c)
     csv_path = processed_dir / "binary_options_candidates.csv"

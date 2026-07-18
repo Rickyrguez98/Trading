@@ -73,6 +73,9 @@ def test_end_to_end_valid_run(tmp_path):
         assert r["provider"] == "yfinance" and r["market_state"] == "open"
         assert r["reference_time"] is not None and r["expiry_time"] is not None
         assert r["data_age_seconds"] is not None
+    # raw feature values (RSI, ATR, relative volume, ...) are reported per row
+    up_row = by_key[("UP", 15)]
+    assert {"rsi", "atr", "relative_volume"} <= set(up_row["feature_values"])
     assert res["validation"]["overall_status"] == "ok"
 
 
