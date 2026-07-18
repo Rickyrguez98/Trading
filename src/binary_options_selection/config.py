@@ -55,7 +55,10 @@ FEATURE_FAMILIES = (
     "sentiment",
 )
 
-UNIVERSE_MODES = ("custom", "watchlist", "asset-selection")
+# "catalog" (the default) selects instruments from the verified platform
+# catalog; the other modes analyze generic symbols and therefore require
+# run.research_mode -- generic market data is NOT contract availability.
+UNIVERSE_MODES = ("catalog", "custom", "watchlist", "asset-selection")
 SESSION_MODES = ("regular", "extended")
 
 
@@ -106,7 +109,7 @@ class UniverseConfig:
     # "custom" (explicit tickers), "watchlist" (configured list / file), or
     # "asset-selection" (consume the equity pipeline's output CSV as an
     # upstream universe/quality filter -- never as a direct intraday predictor).
-    mode: str = "watchlist"
+    mode: str = "catalog"
     tickers: List[str] = field(default_factory=list)
     watchlist: List[str] = field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "SPY"])
     watchlist_file: Optional[str] = None
@@ -171,6 +174,12 @@ class ProvidersConfig:
     # Ordered fallback chain; empty means use `intraday` alone. Only providers
     # that are genuinely implemented may appear here (validated).
     priority: List[str] = field(default_factory=list)
+    # Known structural feed delay per provider (seconds). Yahoo intraday data
+    # is typically ~15 minutes delayed and must never be described as
+    # real-time; short-term signals are gated on this (DATA_NOT_REAL_TIME).
+    known_delay_seconds: Dict[str, float] = field(
+        default_factory=lambda: {"yfinance": 900.0}
+    )
 
 
 @dataclass
@@ -221,6 +230,12 @@ class LiquidityConfig:
     min_avg_volume: float = 10_000.0            # shares per bar (rolling mean)
     min_avg_dollar_volume: float = 250_000.0    # close * volume per bar
     max_zero_volume_ratio: float = 0.20         # fraction of bars with volume == 0
+    # Volume-based liquidity screens only make sense where the feed carries
+    # real volume. Forex/index feeds typically do not; those rows skip the
+    # volume gates and carry a VOLUME_DATA_UNRELIABLE warning instead.
+    enforce_for_asset_types: List[str] = field(
+        default_factory=lambda: ["equity", "etf", "cryptocurrency"]
+    )
 
 
 @dataclass
@@ -233,6 +248,11 @@ class DataQualityConfig:
     max_abnormal_bar_return: float = 0.20
     # Rows below this data-quality score (0-100) cannot carry a live signal.
     min_data_quality_score: float = 60.0
+    # Known provider delay above this fraction of the horizon -> the data is
+    # not usable for that expiration (DATA_NOT_REAL_TIME). With yfinance's
+    # ~900s delay and the default 0.5, every 5/10/15-minute signal is honestly
+    # rejected while 60-120 minute research remains possible.
+    max_known_delay_fraction_of_horizon: float = 0.5
 
 
 @dataclass
@@ -314,6 +334,12 @@ class SignalRulesConfig:
     # Volatility-regime factor: confidence is multiplied by a factor in
     # [vol_regime_floor, 1]; abnormal ranges push it toward the floor.
     vol_regime_floor: float = 0.50
+    # An abnormal-range bar (possible corrupted feed / news shock) blocks the
+    # row entirely instead of merely damping confidence.
+    block_on_abnormal_range: bool = True
+    # Minimum fraction of the horizon that must remain (based on data age) for
+    # the analysis to still describe the contract being bought.
+    min_time_remaining_fraction: float = 0.75
 
 
 @dataclass
@@ -541,6 +567,12 @@ def validate_config(cfg: BinaryOptionsConfig) -> List[str]:
         )
     if cfg.universe.max_symbols <= 0:
         problems.append("universe.max_symbols must be positive")
+    if cfg.universe.mode != "catalog" and not cfg.run.research_mode:
+        problems.append(
+            f"universe.mode '{cfg.universe.mode}' analyzes generic symbols and "
+            "requires run.research_mode: true (or --research-mode). Contract "
+            "selection needs a verified instrument catalog (universe.mode: catalog)"
+        )
 
     # --- interval ---
     interval = cfg.candles.interval

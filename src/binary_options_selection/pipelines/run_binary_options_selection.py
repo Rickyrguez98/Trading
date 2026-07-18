@@ -48,18 +48,22 @@ from ..config import (
 )
 from ..data_providers import build_intraday_provider
 from ..data_providers import errors as err
+from ..catalog.context import build_contract_context, unknown_contract_context
+from ..catalog.providers import CatalogError, build_catalog_provider
+from ..catalog.validation import validate_catalog
 from ..data_providers.base import IntradayCandlesProvider, IntradaySeries
 from ..features.engine import compute_features
 from ..health.provider_health import run_intraday_health_check
-from ..market_session import classify_session, expiry_for
+from ..market_session import classify_session, classify_session_for_asset, expiry_for
 from ..scoring.directional import DirectionalScores, score_direction
 from ..signals.decision import (
     SIGNAL_NO_TRADE,
+    LiquidityAssessment,
     assess_liquidity,
     decide_signal,
 )
 from ..signals.payout import break_even_win_probability
-from ..universe import resolve_universe
+from ..universe import UniverseResult, resolve_universe
 from ..utils.timeutils import iso_utc, utc_now
 from ..validation.candles import SeriesQuality, assess_series
 from ..validation.output_validation import render_markdown as render_validation_md
@@ -134,6 +138,101 @@ class _Timer:
 
 
 # ---------------------------------------------------------------------------
+# Instrument catalog resolution
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _CatalogBundle:
+    """What Stage 1 learned from the instrument catalog (possibly nothing)."""
+    snapshot: Any = None                       # CatalogSnapshot | None
+    validation: Any = None                     # CatalogValidationResult | None
+    instrument_by_symbol: Dict[str, Any] = field(default_factory=dict)
+    stale: bool = False
+    notes: List[str] = field(default_factory=list)
+    research_note: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.research_note:
+            self.notes.append(self.research_note)
+
+
+def _resolve_catalog_universe(cfg, now) -> "tuple[UniverseResult, _CatalogBundle]":
+    """Resolve the universe from the verified instrument catalog.
+
+    Without a usable catalog the pipeline does NOT invent availability: it
+    falls back to the configured watchlist purely so that every requested
+    symbol still gets explainable NO_TRADE (INSTRUMENT_AVAILABILITY_UNKNOWN)
+    rows, and the run is degraded.
+    """
+    bundle = _CatalogBundle()
+    ic = cfg.instrument_catalog
+    universe = UniverseResult(mode="catalog")
+
+    if not ic.path:
+        bundle.notes.append(
+            "no instrument catalog configured (instrument_catalog.path) -- "
+            "contract availability is unknown for every symbol"
+        )
+        universe.symbols = list(cfg.universe.watchlist)[: cfg.universe.max_symbols]
+        universe.notes.append(
+            "watchlist used only to enumerate availability-unknown rows"
+        )
+        if not universe.symbols:
+            universe.error = (
+                "no instrument catalog and no watchlist symbols to report on"
+            )
+        return universe, bundle
+
+    try:
+        provider = build_catalog_provider(ic.path, ic.provider)
+        snapshot = provider.get_available_instruments(as_of=now, platform=ic.platform)
+    except CatalogError as exc:
+        bundle.notes.append(f"instrument catalog unusable: {exc}")
+        universe.error = f"instrument catalog unusable: {exc}"
+        return universe, bundle
+
+    result = validate_catalog(snapshot, ic, now=now)
+    bundle.snapshot = snapshot
+    bundle.validation = result
+    bundle.stale = result.stale
+    if not result.ok:
+        bundle.notes.extend(f"catalog problem: {p}" for p in result.problems)
+        universe.error = "instrument catalog failed validation: " + "; ".join(
+            result.problems[:3]
+        )
+        return universe, bundle
+    bundle.notes.extend(f"catalog warning: {w}" for w in result.warnings)
+
+    instruments = list(snapshot.instruments)
+    if ic.asset_types:
+        kept = [i for i in instruments if i.asset_type in ic.asset_types]
+        for i in instruments:
+            if i not in kept:
+                universe.dropped[i.underlying_symbol] = "asset_type_filtered"
+        instruments = kept
+    for inst in instruments:
+        issues = result.instrument_issues.get(inst.platform_asset_id)
+        if issues:
+            universe.dropped[inst.underlying_symbol] = "catalog_issues: " + "; ".join(issues)
+            continue
+        if inst.underlying_symbol in bundle.instrument_by_symbol:
+            universe.dropped[inst.underlying_symbol] = "duplicate_underlying_in_catalog"
+            continue
+        bundle.instrument_by_symbol[inst.underlying_symbol] = inst
+        universe.symbols.append(inst.underlying_symbol)
+        if inst.underlying_name:
+            universe.name_by_symbol[inst.underlying_symbol] = inst.underlying_name
+    universe.symbols = universe.symbols[: cfg.universe.max_symbols]
+    universe.notes.append(
+        f"catalog: {snapshot.provider} platform={snapshot.platform} "
+        f"instruments={len(universe.symbols)} stale={result.stale}"
+    )
+    if not universe.symbols:
+        universe.error = "catalog contained no usable instruments"
+    return universe, bundle
+
+
+# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -155,22 +254,32 @@ def run_pipeline(
     interval_minutes = SUPPORTED_INTERVALS[interval]
     interval_seconds = interval_minutes * 60
 
-    # --- Stage 1: universe -------------------------------------------------
+    # --- Stage 1: universe / instrument catalog ------------------------------
+    # Non-catalog modes analyze generic symbols; config validation only allows
+    # them together with run.research_mode, so mode != "catalog" implies an
+    # explicit research run.
+    research_mode = cfg.run.research_mode or cfg.universe.mode != "catalog"
     s1 = StageStats("1_universe")
     with _Timer(s1):
-        universe = resolve_universe(
-            cfg, cli_tickers=cli_tickers, cli_watchlist_file=cli_watchlist_file
-        )
+        if cfg.universe.mode == "catalog":
+            universe, catalog = _resolve_catalog_universe(cfg, now)
+        else:
+            universe = resolve_universe(
+                cfg, cli_tickers=cli_tickers, cli_watchlist_file=cli_watchlist_file
+            )
+            catalog = _CatalogBundle(research_note="research mode: no contract catalog in play")
         s1.input_count = len(universe.symbols) + len(universe.dropped)
         s1.output_count = len(universe.symbols)
         for sym, reason in universe.dropped.items():
             s1.drop(reason)
         s1.notes.extend(universe.notes)
+        if catalog.notes:
+            s1.notes.extend(catalog.notes)
         if universe.error:
             s1.notes.append(universe.error)
     stages.append(s1)
-    logger.info("Stage 1 universe: %d symbols (%s mode)%s",
-                len(universe.symbols), universe.mode,
+    logger.info("Stage 1 universe: %d symbols (%s mode, research=%s)%s",
+                len(universe.symbols), universe.mode, research_mode,
                 f" ERROR: {universe.error}" if universe.error else "")
 
     # --- Stage 2: session + provider health --------------------------------
@@ -265,12 +374,25 @@ def run_pipeline(
     )
     with _Timer(s5):
         s5.input_count = len(universe.symbols) * len(cfg.horizons.minutes)
+        market_delay = float(
+            cfg.providers.known_delay_seconds.get(getattr(provider, "name", ""), 0.0)
+        )
         for sym in universe.symbols:
             series = series_by_symbol.get(sym)
             quality = quality_by_symbol.get(sym) or SeriesQuality(
                 symbol=sym, error_type=err.NO_INTRADAY_DATA
             )
-            liquidity = liquidity_by_symbol.get(sym) or assess_liquidity([], cfg)
+            instrument = catalog.instrument_by_symbol.get(sym)
+            asset_type = instrument.asset_type if instrument else "equity"
+            row_session = classify_session_for_asset(now, cfg.market_session, asset_type)
+            # Volume-based liquidity gates only where the feed carries real
+            # volume; other asset types skip them with a visible warning.
+            if asset_type in cfg.liquidity.enforce_for_asset_types:
+                liquidity = liquidity_by_symbol.get(sym) or assess_liquidity([], cfg)
+                liq_warning = None
+            else:
+                liquidity = LiquidityAssessment(ok=True, reasons=[])
+                liq_warning = "VOLUME_DATA_UNRELIABLE"
             sentiment_score = (
                 universe.sentiment_by_symbol.get(sym)
                 if cfg.sentiment.enabled else None
@@ -308,20 +430,43 @@ def run_pipeline(
                     if reference_time is not None
                     else now + timedelta(minutes=horizon)
                 )
+                contract_ctx = (
+                    build_contract_context(
+                        instrument,
+                        snapshot=catalog.snapshot,
+                        catalog_stale=catalog.stale,
+                        horizon_minutes=horizon,
+                        cfg=cfg.instrument_catalog,
+                        research_mode=research_mode,
+                        market_reference_price=quality.reference_price,
+                        now=now,
+                    )
+                    if catalog.snapshot is not None and instrument is not None
+                    else unknown_contract_context(research_mode=research_mode)
+                )
                 decision = decide_signal(
-                    scores, quality, session, liquidity, expiry_utc=expiry, cfg=cfg
+                    scores, quality, row_session, liquidity,
+                    expiry_utc=expiry, cfg=cfg,
+                    contract=contract_ctx,
+                    market_delay_seconds=market_delay,
+                    abnormal_market="ABNORMAL_RANGE" in vol_flags,
+                    asset_type=asset_type,
                 )
                 decision.warning_flags.extend(vol_flags)
+                if liq_warning:
+                    decision.warning_flags.append(liq_warning)
                 rows.append(_build_row(
                     run_id=run_id, generated_at=generated_at, symbol=sym,
                     company=universe.name_by_symbol.get(sym),
                     series=series, quality=quality, scores=scores,
-                    decision=decision, session_state=session.state,
+                    decision=decision, session_state=row_session.state,
                     interval=interval, reference_time=reference_time,
                     expiry=expiry if reference_time is not None else None,
                     horizon=horizon, payout_ratio=payout_ratio,
                     break_even=break_even, timezone_name=cfg.market_session.timezone,
                     feature_values=feature_values,
+                    contract=contract_ctx, instrument=instrument,
+                    market_delay_seconds=market_delay, now=now,
                 ))
         s5.output_count = len(rows)
         for r in rows:
@@ -396,16 +541,61 @@ def _build_row(
     *, run_id, generated_at, symbol, company, series, quality, scores,
     decision, session_state, interval, reference_time, expiry, horizon,
     payout_ratio, break_even, timezone_name, feature_values,
+    contract=None, instrument=None, market_delay_seconds=0.0, now=None,
 ) -> Dict[str, Any]:
+    # Contract-specific economics take precedence over the research-level
+    # global payout assumption; without a contract payout, break-even stays
+    # None rather than being fabricated from the config default.
+    row_payout = contract.payout_ratio if contract and contract.payout_ratio is not None else payout_ratio
+    row_break_even = (
+        round(break_even_win_probability(row_payout), 4)
+        if row_payout is not None else None
+    )
+    data_age = (
+        round(quality.data_age_seconds, 1)
+        if quality.data_age_seconds is not None else None
+    )
+    time_remaining = (
+        round(horizon * 60.0 - quality.data_age_seconds, 1)
+        if quality.data_age_seconds is not None else None
+    )
     return {
         "run_id": run_id,
         "generated_at": generated_at,
-        "symbol": symbol,
+        "analysis_timestamp": generated_at,
+        # --- underlying / contract identity ---
+        "symbol": symbol,                      # kept for compatibility
+        "underlying_symbol": symbol,
+        "underlying_name": (
+            (instrument.underlying_name if instrument else None) or company
+        ),
         "company_name": company,
-        "provider_symbol": getattr(series, "provider_symbol", None) if series else None,
+        "asset_type": instrument.asset_type if instrument else "equity",
+        "market": instrument.market if instrument else None,
+        "is_otc": bool(instrument.is_otc) if instrument else False,
+        "platform": instrument.platform if instrument else None,
+        "platform_asset_id": instrument.platform_asset_id if instrument else None,
+        "platform_asset_name": instrument.platform_asset_name if instrument else None,
+        "contract_id": instrument.contract_id if instrument else None,
+        "contract_status": instrument.contract_status if instrument else None,
+        "contract_available": bool(contract.contract_available) if contract else False,
+        "availability_known": bool(contract.availability_known) if contract else False,
+        # --- providers / provenance ---
+        "provider_symbol": (
+            (instrument.provider_symbol if instrument else None)
+            or (getattr(series, "provider_symbol", None) if series else None)
+        ),
         "provider": getattr(series, "provider", None) if series else None,
+        "market_data_provider": getattr(series, "provider", None) if series else None,
         "provider_status": getattr(series, "status", "error") if series else "error",
         "data_source": getattr(series, "data_source", None) if series else None,
+        "known_provider_delay_seconds": market_delay_seconds,
+        "catalog_provider": contract.catalog_provider if contract else None,
+        "catalog_age_seconds": (
+            round(contract.catalog_age_seconds, 1)
+            if contract and contract.catalog_age_seconds is not None else None
+        ),
+        # --- session / timing ---
         "market_state": session_state,
         "timezone": timezone_name,
         "interval": interval,
@@ -413,15 +603,37 @@ def _build_row(
             iso_utc(quality.latest_complete_close)
             if quality.latest_complete_close else None
         ),
-        "data_age_seconds": (
-            round(quality.data_age_seconds, 1)
-            if quality.data_age_seconds is not None else None
+        "latest_completed_candle_timestamp": (
+            iso_utc(quality.latest_complete_close)
+            if quality.latest_complete_close else None
         ),
+        "data_age_seconds": data_age,
+        "market_data_age_seconds": data_age,
         "reference_time": iso_utc(reference_time) if reference_time else None,
+        "reference_timestamp": iso_utc(reference_time) if reference_time else None,
         "reference_price": quality.reference_price,
+        "platform_reference_price": (
+            contract.platform_reference_price if contract else None
+        ),
+        "platform_quote_age_seconds": (
+            round(contract.platform_quote_age_seconds, 1)
+            if contract and contract.platform_quote_age_seconds is not None else None
+        ),
+        "absolute_quote_difference": (
+            contract.absolute_quote_difference if contract else None
+        ),
+        "relative_quote_difference_bps": (
+            contract.relative_quote_difference_bps if contract else None
+        ),
+        "quote_alignment_status": (
+            contract.quote_alignment_status if contract else "unavailable"
+        ),
         "horizon_minutes": horizon,
         "horizon_group": horizon_group(horizon),
         "expiry_time": iso_utc(expiry) if expiry else None,
+        "expiration_timestamp": iso_utc(expiry) if expiry else None,
+        "time_remaining_seconds": time_remaining,
+        # --- decision ---
         "recommended_action": decision.recommended_action,
         "signal": decision.signal,
         "call_score": scores.call_score,
@@ -429,8 +641,12 @@ def _build_row(
         "directional_score": scores.directional_score,
         "confidence_score": scores.confidence_score,
         "data_quality_score": quality.data_quality_score,
+        "liquidity_score": _liquidity_score(quality),
         "signal_validity": decision.signal_validity,
         "signal_strength": decision.signal_strength,
+        "ranking_validity": (
+            "actionable" if decision.signal != SIGNAL_NO_TRADE else "excluded"
+        ),
         "contradiction_ratio": scores.contradiction_ratio,
         "feature_coverage": scores.feature_coverage,
         "vol_regime_factor": scores.vol_regime_factor,
@@ -443,13 +659,29 @@ def _build_row(
         "feature_values": dict(feature_values),
         "missing_candle_count": quality.missing_count,
         "duplicate_candle_count": quality.duplicate_count,
-        "payout_ratio": payout_ratio,
-        "break_even_win_probability": break_even,
+        # --- contract economics (payout ratio = net profit per unit staked) ---
+        "payout_ratio": row_payout,
+        "payout_source": (
+            contract.payout_source
+            if contract and contract.payout_ratio is not None
+            else ("config" if payout_ratio is not None else None)
+        ),
+        "payout_timestamp": contract.payout_timestamp if contract else None,
+        "break_even_win_probability": row_break_even,
         # Always None in this milestone; the output validator errors otherwise.
         "calibrated_probability": None,
         "expected_edge": None,
         "run_status": None,  # filled after run-status assessment
     }
+
+
+def _liquidity_score(quality: SeriesQuality) -> float:
+    """Bounded 0-100 liquidity indicator: penalizes zero-volume bars only.
+
+    A fuller dollar-volume percentile model needs cross-sectional context this
+    per-symbol pipeline does not have; the honest bounded proxy is the share
+    of bars that actually traded."""
+    return round(100.0 * (1.0 - min(1.0, quality.zero_volume_ratio)), 1)
 
 
 def _rank_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

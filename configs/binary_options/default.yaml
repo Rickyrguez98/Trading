@@ -15,12 +15,18 @@ run:
   processed_dir: data/binary_options/processed
 
 universe:
+  # "catalog"         -- DEFAULT: instruments come from the verified platform
+  #                      catalog (instrument_catalog.path). Without a catalog,
+  #                      every row is NO_TRADE (INSTRUMENT_AVAILABILITY_UNKNOWN).
+  # The following modes analyze GENERIC symbols and therefore require
+  # run.research_mode: true -- market data for a symbol never implies an
+  # available binary-options contract:
   # "custom"          -- the explicit `tickers` list (or --tickers on the CLI)
-  # "watchlist"       -- the configured `watchlist` (or --watchlist file); DEFAULT.
+  # "watchlist"       -- the configured `watchlist` (or --watchlist file)
   # "asset-selection" -- consume the equity pipeline's output CSV as an upstream
   #                      universe/quality filter. A strong fundamental score is
   #                      NOT treated as a predictor of 5-minute direction.
-  mode: watchlist
+  mode: catalog
   tickers: []
   watchlist: [AAPL, MSFT, NVDA, SPY]
   watchlist_file: null
@@ -71,6 +77,12 @@ market_session:
 providers:
   intraday: yfinance          # default free provider (delayed; documented limits)
   priority: []                # ordered fallback chain; only implemented providers
+  # Known structural feed delay per provider (seconds). Yahoo intraday data is
+  # ~15 minutes delayed and is NOT real-time: with the default gates this
+  # honestly rejects 5/10/15-minute signals (DATA_NOT_REAL_TIME) while longer
+  # research horizons remain analyzable.
+  known_delay_seconds:
+    yfinance: 900
 
 instrument_catalog:
   # Path to YOUR verified platform catalog (YAML or CSV). See
@@ -106,6 +118,9 @@ liquidity:
   min_avg_volume: 10000            # shares per bar (rolling mean)
   min_avg_dollar_volume: 250000    # close * volume per bar
   max_zero_volume_ratio: 0.20      # bars with zero volume / total bars
+  # Volume gates only apply where the feed carries real volume; other asset
+  # types (e.g. forex, index) skip them with a VOLUME_DATA_UNRELIABLE warning.
+  enforce_for_asset_types: [equity, etf, cryptocurrency]
 
 data_quality:
   max_missing_ratio: 0.10          # missing bars / expected bars
@@ -115,6 +130,8 @@ data_quality:
   max_abnormal_bar_return: 0.20
   # Rows below this data-quality score (0-100) cannot carry a live signal.
   min_data_quality_score: 60
+  # Known provider delay above this fraction of the horizon -> DATA_NOT_REAL_TIME.
+  max_known_delay_fraction_of_horizon: 0.5
 
 features:
   # Windows are in BARS. Momentum lookbacks scale with the horizon:
@@ -174,6 +191,10 @@ signal_rules:
   moderate_min_directional: 25
   # Confidence multiplier floor under abnormal volatility regimes.
   vol_regime_floor: 0.50
+  # An abnormal-range bar blocks the row (ABNORMAL_MARKET_CONDITION).
+  block_on_abnormal_range: true
+  # Minimum fraction of the horizon that must remain at the reference price.
+  min_time_remaining_fraction: 0.75
 
 sentiment:
   # Optional and strictly secondary. Only source in this milestone: the equity

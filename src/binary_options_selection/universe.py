@@ -74,6 +74,13 @@ def resolve_universe(
     dropped: Dict[str, str] = {}
     result = UniverseResult(mode=mode)
 
+    if mode == "catalog":
+        result.error = (
+            "universe.mode 'catalog' is resolved by the pipeline from the "
+            "instrument catalog; resolve_universe only handles research modes"
+        )
+        return result
+
     if mode == "custom":
         raw = list(cli_tickers or cfg.universe.tickers)
         if not raw:

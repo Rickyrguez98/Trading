@@ -120,7 +120,7 @@ def test_partial_run_when_one_symbol_fails(tmp_path):
     assert a.run_status == RUN_PARTIAL, a.reasons
     gone_rows = [r for r in res["rows"] if r["symbol"] == "GONE"]
     assert len(gone_rows) == 2  # never silently dropped
-    assert all(r["signal"] == "NO_TRADE" and r["no_trade_reason"] == "PROVIDER_COVERAGE"
+    assert all(r["signal"] == "NO_TRADE" and r["no_trade_reason"] == "PROVIDER_UNAVAILABLE"
                for r in gone_rows)
 
 
@@ -163,7 +163,7 @@ def test_stale_data_produces_no_trade_not_fake_signal(tmp_path):
     })
     res = run_pipeline(cfg, provider=provider, now=NOW)
     row = res["rows"][0]
-    assert row["signal"] == "NO_TRADE" and row["no_trade_reason"] == "STALE_DATA"
+    assert row["signal"] == "NO_TRADE" and row["no_trade_reason"] == "STALE_MARKET_DATA"
     assert row["signal_validity"] == "invalid"
     assert row["data_age_seconds"] > 3600
 

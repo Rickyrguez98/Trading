@@ -26,6 +26,9 @@ def make_config(**overrides) -> BinaryOptionsConfig:
     cfg = load_config({})  # dataclass defaults; validated
     cfg.cache.enabled = False
     cfg.robustness.run_health_check = False
+    # The scripted in-memory feed is instantaneous; the real yfinance delay
+    # gate has its own dedicated tests.
+    cfg.providers.known_delay_seconds = {}
     for dotted, value in overrides.items():
         section, attr = dotted.split(".", 1)
         setattr(getattr(cfg, section), attr, value)
@@ -110,7 +113,7 @@ class ScriptedProvider(IntradayCandlesProvider):
         self.calls: List[str] = []
 
     def fetch(self, symbol, *, interval, bars, include_extended_hours=False,
-              ttl_seconds=None) -> IntradaySeries:
+              ttl_seconds=None, provider_symbol=None) -> IntradaySeries:
         self.calls.append(symbol)
         if symbol in self.scripts:
             return self.scripts[symbol]()
