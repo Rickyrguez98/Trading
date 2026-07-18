@@ -8,7 +8,7 @@ is intentionally written in two passes:
   listed below and references this document.
 
 > Scope reminder: this repository is **asset selection only**, not asset
-> allocation, not backtesting, not execution. See `docs/FUTURE_ROADMAP.md`.
+> allocation, not backtesting, not execution. See `../roadmap.md`.
 
 ---
 
@@ -165,7 +165,7 @@ least:
 3. Risk parity using the historical covariance the prices provider already
    has access to.
 
-See `docs/FUTURE_ROADMAP.md` for the longer plan.
+See `../roadmap.md` for the longer plan.
 
 ---
 
@@ -270,4 +270,4 @@ free-data choice:
 Unchanged: **asset allocation**. The per-ticker `final_score`, sub-scores,
 risk_penalty, and now `top_driver_pillar` / `top_drag_pillar` give an
 allocator everything it needs (signal + risk hint + explainability) without
-any further refactor. See `docs/FUTURE_ROADMAP.md`.
+any further refactor. See `../roadmap.md`.

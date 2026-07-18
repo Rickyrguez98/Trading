@@ -36,7 +36,7 @@ from binary_options_selection.signals.payout import (
 )
 from binary_options_selection.validation.candles import assess_series
 
-from tests.bo_fixtures import (
+from tests.binary_options.bo_fixtures import (
     INTERVAL_SEC,
     NOW,
     downtrend,

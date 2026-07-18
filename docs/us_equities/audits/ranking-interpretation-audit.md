@@ -3,7 +3,7 @@
 _Decision-quality + reporting review of the asset-selection output, before the
 "research ranking vs. allocation eligibility" milestone._
 
-> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.
+> Research output only. Not financial advice. See `../../shared/disclaimer.md`.
 
 ## Why this audit exists
 

@@ -162,7 +162,7 @@ def temp_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # The pipeline writes to relative paths under cwd. Move there.
     monkeypatch.chdir(tmp_path)
     # Copy the default config so the pipeline can load it from the tmp cwd.
-    src_cfg = (Path(__file__).resolve().parent.parent
+    src_cfg = (Path(__file__).resolve().parent.parent.parent
                / "configs" / "us_equities" / "default.yaml")
     (tmp_path / "configs" / "us_equities").mkdir(parents=True)
     shutil.copy(src_cfg, tmp_path / "configs" / "us_equities" / "default.yaml")

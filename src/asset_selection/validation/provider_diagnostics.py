@@ -256,7 +256,7 @@ def _render_markdown(diag: Dict[str, Any]) -> str:
         "",
         f"_Generated: {diag.get('generated_at')}_",
         "",
-        "> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.",
+        "> Research output only. Not financial advice. See `docs/shared/disclaimer.md`.",
         "",
         f"## Run status: {rs}",
         "",

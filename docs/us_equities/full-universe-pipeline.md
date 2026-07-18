@@ -149,7 +149,7 @@ final_score = w_fund * F + w_growth * G + w_quality * Q + w_valuation * V
 Defaults make fundamentals dominate sentiment (asserted by the test
 `test_fundamentals_dominate_sentiment_at_default_weights`). The
 `risk_penalty` blends liquidity, momentum, vol, and missing-data
-contributions; see [docs/ARCHITECTURE.md](ARCHITECTURE.md) for the math.
+contributions; see [architecture.md](architecture.md) for the math.
 
 Every row carries:
 

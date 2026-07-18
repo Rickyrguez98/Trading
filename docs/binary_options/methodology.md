@@ -2,7 +2,7 @@
 
 > Research output only. Not financial advice. Scores are transparent
 > heuristics, **not** calibrated probabilities. See
-> [`BINARY_OPTIONS_LIMITATIONS.md`](BINARY_OPTIONS_LIMITATIONS.md).
+> [`limitations.md`](limitations.md).
 
 This document records every formula and threshold that materially affects a
 signal. Defaults live in [`configs/binary_options_config.yaml`](../configs/binary_options_config.yaml)

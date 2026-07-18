@@ -7,8 +7,8 @@ Markdown + JSON outputs), using only free / public APIs by default:
 
 | Module | Package | Question it answers | Docs |
 |---|---|---|---|
-| **1. Equity Asset Selection** | `asset_selection` | Which U.S. common stocks look attractive on fundamentals, growth, valuation, quality, and news sentiment? | this README (below), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| **2. Binary Options Selection** | `binary_options_selection` | For a given underlying and a 5–120 minute expiration, does intraday evidence favor CALL, PUT, or NO_TRADE? | [Module 2 section](#module-2--binary-options-selection-intraday-research-signals), [docs/BINARY_OPTIONS_ARCHITECTURE.md](docs/BINARY_OPTIONS_ARCHITECTURE.md) |
+| **1. Equity Asset Selection** | `asset_selection` | Which U.S. common stocks look attractive on fundamentals, growth, valuation, quality, and news sentiment? | this README (below), [docs/us_equities/architecture.md](docs/us_equities/architecture.md) |
+| **2. Binary Options Selection** | `binary_options_selection` | For a given underlying and a 5–120 minute expiration, does intraday evidence favor CALL, PUT, or NO_TRADE? | [Module 2 section](#module-2--binary-options-selection-intraday-research-signals), [docs/binary_options/architecture.md](docs/binary_options/architecture.md) |
 
 Shared generic infrastructure lives in `src/trading_common/`. The modules do
 not depend on each other's logic — the only optional link is that Module 2 can
@@ -16,7 +16,7 @@ consume Module 1's output CSV as an upstream universe/quality filter.
 
 > **Disclaimer.** This project is for research and educational purposes only.
 > It is **not** financial advice. It does **not** place trades, connect to any
-> brokerage, or promise any returns. See [docs/DISCLAIMER.md](docs/DISCLAIMER.md).
+> brokerage, or promise any returns. See [docs/shared/disclaimer.md](docs/shared/disclaimer.md).
 
 ---
 
@@ -47,7 +47,7 @@ shortlist of candidates that look attractive on both **company quality** and
 - Risk parity, mean-variance optimization, factor models.
 - Backtesting, walk-forward analysis, transaction-cost modeling.
 
-These are sketched in [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md) and have
+These are sketched in [docs/us_equities/roadmap.md](docs/us_equities/roadmap.md) and have
 placeholder modules (`src/asset_selection/{allocation,backtesting,risk}/`) that
 the current pipeline does **not** depend on.
 
@@ -61,12 +61,12 @@ the current pipeline does **not** depend on.
 | Fundamentals  | `yfinance` (Yahoo Finance, unofficial)      | Unofficial API; rate-limited; some fields are best-effort; no SLA. Empty responses are recorded as `status="empty"`, not silently treated as illiquidity. |
 | Prices        | `yfinance`, with a **Stooq** CSV backup     | yfinance is unofficial/rate-limited; Stooq is a keyless fallback that fires when yfinance fails. Used for liquidity filters, not for execution decisions. |
 | News          | `yfinance` news endpoint                    | Caps at ~10 articles/ticker from a narrow set of sources. Duplicates and stale items are detected and down-weighted; breadth is still limited. Replaceable provider. **A news outage never invalidates a ranking** — it only lowers sentiment confidence. |
-| Sentiment     | VADER (lexicon-based), FinBERT (optional)   | VADER is general-purpose and **not** finance-tuned; its confidence is capped below FinBERT's. FinBERT (`ProsusAI/finbert`) is finance-tuned and plug-compatible (`pip install '.[finbert]'`). A `comparison` mode runs both and reports their disagreement; FinBERT is never required and never fabricated. See [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md). |
+| Sentiment     | VADER (lexicon-based), FinBERT (optional)   | VADER is general-purpose and **not** finance-tuned; its confidence is capped below FinBERT's. FinBERT (`ProsusAI/finbert`) is finance-tuned and plug-compatible (`pip install '.[finbert]'`). A `comparison` mode runs both and reports their disagreement; FinBERT is never required and never fabricated. See [`docs/us_equities/sentiment-models.md`](docs/us_equities/sentiment-models.md). |
 
 All providers implement a common interface so paid or alternative sources
 (Finnhub, AlphaVantage, FMP, NewsAPI, MarketAux, SEC EDGAR direct, FinBERT)
 can be swapped in without changing the pipeline. See
-[docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
+[docs/us_equities/data-sources.md](docs/us_equities/data-sources.md).
 
 ---
 
@@ -131,7 +131,7 @@ pip install -e ".[finbert]"          # adds torch + transformers
 
 If these extras are absent, anything that asks for FinBERT degrades to VADER
 and says so (flags `FINBERT_UNAVAILABLE` / `VADER_ONLY_SENTIMENT`) — it never
-fabricates a FinBERT score. Full guide: [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md).
+fabricates a FinBERT score. Full guide: [`docs/us_equities/sentiment-models.md`](docs/us_equities/sentiment-models.md).
 
 > **Note on `tabulate`.** The Markdown reports use pandas' `.to_markdown()`,
 > which needs `tabulate`. It is included in the dev extras; if you used the
@@ -139,7 +139,7 @@ fabricates a FinBERT score. Full guide: [`docs/SENTIMENT_MODELS.md`](docs/SENTIM
 
 ## Configuration
 
-Default config: [`configs/default_config.yaml`](configs/default_config.yaml).
+Default config: [`configs/us_equities/default.yaml`](configs/us_equities/default.yaml).
 Copy and edit it to change weights, universe limits, sentiment model, etc.
 
 Optional API keys go in `.env` — none are required for the default pipeline.
@@ -152,12 +152,12 @@ The pipeline has three modes, selected by `--universe`:
 
 ```bash
 python -m asset_selection.pipelines.run_asset_selection \
-    --config configs/default_config.yaml --top 20
+    --config configs/us_equities/default.yaml --top 20
 ```
 
 Runs the entire cleaned U.S. common-stock universe (~4 700 names across
 NASDAQ + NYSE + NYSE American + NYSE Arca + BATS + IEX) through the staged
-funnel — see [docs/FULL_UNIVERSE_PIPELINE.md](docs/FULL_UNIVERSE_PIPELINE.md).
+funnel — see [docs/us_equities/full-universe-pipeline.md](docs/us_equities/full-universe-pipeline.md).
 This is the right mode for a real ranking. It takes a while because
 yfinance is rate-limited; the staged funnel keeps news fetches bounded.
 
@@ -165,7 +165,7 @@ yfinance is rate-limited; the staged funnel keeps news fetches bounded.
 
 ```bash
 python -m asset_selection.pipelines.run_asset_selection \
-    --config configs/default_config.yaml --universe sample --limit 50 --top 10
+    --config configs/us_equities/default.yaml --universe sample --limit 50 --top 10
 ```
 
 `--limit` only applies in sample mode; the rest of the funnel still runs.
@@ -216,14 +216,14 @@ Whichever you pick, sentiment stays a **bounded, secondary** input — it can
 never out-weigh fundamentals (enforced by the `sentiment_dominance`
 validation check). FinBERT chooses its device automatically
 (`auto → cuda → mps → cpu`; override with `sentiment.finbert_device`). See
-[`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md) for the full matrix of
+[`docs/us_equities/sentiment-models.md`](docs/us_equities/sentiment-models.md) for the full matrix of
 modes, flags, agreement categories, and outputs.
 
 ### All flags
 
 | Flag                                 | Meaning |
 |--------------------------------------|---------|
-| `--config PATH`                      | Path to YAML config (default `configs/default_config.yaml`). |
+| `--config PATH`                      | Path to YAML config (default `configs/us_equities/default.yaml`). |
 | `--universe full \| sample \| custom`| Universe mode. Defaults to the YAML's `run.mode`, which is `full`. |
 | `--limit N`                          | **Sample mode only.** Cap stage-1 universe at N. Ignored in full/custom mode (warning logged). |
 | `--tickers AAPL MSFT …`              | Custom mode shortcut. Always overrides `--universe`. |
@@ -349,7 +349,7 @@ The code is the ultimate authority; this is the explained-to-a-human view.
 - VADER (default) or FinBERT (optional, `pip install '.[finbert]'`) scores
   each remaining article on `[-1, +1]`. A **comparison mode** runs both and
   reports their disagreement without ever fabricating a FinBERT result — see
-  [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md) for VADER vs FinBERT,
+  [`docs/us_equities/sentiment-models.md`](docs/us_equities/sentiment-models.md) for VADER vs FinBERT,
   installing the extras, and running `vader` / `finbert` / `comparison`.
 - Per ticker we compute:
   - **average compound** sentiment,
@@ -385,7 +385,7 @@ The code is the ultimate authority; this is the explained-to-a-human view.
   optional extras are missing — `FINBERT_UNAVAILABLE` / `VADER_ONLY_SENTIMENT`.
   FinBERT is **never required** and **never fabricated**: if `transformers` /
   `torch` are not installed the run degrades to VADER and says so. Full guide:
-  [`docs/SENTIMENT_MODELS.md`](docs/SENTIMENT_MODELS.md).
+  [`docs/us_equities/sentiment-models.md`](docs/us_equities/sentiment-models.md).
 
 ### 2. How historical prices are used
 - The price provider (`yfinance` by default) downloads `lookback_days` of
@@ -437,7 +437,7 @@ final_score =
 ```
 
 All weights live under `composite.weights` in
-[`configs/default_config.yaml`](configs/default_config.yaml). Defaults make
+[`configs/us_equities/default.yaml`](configs/us_equities/default.yaml). Defaults make
 fundamentals + pillar weights dominate sentiment (asserted by the test
 `test_fundamentals_dominate_sentiment_at_default_weights`). The final score
 is clipped to `[0, 100]` and ties break by `fundamentals_score` then
@@ -788,7 +788,7 @@ is designed to feed a future allocation / rebalancing milestone:
 
 The placeholder packages `src/asset_selection/{allocation,backtesting,risk}/`
 mark where that work will live. They are **not** wired into the current
-pipeline — see [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md).
+pipeline — see [docs/us_equities/roadmap.md](docs/us_equities/roadmap.md).
 
 ---
 
@@ -879,7 +879,7 @@ probability; the output validator errors if a probability or expected edge
 ever appears without a calibrated model (none exists in this milestone). With
 a configured payout ratio `r`, the break-even win probability `1/(1+r)` is
 reported as **context only**. Formulas:
-[docs/BINARY_OPTIONS_METHODOLOGY.md](docs/BINARY_OPTIONS_METHODOLOGY.md).
+[docs/binary_options/methodology.md](docs/binary_options/methodology.md).
 
 ## Data requirements and honesty
 
@@ -890,7 +890,7 @@ reported as **context only**. Formulas:
   fine for research, not for live timing; the staleness gate turns stale rows
   into `NO_TRADE (STALE_DATA)` honestly. Providers are replaceable via the
   `IntradayCandlesProvider` registry
-  ([docs/BINARY_OPTIONS_DATA_SOURCES.md](docs/BINARY_OPTIONS_DATA_SOURCES.md)).
+  ([docs/binary_options/data-sources.md](docs/binary_options/data-sources.md)).
 - UTC timestamps internally; regular market hours by default (extended hours
   opt-in); in-progress candles are dropped unless explicitly configured and
   are never cached; interval-aware cache TTLs.
@@ -953,9 +953,9 @@ connectivity, no order placement, no credentials, no stake sizing, and no
 martingale/loss-recovery logic — binary options are high-risk instruments and
 an unvalidated signal must not be wired to money. Known limitations (delayed
 data, no holiday calendar, unmeasured accuracy):
-[docs/BINARY_OPTIONS_LIMITATIONS.md](docs/BINARY_OPTIONS_LIMITATIONS.md);
+[docs/binary_options/limitations.md](docs/binary_options/limitations.md);
 future evaluation/calibration milestones:
-[docs/BINARY_OPTIONS_ROADMAP.md](docs/BINARY_OPTIONS_ROADMAP.md).
+[docs/binary_options/roadmap.md](docs/binary_options/roadmap.md).
 
 ## License
 

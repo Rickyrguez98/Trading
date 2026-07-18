@@ -30,7 +30,7 @@ from binary_options_selection.utils.timeutils import (
 from binary_options_selection.validation.candles import assess_series
 from trading_common.cache import Cache
 
-from tests.bo_fixtures import NOW, flat, make_candles, make_config, make_series
+from tests.binary_options.bo_fixtures import NOW, flat, make_candles, make_config, make_series
 
 # ---------------------------------------------------------------------------
 # timeutils

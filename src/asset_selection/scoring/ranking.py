@@ -183,7 +183,7 @@ def format_top_candidates_markdown(df: pd.DataFrame, top_n: int = 25) -> str:
     watch = df[bucket == "watchlist_only"] if bucket is not None else df.iloc[0:0]
 
     md = ["# Asset Selection — Research Ranking & Allocation Shortlist", ""]
-    md.append("> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.")
+    md.append("> Research output only. Not financial advice. See `docs/shared/disclaimer.md`.")
     md.append("")
     md.append("This report answers two different questions, kept deliberately separate:")
     md.append("")

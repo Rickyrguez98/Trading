@@ -61,7 +61,7 @@ Structural classification from the exchange-local clock
 (`America/New_York` by default; regular 09:30–16:00, pre-market from 04:00,
 after-hours to 20:00). **No exchange holiday calendar** in this milestone —
 on holidays the staleness gate is what protects the signal (documented in
-[`BINARY_OPTIONS_LIMITATIONS.md`](BINARY_OPTIONS_LIMITATIONS.md)).
+[`limitations.md`](limitations.md)).
 
 ## Rate limits & terms
 

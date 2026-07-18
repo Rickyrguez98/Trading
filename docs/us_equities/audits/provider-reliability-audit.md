@@ -5,7 +5,7 @@ robustness plan so the pipeline distinguishes **partial ticker failures** from
 **systemic provider failures**, continues when possible, and **refuses to
 present a trusted ranking when data coverage is insufficient**._
 
-> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.
+> Research output only. Not financial advice. See `../../shared/disclaimer.md`.
 
 This document answers the five critical questions, records what the code does
 **today** (commit baseline `49696fd`), and lays out the staged plan that the
@@ -45,7 +45,7 @@ prices under a systemic Yahoo block.
 SEC EDGAR (XBRL company facts), Finnhub, FMP, or Alpha Vantage can be plugged in
 later **without paid keys required to run**. The generic `FallbackProvider`
 works for fundamentals the moment a second provider is registered. A documented
-implementation guide lives in `docs/DATA_SOURCES.md`.
+implementation guide lives in `../data-sources.md`.
 
 ### Q3 — Is news a separate provider, or also yfinance?
 

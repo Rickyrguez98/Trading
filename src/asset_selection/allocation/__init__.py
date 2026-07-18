@@ -3,7 +3,7 @@
 This package is intentionally a stub. The current asset-selection pipeline
 does not import anything from here.
 
-Planned (see ``docs/FUTURE_ROADMAP.md``):
+Planned (see ``docs/us_equities/roadmap.md``):
     * equal-weight top-K
     * score-weighted with per-name and per-sector caps
     * risk parity

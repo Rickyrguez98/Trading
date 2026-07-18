@@ -1424,7 +1424,7 @@ def render_sentiment_model_note(sentiment_summary: Optional[Dict[str, Any]]) -> 
         "",
         "> Sentiment is bounded and confidence-adjusted, so fundamentals remain "
         "the dominant driver of `final_score` by default. See "
-        "`docs/SENTIMENT_MODELS.md`.",
+        "`docs/us_equities/sentiment-models.md`.",
         "",
         "",
     ]

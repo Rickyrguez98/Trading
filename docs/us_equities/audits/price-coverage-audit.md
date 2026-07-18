@@ -4,7 +4,7 @@ _Data-quality review of the Stage-2 price funnel: why important liquid tickers c
 be dropped, and what structured fallback should happen before classifying a name
 as `NO_PRICE_DATA`._
 
-> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.
+> Research output only. Not financial advice. See `../../shared/disclaimer.md`.
 
 ## Why this audit exists
 

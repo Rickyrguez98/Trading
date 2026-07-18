@@ -1,6 +1,6 @@
 # Sentiment Models — VADER, FinBERT, Comparison, and Ensemble
 
-> Research output only. Not financial advice. See [`DISCLAIMER.md`](DISCLAIMER.md).
+> Research output only. Not financial advice. See [`../shared/disclaimer.md`](../shared/disclaimer.md).
 
 This pipeline scores news **headlines + summaries** per ticker and rolls them up
 into a single `sentiment_score` on a `0..100` scale (50 = neutral). Two backends

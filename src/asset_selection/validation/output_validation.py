@@ -572,7 +572,7 @@ def _render_markdown(report: Dict[str, Any]) -> str:
         "",
         f"_Generated: {report.get('generated_at')}_",
         "",
-        "> Research output only. Not financial advice. See `docs/DISCLAIMER.md`.",
+        "> Research output only. Not financial advice. See `docs/shared/disclaimer.md`.",
         "",
         f"**Overall status: {status}** "
         f"({report.get('n_errors', 0)} error(s), "

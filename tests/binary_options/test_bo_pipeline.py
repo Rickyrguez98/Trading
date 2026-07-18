@@ -19,7 +19,7 @@ from binary_options_selection.validation.run_status import (
     RUN_VALID,
 )
 
-from tests.bo_fixtures import (
+from tests.binary_options.bo_fixtures import (
     NOW,
     ScriptedProvider,
     downtrend,

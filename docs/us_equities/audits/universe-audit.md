@@ -131,7 +131,7 @@ This makes it impossible to tell, from the report alone, whether the
 
 ## What is **not** in scope for this review
 
-- Asset allocation, position sizing — still in `docs/FUTURE_ROADMAP.md`.
+- Asset allocation, position sizing — still in `../roadmap.md`.
 - Replacing yfinance with a paid provider — the goal is to stay free.
 - Point-in-time fundamentals — needed only when backtesting starts.
 - A second universe source (SEC EDGAR direct, IEX cloud) — the NASDAQ
@@ -167,7 +167,7 @@ Each gap from §3 below now points to the commit that closed it.
   carries `exchange_breakdown`).
 - Verified empirically: NASDAQ 5495 + NYSE 2926 + NYSE Arca 2657 +
   BATS 1398 + NYSE American 319 + IEX 3.
-- README and `docs/FULL_UNIVERSE_PIPELINE.md` now both say so.
+- README and `../full-universe-pipeline.md` now both say so.
 
 ### F3 — Exchange whitelist + include knobs
 **Closed by:** `fix: expand ticker universe across US exchanges`.

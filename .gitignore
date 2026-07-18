@@ -40,17 +40,28 @@ htmlcov/
 # Notebook checkpoints
 .ipynb_checkpoints/
 
-# Project data (do not commit)
+# Project data (do not commit) -- domain-separated layout
+data/*/input/*
+data/*/raw/*
+data/*/processed/*
+data/*/cache/*
+!data/*/input/.gitkeep
+!data/*/raw/.gitkeep
+!data/*/processed/.gitkeep
+!data/*/cache/.gitkeep
+# legacy flat layout (still ignored if present locally)
 data/raw/*
 data/processed/*
 data/cache/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/cache/.gitkeep
 
 # Reports (generated)
 reports/*
-!reports/.gitkeep
+!reports/us_equities/
+!reports/binary_options/
+reports/us_equities/*
+reports/binary_options/*
+!reports/us_equities/.gitkeep
+!reports/binary_options/.gitkeep
 
 # Logs
 logs/

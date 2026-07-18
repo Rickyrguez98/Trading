@@ -191,4 +191,4 @@ run is visually and machine-readably distinct from a valid one (banner +
 * Full historical replay / walk-forward backtesting (a small, isolated
   label-generation utility exists for future evaluation only).
 
-These are documented as future milestones in `docs/BINARY_OPTIONS_ROADMAP.md`.
+These are documented as future milestones in `roadmap.md`.
