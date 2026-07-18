@@ -295,7 +295,10 @@ def test_cli_parser_has_only_implemented_flags():
     assert flags == {
         "-h", "--config", "--tickers", "--watchlist", "--universe",
         "--asset-selection-input", "--horizons", "--interval", "--top",
-        "--provider", "--refresh-cache", "--no-cache", "--output-dir",
+        "--provider", "--instrument-catalog", "--catalog-provider",
+        "--platform", "--asset-types", "--exclude-otc", "--allow-otc",
+        "--research-mode", "--validate-catalog-only",
+        "--refresh-cache", "--no-cache", "--output-dir",
         "--log-level", "--health-check-only", "--allow-extended-hours",
         "--allow-partial-results", "--no-partial-results",
     }

@@ -846,8 +846,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", default=None,
                    help=f"Candle interval; one of {sorted(SUPPORTED_INTERVALS)}.")
     p.add_argument("--top", type=int, default=None, help="Top-N rows in the Markdown report.")
-    p.add_argument("--provider", default=None,
-                   help="Intraday provider name (default from YAML; 'yfinance').")
+    p.add_argument("--provider", "--market-data-provider", dest="provider",
+                   default=None,
+                   help="Intraday market-data provider (default from YAML; 'yfinance').")
+    p.add_argument("--instrument-catalog", default=None, metavar="PATH",
+                   help="Path to YOUR verified platform catalog (YAML/CSV); see "
+                        "configs/binary_options/instruments.example.yaml.")
+    p.add_argument("--catalog-provider", choices=["auto", "yaml", "csv"],
+                   default=None, help="Catalog file format (default: auto by extension).")
+    p.add_argument("--platform", default=None,
+                   help="Only analyze catalog instruments for this platform.")
+    p.add_argument("--asset-types", nargs="+", default=None, metavar="TYPE",
+                   help="Only analyze these asset types (equity etf forex index "
+                        "commodity cryptocurrency).")
+    otc = p.add_mutually_exclusive_group()
+    otc.add_argument("--exclude-otc", dest="exclude_otc", action="store_true",
+                     default=None, help="Exclude OTC contracts (default).")
+    otc.add_argument("--allow-otc", dest="exclude_otc", action="store_false",
+                     help="Analyze OTC contracts too (rows carry an OTC warning).")
+    p.add_argument("--research-mode", action="store_true",
+                   help="Explicit research analysis: relaxes contract-availability "
+                        "requirements (generic watchlists, missing payout data). "
+                        "Rows are visibly marked; nothing becomes actionable "
+                        "without a verified catalog.")
+    p.add_argument("--validate-catalog-only", action="store_true",
+                   help="Validate the instrument catalog schema/freshness, print "
+                        "the report, and exit (2 on fatal problems).")
     p.add_argument("--refresh-cache", action="store_true",
                    help="Invalidate the intraday cache before running.")
     p.add_argument("--no-cache", action="store_true", help="Disable the cache entirely.")
@@ -892,6 +916,18 @@ def _apply_cli_overrides(cfg: BinaryOptionsConfig, args: argparse.Namespace) -> 
         cfg.run.top_n = args.top
     if args.provider:
         cfg.providers.intraday = args.provider
+    if args.instrument_catalog:
+        cfg.instrument_catalog.path = args.instrument_catalog
+    if args.catalog_provider:
+        cfg.instrument_catalog.provider = args.catalog_provider
+    if args.platform:
+        cfg.instrument_catalog.platform = args.platform
+    if args.asset_types:
+        cfg.instrument_catalog.asset_types = args.asset_types
+    if args.exclude_otc is not None:
+        cfg.instrument_catalog.exclude_otc = args.exclude_otc
+    if args.research_mode:
+        cfg.run.research_mode = True
     if args.output_dir:
         cfg.run.output_dir = args.output_dir
     if args.no_cache:
@@ -903,6 +939,40 @@ def _apply_cli_overrides(cfg: BinaryOptionsConfig, args: argparse.Namespace) -> 
     if args.allow_partial is not None:
         cfg.robustness.allow_partial_results = args.allow_partial
     return validate_config(cfg)
+
+
+def _validate_catalog_cli(cfg: BinaryOptionsConfig) -> int:
+    """--validate-catalog-only: schema/freshness report, exit 2 on fatal problems."""
+    ic = cfg.instrument_catalog
+    if not ic.path:
+        print("No instrument catalog configured. Pass --instrument-catalog PATH "
+              "or set instrument_catalog.path in the YAML.", file=sys.stderr)
+        return 2
+    try:
+        snapshot = build_catalog_provider(ic.path, ic.provider).get_available_instruments(
+            platform=ic.platform
+        )
+    except CatalogError as exc:
+        print(f"Catalog unusable: {exc}", file=sys.stderr)
+        return 2
+    result = validate_catalog(snapshot, ic, now=utc_now())
+    print(f"Catalog: {ic.path}")
+    print(f"  platform:    {snapshot.platform}")
+    print(f"  instruments: {len(snapshot.instruments)}")
+    age = f"{result.age_seconds:.0f}s" if result.age_seconds is not None else "unknown"
+    print(f"  age:         {age} (stale: {result.stale})")
+    for prob in result.problems:
+        print(f"  PROBLEM: {prob}")
+    for warn in result.warnings:
+        print(f"  warning: {warn}")
+    for aid, issues in result.instrument_issues.items():
+        for issue in issues:
+            print(f"  {aid}: {issue}")
+    if result.ok:
+        print("Catalog schema: OK")
+        return 0
+    print("Catalog schema: FAILED", file=sys.stderr)
+    return 2
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -934,6 +1004,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ValueError as exc:
         print(f"Provider error: {exc}", file=sys.stderr)
         return 2
+
+    if args.validate_catalog_only:
+        return _validate_catalog_cli(cfg)
 
     if args.health_check_only:
         summary = run_intraday_health_check(provider, cfg)
