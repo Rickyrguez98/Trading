@@ -1,5 +1,12 @@
 # Architecture
 
+> This document covers **Module 1 (equity asset selection,
+> `src/asset_selection/`)**. The intraday binary-options module has its own
+> architecture document: [`BINARY_OPTIONS_ARCHITECTURE.md`](BINARY_OPTIONS_ARCHITECTURE.md).
+> Generic infrastructure shared by both modules (cache, rate limiter, IO
+> helpers, transport error taxonomy) lives in `src/trading_common/`, with
+> backward-compatible re-export shims at the original import paths.
+
 ## Design goals
 
 1. **Explainability.** Every ranking decision is traceable to sub-scores and

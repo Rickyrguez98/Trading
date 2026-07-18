@@ -1,14 +1,30 @@
-# Asset Selection Algorithm — U.S. Equities
+# Trading Research — Asset Selection & Binary Options Signals
 
-A research prototype that ranks U.S.-listed common stocks using a transparent
-combination of **fundamentals**, **growth**, **valuation**, **quality**, and
-**news sentiment**, sourced exclusively from free / public APIs.
+A research codebase with **two independent modules** built on one engineering
+foundation (replaceable data providers, honest missing-data handling, provider
+health checks, caching/rate limiting, structured diagnostics, and CSV +
+Markdown + JSON outputs), using only free / public APIs by default:
+
+| Module | Package | Question it answers | Docs |
+|---|---|---|---|
+| **1. Equity Asset Selection** | `asset_selection` | Which U.S. common stocks look attractive on fundamentals, growth, valuation, quality, and news sentiment? | this README (below), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| **2. Binary Options Selection** | `binary_options_selection` | For a given underlying and a 5–120 minute expiration, does intraday evidence favor CALL, PUT, or NO_TRADE? | [Module 2 section](#module-2--binary-options-selection-intraday-research-signals), [docs/BINARY_OPTIONS_ARCHITECTURE.md](docs/BINARY_OPTIONS_ARCHITECTURE.md) |
+
+Shared generic infrastructure lives in `src/trading_common/`. The modules do
+not depend on each other's logic — the only optional link is that Module 2 can
+consume Module 1's output CSV as an upstream universe/quality filter.
 
 > **Disclaimer.** This project is for research and educational purposes only.
 > It is **not** financial advice. It does **not** place trades, connect to any
 > brokerage, or promise any returns. See [docs/DISCLAIMER.md](docs/DISCLAIMER.md).
 
 ---
+
+# Module 1 — Equity Asset Selection
+
+Ranks U.S.-listed common stocks using a transparent combination of
+**fundamentals**, **growth**, **valuation**, **quality**, and **news
+sentiment**, sourced exclusively from free / public APIs.
 
 ## Current scope — Milestone 1: Asset Selection
 
@@ -780,11 +796,14 @@ pipeline — see [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md).
 
 ```
 .
-├── configs/default_config.yaml
+├── configs/
+│   ├── default_config.yaml           # Module 1 (equity asset selection)
+│   └── binary_options_config.yaml    # Module 2 (binary options selection)
 ├── data/{raw,processed,cache}/
 ├── docs/
 ├── notebooks/
 ├── reports/
+├── src/trading_common/    # shared generic infra: cache, rate limiter, io, error taxonomy
 ├── src/asset_selection/
 │   ├── config.py
 │   ├── logging_config.py
@@ -799,6 +818,18 @@ pipeline — see [docs/FUTURE_ROADMAP.md](docs/FUTURE_ROADMAP.md).
 │   ├── allocation/        # future milestone — placeholder
 │   ├── backtesting/       # future milestone — placeholder
 │   └── risk/              # future milestone — placeholder
+├── src/binary_options_selection/
+│   ├── config.py            # typed config + strict semantic validation
+│   ├── universe.py          # custom / watchlist / asset-selection universes
+│   ├── market_session.py    # session classification + expiry alignment
+│   ├── data_providers/      # intraday OHLCV provider ABC + yfinance + registry
+│   ├── features/            # indicator library + signed family engine
+│   ├── scoring/             # horizon-aware CALL/PUT directional scoring
+│   ├── signals/             # decision rules, payout context, outcome labels
+│   ├── validation/          # candle integrity, run status, output self-audit
+│   ├── health/              # intraday provider probe
+│   ├── pipelines/run_binary_options_selection.py
+│   └── utils/timeutils.py   # UTC-first time and candle-boundary math
 └── tests/
 ```
 
@@ -813,7 +844,118 @@ ruff check src tests                     # lint
 
 The sentiment tests are **mock-based** — they never download the FinBERT
 model, so the whole suite runs in seconds with or without the `[finbert]`
-extras installed.
+extras installed. The same applies to the binary-options tests: no live
+provider is ever contacted.
+
+---
+
+# Module 2 — Binary Options Selection (intraday research signals)
+
+An independent research module that selects candidate underlyings and a
+**directional research signal per asset × expiration horizon**:
+
+- **`CALL`** — intraday evidence favors a settlement **above** the reference
+  price (the close of the latest completed candle);
+- **`PUT`** — evidence favors a settlement **below** it;
+- **`NO_TRADE`** — the evidence is too close, too weak, contradictory, stale,
+  illiquid, or the data/session is unsuitable. NO_TRADE is a **first-class
+  answer** with a machine-readable reason, not an error.
+
+## Horizons
+
+Configurable expirations from **5 to 120 minutes** (defaults: 5, 10, 15, 30,
+60, 90, 120), classified as `short` (5–30 min inclusive) or
+`extended_intraday` (31–120 min — still intraday analysis, **not** long-term
+investing). Every (asset, horizon) pair gets its **own** features, scores, and
+signal: momentum windows scale with the horizon and feature-family weights
+differ by group. One generic signal is never reused across expirations.
+
+## Scores are not probabilities
+
+`confidence_score` (0–1) is a bounded, documented **heuristic** — signal
+margin × contradiction penalty × data quality × feature coverage × volatility
+regime. It has **no measured accuracy** and is never presented as a win
+probability; the output validator errors if a probability or expected edge
+ever appears without a calibrated model (none exists in this milestone). With
+a configured payout ratio `r`, the break-even win probability `1/(1+r)` is
+reported as **context only**. Formulas:
+[docs/BINARY_OPTIONS_METHODOLOGY.md](docs/BINARY_OPTIONS_METHODOLOGY.md).
+
+## Data requirements and honesty
+
+- Intraday OHLCV candles at a provider-native interval (`1m…60m`; default
+  `5m`) — coarse data is never resampled finer, daily data is never presented
+  as intraday, and missing candles are counted, never imputed.
+- Default provider: **yfinance** (free, unofficial, **delayed** ~15 min) —
+  fine for research, not for live timing; the staleness gate turns stale rows
+  into `NO_TRADE (STALE_DATA)` honestly. Providers are replaceable via the
+  `IntradayCandlesProvider` registry
+  ([docs/BINARY_OPTIONS_DATA_SOURCES.md](docs/BINARY_OPTIONS_DATA_SOURCES.md)).
+- UTC timestamps internally; regular market hours by default (extended hours
+  opt-in); in-progress candles are dropped unless explicitly configured and
+  are never cached; interval-aware cache TTLs.
+- The universe is a custom list / watchlist (default) or Module 1's output
+  CSV used as an upstream quality filter **only** — a strong fundamental
+  score is never treated as a predictor of 5-minute direction.
+
+## Running it
+
+```bash
+# watchlist mode (default config: AAPL MSFT NVDA SPY, 5m candles)
+python -m binary_options_selection.pipelines.run_binary_options_selection \
+    --config configs/binary_options_config.yaml --top 20
+
+# custom underlyings, short intraday horizons
+python -m binary_options_selection.pipelines.run_binary_options_selection \
+    --tickers AAPL MSFT NVDA SPY --horizons 5 10 15 30 --top 20
+
+# extended intraday horizons (31-120 min; still intraday)
+python -m binary_options_selection.pipelines.run_binary_options_selection \
+    --tickers AAPL SPY --horizons 60 90 120 --interval 5m
+
+# consume Module 1's shortlist as the universe (quality filter only)
+python -m binary_options_selection.pipelines.run_binary_options_selection \
+    --universe asset-selection \
+    --asset-selection-input data/processed/asset_selection_results.csv
+
+# provider health probe only
+python -m binary_options_selection.pipelines.run_binary_options_selection \
+    --health-check-only
+```
+
+All flags: `--config --tickers --watchlist --universe --asset-selection-input
+--horizons --interval --top --provider --refresh-cache --no-cache
+--output-dir --log-level --health-check-only --allow-extended-hours
+--allow-partial-results/--no-partial-results`. Invalid combinations
+(horizons outside 5–120 or not multiples of the interval, unsupported
+intervals, unimplemented providers, …) fail fast with every problem listed.
+
+## Outputs
+
+```text
+data/processed/binary_options_candidates.csv          full per-(asset,horizon) table
+reports/binary_options_candidates.md                  ranked signals + NO_TRADE breakdown
+reports/binary_options_summary.json                   machine-readable run summary
+reports/binary_options_provider_diagnostics.{md,json} per-symbol provider outcomes
+reports/binary_options_output_validation.{md,json}    post-run self-audit
+```
+
+Every row carries the signal, call/put/directional/confidence/data-quality
+scores, validity, strength, primary drivers and conflicts, warning flags,
+freshness (`data_age_seconds`), reference/expiry timestamps, provenance, and
+the run status (`VALID` / `PARTIAL` / `DEGRADED` / `INVALID` — a degraded run
+is never presented like a valid one).
+
+## Why no execution
+
+This milestone stops at research signals **by design**: no broker
+connectivity, no order placement, no credentials, no stake sizing, and no
+martingale/loss-recovery logic — binary options are high-risk instruments and
+an unvalidated signal must not be wired to money. Known limitations (delayed
+data, no holiday calendar, unmeasured accuracy):
+[docs/BINARY_OPTIONS_LIMITATIONS.md](docs/BINARY_OPTIONS_LIMITATIONS.md);
+future evaluation/calibration milestones:
+[docs/BINARY_OPTIONS_ROADMAP.md](docs/BINARY_OPTIONS_ROADMAP.md).
 
 ## License
 

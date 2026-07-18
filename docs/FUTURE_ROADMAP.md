@@ -1,5 +1,10 @@
 # Future Roadmap
 
+> This roadmap covers **Module 1 (equity asset selection)**. The binary-options
+> module's roadmap (signal persistence, walk-forward evaluation, probability
+> calibration, payout modeling) is separate:
+> [`BINARY_OPTIONS_ROADMAP.md`](BINARY_OPTIONS_ROADMAP.md).
+
 Milestone 1 (this repo) ends at producing a ranked candidate list. The next
 milestones are sketched here so the asset-selection layer can be extended
 without rewriting it. Each future module already has a placeholder package

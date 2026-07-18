@@ -1,4 +1,4 @@
-.PHONY: install dev test lint run clean
+.PHONY: install dev test lint run run-binary-options clean
 
 install:
 	pip install -r requirements.txt
@@ -15,6 +15,10 @@ lint:
 run:
 	python -m asset_selection.pipelines.run_asset_selection \
 	    --config configs/default_config.yaml --limit 50 --top 20
+
+run-binary-options:
+	python -m binary_options_selection.pipelines.run_binary_options_selection \
+	    --config configs/binary_options_config.yaml --top 20
 
 clean:
 	rm -rf data/cache/* data/processed/* reports/*.md reports/*.json
