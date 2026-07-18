@@ -422,6 +422,7 @@ def _build_row(
         "horizon_minutes": horizon,
         "horizon_group": horizon_group(horizon),
         "expiry_time": iso_utc(expiry) if expiry else None,
+        "recommended_action": decision.recommended_action,
         "signal": decision.signal,
         "call_score": scores.call_score,
         "put_score": scores.put_score,

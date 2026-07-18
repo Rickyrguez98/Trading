@@ -33,6 +33,24 @@ SIGNAL_CALL = "CALL"
 SIGNAL_PUT = "PUT"
 SIGNAL_NO_TRADE = "NO_TRADE"
 
+# A binary-options recommendation is the PURCHASE of an upward or downward
+# contract -- never buying/selling the underlying itself, and never "SELL"
+# (closing an open contract is platform-specific and is not modeled).
+ACTION_BUY_CALL = "BUY_CALL"
+ACTION_BUY_PUT = "BUY_PUT"
+ACTION_NO_TRADE = "NO_TRADE"
+
+_ACTION_FOR_SIGNAL = {
+    SIGNAL_CALL: ACTION_BUY_CALL,
+    SIGNAL_PUT: ACTION_BUY_PUT,
+    SIGNAL_NO_TRADE: ACTION_NO_TRADE,
+}
+
+
+def recommended_action_for(signal: str) -> str:
+    """Map a signal to its canonical recommended contract action."""
+    return _ACTION_FOR_SIGNAL.get(signal, ACTION_NO_TRADE)
+
 VALIDITY_VALID = "valid"
 VALIDITY_DEGRADED = "degraded"
 VALIDITY_INVALID = "invalid"
@@ -106,6 +124,10 @@ class SignalDecision:
     signal_validity: str = VALIDITY_INVALID
     no_trade_reason: Optional[str] = None
     warning_flags: List[str] = field(default_factory=list)
+
+    @property
+    def recommended_action(self) -> str:
+        return recommended_action_for(self.signal)
 
 
 def decide_signal(

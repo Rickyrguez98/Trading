@@ -32,9 +32,10 @@ universe:
 
 horizons:
   # Expiration horizons in minutes. Allowed range: 5-120.
-  #   5-30  inclusive -> "short" horizon group
-  #   31-120          -> "extended_intraday" group (still intraday analysis,
-  #                      NOT long-term investing)
+  #   5-15  inclusive -> "short_term" horizon group
+  #   30-120          -> "extended_intraday" group (still intraday analysis,
+  #                      NOT long-term investing; 30m is extended by product
+  #                      definition)
   # Every (asset, horizon) pair gets its own features, score, and signal.
   minutes: [5, 10, 15, 30, 60, 90, 120]
 
@@ -124,16 +125,16 @@ features:
 weights:
   # Relative feature-family weights per horizon group (renormalized over the
   # families actually available). Validation enforces: no non-sentiment family
-  # above 60% of the total; sentiment capped at 5% (short) / 15% (extended) so
+  # above 60% of the total; sentiment capped at 5% (short_term) / 15% (extended) so
   # stale, broad news tone can never override live price/volume evidence.
-  short:                       # 5-30 minute horizons
+  short_term:                  # 5-15 minute horizons
     momentum: 0.30
     trend: 0.20
     mean_reversion: 0.15
     volume: 0.20
     context: 0.15
     sentiment: 0.00
-  extended_intraday:           # 31-120 minute horizons (still intraday)
+  extended_intraday:           # 30-120 minute horizons (still intraday)
     momentum: 0.20
     trend: 0.30
     mean_reversion: 0.10

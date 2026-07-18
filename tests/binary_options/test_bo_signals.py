@@ -177,10 +177,10 @@ def test_different_horizons_scored_independently():
 
 
 def test_short_and_extended_groups_use_different_weights():
-    q, bundle, s30, _ = _pipeline_pieces(make_candles(step=uptrend), horizon=30)
-    _, _, s60, _ = _pipeline_pieces(make_candles(step=uptrend), horizon=60)
-    assert s30.horizon_group == "short"
-    assert s60.horizon_group == "extended_intraday"
+    q, bundle, s15, _ = _pipeline_pieces(make_candles(step=uptrend), horizon=15)
+    _, _, s30, _ = _pipeline_pieces(make_candles(step=uptrend), horizon=30)
+    assert s15.horizon_group == "short_term"
+    assert s30.horizon_group == "extended_intraday"   # 30m is extended
 
 
 def test_score_bounds_hold_on_random_walks():

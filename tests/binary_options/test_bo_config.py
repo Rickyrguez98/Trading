@@ -24,9 +24,13 @@ def test_dataclass_defaults_are_valid():
 
 
 def test_horizon_groups():
+    # Product definition: short_term = 5, 10, 15; extended_intraday = 30-120.
+    assert HORIZON_GROUP_SHORT == "short_term"
     assert horizon_group(5) == HORIZON_GROUP_SHORT
-    assert horizon_group(30) == HORIZON_GROUP_SHORT      # 30 is inclusive-short
-    assert horizon_group(31) == HORIZON_GROUP_EXTENDED
+    assert horizon_group(10) == HORIZON_GROUP_SHORT
+    assert horizon_group(15) == HORIZON_GROUP_SHORT
+    assert horizon_group(30) == HORIZON_GROUP_EXTENDED   # 30m is extended, not short
+    assert horizon_group(60) == HORIZON_GROUP_EXTENDED
     assert horizon_group(120) == HORIZON_GROUP_EXTENDED
 
 
@@ -72,8 +76,16 @@ def test_all_problems_reported_at_once():
 
 def test_weights_single_family_dominance_rejected():
     with pytest.raises(ConfigValidationError) as exc:
-        load_config({"weights": {"short": {"momentum": 0.9, "trend": 0.1}}})
+        load_config({"weights": {"short_term": {"momentum": 0.9, "trend": 0.1}}})
     assert "no single family may exceed" in str(exc.value)
+
+
+def test_legacy_weights_short_alias_still_accepted():
+    # Old YAMLs using weights.short keep working via a deprecated alias.
+    with pytest.warns(DeprecationWarning):
+        cfg = load_config({"weights": {"short": {
+            "momentum": 0.4, "trend": 0.3, "volume": 0.3}}})
+    assert cfg.weights.short_term == {"momentum": 0.4, "trend": 0.3, "volume": 0.3}
 
 
 def test_weights_sentiment_caps_by_group():
@@ -81,7 +93,7 @@ def test_weights_sentiment_caps_by_group():
     ok = {"weights": {"extended_intraday": {
         "momentum": 0.3, "trend": 0.3, "volume": 0.3, "sentiment": 0.1}}}
     load_config(ok)
-    bad = {"weights": {"short": {
+    bad = {"weights": {"short_term": {
         "momentum": 0.3, "trend": 0.3, "volume": 0.3, "sentiment": 0.1}}}
     with pytest.raises(ConfigValidationError) as exc:
         load_config(bad)
@@ -90,7 +102,7 @@ def test_weights_sentiment_caps_by_group():
 
 def test_weights_negative_and_unknown_rejected():
     with pytest.raises(ConfigValidationError) as exc:
-        load_config({"weights": {"short": {"momentum": -0.2, "astrology": 0.5}}})
+        load_config({"weights": {"short_term": {"momentum": -0.2, "astrology": 0.5}}})
     msg = str(exc.value)
     assert "unknown families" in msg and ">= 0" in msg
 

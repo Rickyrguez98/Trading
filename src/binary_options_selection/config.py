@@ -25,9 +25,11 @@ _DEFAULT_CONFIG_PATH = Path("configs/binary_options/default.yaml")
 
 HORIZON_MIN_MINUTES = 5
 HORIZON_MAX_MINUTES = 120
-SHORT_GROUP_MAX_MINUTES = 30  # 5-30 inclusive = "short"
+# short_term = 5-15 minutes inclusive; extended_intraday = 30-120 minutes.
+# The 30-minute horizon belongs to extended_intraday by product definition.
+SHORT_TERM_MAX_MINUTES = 15
 
-HORIZON_GROUP_SHORT = "short"
+HORIZON_GROUP_SHORT = "short_term"
 HORIZON_GROUP_EXTENDED = "extended_intraday"
 
 # Provider-native intraday intervals we accept. Coarse data is never resampled
@@ -59,7 +61,7 @@ SESSION_MODES = ("regular", "extended")
 
 def horizon_group(minutes: int) -> str:
     """Classify a horizon in minutes into its configuration group."""
-    return HORIZON_GROUP_SHORT if minutes <= SHORT_GROUP_MAX_MINUTES else HORIZON_GROUP_EXTENDED
+    return HORIZON_GROUP_SHORT if minutes <= SHORT_TERM_MAX_MINUTES else HORIZON_GROUP_EXTENDED
 
 
 class ConfigValidationError(ValueError):
@@ -242,7 +244,7 @@ class WeightsConfig:
     single family from dominating and caps sentiment (which, for short
     horizons, must not override live price/volume evidence).
     """
-    short: Dict[str, float] = field(default_factory=lambda: {
+    short_term: Dict[str, float] = field(default_factory=lambda: {
         "momentum": 0.30,
         "trend": 0.20,
         "mean_reversion": 0.15,
@@ -260,7 +262,7 @@ class WeightsConfig:
     })
 
     def for_group(self, group: str) -> Dict[str, float]:
-        return dict(self.short if group == HORIZON_GROUP_SHORT else self.extended_intraday)
+        return dict(self.short_term if group == HORIZON_GROUP_SHORT else self.extended_intraday)
 
 
 @dataclass
@@ -438,7 +440,7 @@ def _from_dict(raw: Dict[str, Any]) -> BinaryOptionsConfig:
         liquidity=LiquidityConfig(**_filtered(LiquidityConfig, section("liquidity"))),
         data_quality=DataQualityConfig(**_filtered(DataQualityConfig, section("data_quality"))),
         features=FeatureParamsConfig(**_filtered(FeatureParamsConfig, section("features"))),
-        weights=WeightsConfig(**_filtered(WeightsConfig, section("weights"))),
+        weights=WeightsConfig(**_filtered(WeightsConfig, _migrate_weights(section("weights")))),
         signal_rules=SignalRulesConfig(**_filtered(SignalRulesConfig, section("signal_rules"))),
         sentiment=SentimentConfig(**_filtered(SentimentConfig, section("sentiment"))),
         payout=PayoutConfig(**_filtered(PayoutConfig, section("payout"))),
@@ -446,6 +448,28 @@ def _from_dict(raw: Dict[str, Any]) -> BinaryOptionsConfig:
         logging=LoggingConfig(**_filtered(LoggingConfig, section("logging"))),
         validation=ValidationConfig(**_filtered(ValidationConfig, section("validation"))),
     )
+
+
+def _migrate_weights(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the legacy ``weights.short`` key onto ``weights.short_term``.
+
+    The short group was renamed when the 30-minute horizon moved to
+    ``extended_intraday`` (short_term is now 5-15 minutes). Old YAMLs keep
+    working, with a deprecation warning.
+    """
+    if "short" in data and "short_term" not in data:
+        import warnings
+
+        warnings.warn(
+            "weights.short is deprecated; rename it to weights.short_term "
+            "(short_term now covers 5-15 minutes; 30 minutes belongs to "
+            "extended_intraday). See docs/shared/migration.md",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+        data = dict(data)
+        data["short_term"] = data.pop("short")
+    return data
 
 
 def _filtered(cls, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -601,7 +625,7 @@ def validate_config(cfg: BinaryOptionsConfig) -> List[str]:
 
     # --- weights ---
     for group_name, weights in (
-        (HORIZON_GROUP_SHORT, cfg.weights.short),
+        (HORIZON_GROUP_SHORT, cfg.weights.short_term),
         (HORIZON_GROUP_EXTENDED, cfg.weights.extended_intraday),
     ):
         problems.extend(_validate_weights(group_name, weights))
