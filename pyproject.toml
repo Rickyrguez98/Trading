@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "asset-selection"
 version = "0.1.0"
-description = "Research prototype: free-data Asset Selection Algorithm for U.S.-listed equities."
+description = "Trading research toolkit (free data): U.S.-equity asset selection and intraday binary-options directional signals."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Ricardo Rodriguez", email = "if722544@iteso.mx" }]
-keywords = ["quant", "equities", "asset-selection", "research"]
+keywords = ["quant", "equities", "asset-selection", "binary-options", "intraday", "research"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Financial and Insurance Industry",
