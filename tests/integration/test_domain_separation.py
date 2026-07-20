@@ -84,6 +84,23 @@ def test_legacy_flat_config_path_still_resolves_with_warning(tmp_path, monkeypat
     assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
 
+def test_binary_legacy_flat_config_path_still_resolves(tmp_path, monkeypatch):
+    import shutil
+
+    monkeypatch.chdir(tmp_path)
+    src = Path(__file__).resolve().parent.parent.parent / "configs"
+    (tmp_path / "configs").mkdir()
+    shutil.copy(src / "binary_options" / "default.yaml",
+                tmp_path / "configs" / "binary_options_config.yaml")
+    from binary_options_selection.config import load_config
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cfg = load_config(None)
+    assert cfg.horizons.minutes
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
 def test_legacy_module_commands_still_importable():
     from asset_selection.pipelines.run_asset_selection import main as eq_main
     from binary_options_selection.pipelines.run_binary_options_selection import (

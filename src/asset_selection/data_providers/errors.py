@@ -122,11 +122,6 @@ def classify_empty(data_type: str, *, remapped: bool = False) -> str:
     return PROVIDER_EMPTY_RESPONSE
 
 
-def is_provider_side(error_type: Optional[str]) -> bool:
-    """True if ``error_type`` indicates a provider/transport fault (systemic-capable)."""
-    return error_type in PROVIDER_SIDE_ERRORS
-
-
 def status_for(error_type: Optional[str]) -> str:
     """Collapse an error type to the legacy coarse ``status`` field.
 

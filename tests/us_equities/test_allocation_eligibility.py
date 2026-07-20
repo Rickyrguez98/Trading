@@ -24,7 +24,6 @@ from asset_selection.scoring.composite_score import (
 )
 from asset_selection.scoring.ranking import (
     format_top_candidates_markdown,
-    rank_candidates,
 )
 from asset_selection.validation import (
     build_provider_diagnostics,

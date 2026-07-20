@@ -33,9 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
 from trading_common.cache import Cache
-from trading_common.io import ensure_dir, write_csv, write_json
+from trading_common.io import ensure_dir, write_json
 from trading_common.rate_limiter import RateLimiter
 
 from ..config import (
@@ -72,7 +71,6 @@ from ..validation.output_validation import validate_outputs
 from ..validation.run_status import (
     RUN_INVALID,
     determine_run_status,
-    render_status_banner,
 )
 
 logger = logging.getLogger(__name__)

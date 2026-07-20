@@ -5,7 +5,7 @@ short name (e.g. ``"yfinance"``) via the registry helpers below.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Type
+from typing import List, Type
 
 from .base import DataProvider, FundamentalsProvider, NewsProvider, PricesProvider
 from .fallback import (

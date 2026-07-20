@@ -17,7 +17,10 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
+# Canonical domain config location; the flat legacy path is still honoured
+# (with a deprecation warning) so existing setups keep working.
 _DEFAULT_CONFIG_PATH = Path("configs/binary_options/default.yaml")
+_LEGACY_CONFIG_PATH = Path("configs/binary_options_config.yaml")
 
 # ---------------------------------------------------------------------------
 # Domain constants

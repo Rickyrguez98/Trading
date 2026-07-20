@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..signals.decision import SIGNAL_CALL, SIGNAL_NO_TRADE, SIGNAL_PUT
-from ..signals.labels import CALL_WIN, PUT_WIN, TIE, UNKNOWN
+from ..signals.labels import TIE, UNKNOWN
 from .engine import EvalRecord, EvaluationConfig
 
 

@@ -32,8 +32,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -52,7 +51,7 @@ from ..data_providers import (
     build_prices_provider,
 )
 from ..data_providers import errors as _err
-from ..data_providers.base import Fundamentals, NewsItem, PriceSnapshot
+from ..data_providers.base import Fundamentals, PriceSnapshot
 from ..health import run_provider_health_checks
 from ..fundamentals.fundamental_scoring import score_fundamentals
 from ..logging_config import configure_logging

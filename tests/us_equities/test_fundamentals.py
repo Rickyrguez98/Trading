@@ -1,7 +1,6 @@
 """Fundamentals scoring + missing-data handling."""
 from __future__ import annotations
 
-import pandas as pd
 
 from asset_selection.config import load_config
 from asset_selection.data_providers.base import Fundamentals

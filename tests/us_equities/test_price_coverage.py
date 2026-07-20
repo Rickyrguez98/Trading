@@ -17,7 +17,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
-import pytest
 
 from asset_selection.config import AppConfig, CriticalTickersConfig
 from asset_selection.data_providers import errors as err

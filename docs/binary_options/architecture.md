@@ -122,9 +122,9 @@ reason.
 Configurable horizons: **5–120 minutes** (default set: 5, 10, 15, 30, 60, 90,
 120). Groups:
 
-* `short` — 5–30 minutes inclusive;
-* `extended_intraday` — >30 up to 120 minutes. This is still **intraday
-  analysis**, not long-term investing.
+* `short_term` — 5, 10, 15 minutes;
+* `extended_intraday` — 30, 60, 90, 120 minutes (30 belongs here by product
+  definition). Both are **intraday analysis**, not long-term investing.
 
 Each requested (asset, horizon) pair gets its **own** feature windows, weights,
 score, and signal. One generic signal is never reused across expirations:
@@ -192,3 +192,17 @@ run is visually and machine-readably distinct from a valid one (banner +
   label-generation utility exists for future evaluation only).
 
 These are documented as future milestones in `roadmap.md`.
+
+
+## 10. Contract-aware layer (post-restructure)
+
+The module now separates the underlying market instrument from the platform
+contract: a verified instrument catalog (`catalog/`) is the only source of
+availability, expirations, and payouts; without one every row is
+`NO_TRADE / INSTRUMENT_AVAILABILITY_UNKNOWN`. See
+[instrument-catalog.md](instrument-catalog.md),
+[signal-interpretation.md](signal-interpretation.md), and
+[methodology.md](methodology.md) §6 for the full gate order, and
+[evaluation.md](evaluation.md) for the research-only historical replay.
+Outputs follow the run-directory layout in
+[../shared/data-governance.md](../shared/data-governance.md).

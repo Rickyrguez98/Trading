@@ -11,11 +11,13 @@ and are validated at load time.
 ## 1. Horizons
 
 Configurable expirations between **5 and 120 minutes** (defaults: 5, 10, 15,
-30, 60, 90, 120). Groups: `short` = 5–30 min inclusive; `extended_intraday` =
-31–120 min (still intraday analysis, not long-term investing). Every horizon
-must be a whole multiple of the candle interval so the expiration lands on a
-candle boundary. Each (asset, horizon) pair is scored independently — feature
-windows scale with the horizon and weights differ by group.
+30, 60, 90, 120). Groups: `short_term` = **5, 10, 15** minutes;
+`extended_intraday` = **30, 60, 90, 120** minutes (30 belongs to extended by
+product definition; both groups are intraday analysis, not long-term
+investing). Every horizon must be a whole multiple of the candle interval so
+the expiration lands on a candle boundary. Each (instrument, horizon) pair is
+scored independently — feature windows scale with the horizon and weights
+differ by group.
 
 ## 2. Reference and expiration times
 
@@ -105,7 +107,7 @@ Candle structure (body/range, wick proportions) is reported descriptively.
 Weights `w_f` per horizon group (defaults below), renormalized over available
 families:
 
-| family | short (5–30 m) | extended (31–120 m) |
+| family | short_term (5–15 m) | extended_intraday (30–120 m) |
 |---|---|---|
 | momentum | 0.30 | 0.20 |
 | trend | 0.20 | 0.30 |
@@ -139,20 +141,39 @@ probability.
 
 ## 6. Decision rules
 
-Hard data gates force `NO_TRADE` with `signal_validity = invalid`, in
-root-cause order: `UNSUPPORTED_HORIZON`, `PROVIDER_COVERAGE`,
-`NO_COMPLETED_CANDLE`, `INSUFFICIENT_HISTORY` (< 60 bars), `STALE_DATA`,
-`ABNORMAL_DATA` (impossible OHLC / future stamps), `SUB_MINIMUM_PRICE`
-(≤ $1), `LOW_DATA_QUALITY` / `EXCESSIVE_MISSING_CANDLES` (< 60 score),
-`LOW_LIQUIDITY` (avg volume < 10 000 sh/bar, dollar volume < $250 000/bar, or
-zero-volume ratio > 20%), `MARKET_CLOSED`, `EXPIRY_BEYOND_SESSION`.
+**Contract gates first** (a signal on an untradable contract is
+meaningless): `UNSUPPORTED_HORIZON`, then — from the verified catalog —
+`INSTRUMENT_AVAILABILITY_UNKNOWN` (no catalog; the default state),
+`CATALOG_STALE`, `INSTRUMENT_NOT_AVAILABLE`, `CONTRACT_CLOSED`,
+`OTC_EXCLUDED` (default policy; allowed OTC rows always warn),
+`EXPIRATION_NOT_AVAILABLE`, `PAYOUT_UNKNOWN` / `PAYOUT_STALE` /
+`PAYOUT_BELOW_MINIMUM`, `PLATFORM_QUOTE_STALE`, `QUOTE_MISMATCH` (platform
+vs market divergence in bps). `--research-mode` downgrades the
+unknown-availability/economics gates to visible warnings, never the
+positively bad states.
 
-Evidence gates keep the data validity (a NO_TRADE on clean data is an
-answer): `NO_COMPUTABLE_FEATURES`, `CONTRADICTORY_EVIDENCE`
-(contradiction > 0.60), `SCORES_TOO_CLOSE` (|directional| < 15),
+**Market-data gates** force `NO_TRADE` with `signal_validity = invalid`, in
+root-cause order: `PROVIDER_UNAVAILABLE`, `INCOMPLETE_LATEST_CANDLE`,
+`INSUFFICIENT_HISTORY` (< 60 bars), `STALE_MARKET_DATA`,
+`DATA_NOT_REAL_TIME` (known provider delay > 0.5 × horizon — yfinance's
+~900 s delay honestly rejects every 5/10/15-minute signal),
+`TIME_TO_EXPIRY_TOO_SHORT` (data age leaves < 75% of the horizon),
+`INVALID_OHLC` (impossible OHLC / future stamps),
+`ABNORMAL_MARKET_CONDITION` (abnormal-range bar), `SUB_MINIMUM_PRICE`
+(≤ $1), `LOW_DATA_QUALITY` / `MISSING_CANDLES` (< 60 score),
+`LOW_LIQUIDITY` (volume gates apply only to asset types whose feeds carry
+real volume), `SESSION_NOT_SUPPORTED` (unmodeled venue), `MARKET_CLOSED`,
+`EXPIRY_BEYOND_SESSION`. Sessions are asset-type aware: crypto 24/7, forex
+24/5 (documented approximation), equity/ETF/index exchange hours.
+
+**Evidence gates** keep the data validity (a NO_TRADE on clean data is an
+answer): `INSUFFICIENT_FEATURE_COVERAGE`, `CONTRADICTORY_EVIDENCE`
+(contradiction > 0.60), `WEAK_DIRECTIONAL_MARGIN` (|directional| < 15),
 `LOW_CONFIDENCE` (confidence < 0.25).
 
-Otherwise: `CALL` if directional > 0 else `PUT`. Strength: **strong** when
+Otherwise: `CALL` if directional > 0 else `PUT`, with
+`recommended_action = BUY_CALL / BUY_PUT` (contract purchases — never
+trading the underlying). Strength: **strong** when
 |directional| ≥ 40 **and** confidence ≥ 0.50; **moderate** when
 |directional| ≥ 25; else **weak**.
 
