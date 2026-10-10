@@ -1491,11 +1491,11 @@ def _build_summary(
             "finbert_neutral_probability": _safe_num(row.get("finbert_neutral_probability")),
             "finbert_negative_probability": _safe_num(row.get("finbert_negative_probability")),
             "sentiment_score_delta": _safe_num(row.get("sentiment_score_delta")),
-            "sentiment_model_agreement": row.get("sentiment_model_agreement") or None,
+            "sentiment_model_agreement": _safe_str(row.get("sentiment_model_agreement")),
             "final_sentiment_score": _safe_num(row.get("final_sentiment_score")),
             "sentiment_model_used": row.get("sentiment_model_used")
             or row.get("sentiment_model") or config.sentiment.model,
-            "finbert_device_used": row.get("finbert_device_used") or None,
+            "finbert_device_used": _safe_str(row.get("finbert_device_used")),
             "sentiment_model_fallback_used": bool(row.get("sentiment_model_fallback_used"))
             if row.get("sentiment_model_fallback_used") is not None else None,
             "finbert_scoring_error_count": int(row.get("finbert_scoring_error_count", 0) or 0),
@@ -1507,17 +1507,17 @@ def _build_summary(
             "cash_flow_score": _safe_num(row.get("cash_flow_score")),
             "risk_penalty": _safe_num(row.get("risk_penalty")),
             "final_score": _safe_num(row.get("final_score")),
-            "top_driver_pillar": row.get("top_driver_pillar") or None,
-            "top_drag_pillar": row.get("top_drag_pillar") or None,
-            "strongest_metric": row.get("strongest_metric") or None,
+            "top_driver_pillar": _safe_str(row.get("top_driver_pillar")),
+            "top_drag_pillar": _safe_str(row.get("top_drag_pillar")),
+            "strongest_metric": _safe_str(row.get("strongest_metric")),
             "strongest_metric_score": _safe_num(row.get("strongest_metric_score")),
-            "weakest_metric": row.get("weakest_metric") or None,
+            "weakest_metric": _safe_str(row.get("weakest_metric")),
             "weakest_metric_score": _safe_num(row.get("weakest_metric_score")),
             "market_cap_available": bool(row.get("market_cap_available"))
             if row.get("market_cap_available") is not None else None,
             "valuation_metrics_available": int(row.get("valuation_metrics_available", 0) or 0),
-            "selection_bucket": row.get("selection_bucket") or None,
-            "reason": row.get("reason"),
+            "selection_bucket": _safe_str(row.get("selection_bucket")),
+            "reason": _safe_str(row.get("reason")),
             "warning_flags": list(row.get("flags") or []),
             "missing_fields": list(row.get("missing_fields") or []),
             "missing_metric_count": int(row.get("missing_metric_count", 0) or 0),
@@ -1572,6 +1572,25 @@ def _safe_num(v):
     if x != x:  # NaN
         return None
     return x
+
+
+def _safe_str(v):
+    """Normalize an optional text field to ``str`` or ``None``.
+
+    pandas represents a missing object-column value as ``None`` on some
+    versions and as ``float('nan')`` on others (notably pandas >= 2.0, which
+    coerces ``None`` during DataFrame construction). ``nan`` is **truthy**, so
+    a bare ``x or None`` lets it through and the literal ``NaN`` lands in the
+    JSON report -- which is not valid JSON and is rejected by strict parsers.
+    This collapses every flavour of "missing" to ``None``, mirroring the NaN
+    guard in :func:`_safe_num`.
+    """
+    if v is None:
+        return None
+    if isinstance(v, float) and v != v:  # NaN
+        return None
+    text = str(v).strip()
+    return text or None
 
 
 if __name__ == "__main__":
