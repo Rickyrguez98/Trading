@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asset-selection"
-version = "0.0.13"
+version = "0.0.14"
 description = "Trading research toolkit (free data): U.S.-equity asset selection and intraday binary-options directional signals."
 readme = "README.md"
 requires-python = ">=3.9"
