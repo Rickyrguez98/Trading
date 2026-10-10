@@ -10,6 +10,13 @@ this counter; releases before 0.0.12 were never tracked in this file.
 ## [Unreleased]
 
 ### Fixed
+- **A pandas NaN reaching the JSON report.** Optional text fields were
+  serialized with `row.get(x) or None`, and NaN is truthy in Python, so on
+  pandas >= 2.0 (which coerces a missing object value to NaN) a bare `NaN`
+  literal landed in the candidate payload — invalid JSON, rejected by strict
+  parsers. New `_safe_str` mirrors the existing `_safe_num` NaN guard across
+  all eight optional text fields; `reason` previously had no guard at all.
+  This was also why CI was red on Python 3.11 and green on 3.9.
 - **Empty sentiment.** News was silently producing nothing: Yahoo's private
   per-ticker endpoint behind the `yfinance` news provider has been retired
   upstream and answers HTTP 404, so every name scored neutral with a zero
@@ -46,7 +53,8 @@ this counter; releases before 0.0.12 were never tracked in this file.
   crawlers explicitly. Reachability is not permission.
 
 ### Testing
-- Suite at **405 offline deterministic tests** (16 new): Finnhub parsing, the
+- Suite at **407 offline deterministic tests** (18 new), verified on
+  Python 3.9 / pandas 1.5.3 **and** Python 3.11 / pandas 3.0.6: Finnhub parsing, the
   header-not-URL key contract, missing/blank key behaviour with no network
   call, HTTP 401/403/429/5xx and error-payload handling, honest empty results,
   and the keyless fall-through from `finnhub` to `yahoo_rss`.
