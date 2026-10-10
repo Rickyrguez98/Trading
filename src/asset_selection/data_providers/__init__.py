@@ -14,7 +14,12 @@ from .fallback import (
     FallbackPricesProvider,
 )
 from .fundamentals_provider import YFinanceFundamentalsProvider
-from .news_provider import YFinanceNewsProvider
+from .news_provider import (
+    FinnhubNewsProvider,
+    NewsProviderNotConfigured,
+    YahooRssNewsProvider,
+    YFinanceNewsProvider,
+)
 from .prices_provider import YFinancePricesProvider
 from .stooq_provider import StooqPricesProvider
 from .ticker_provider import NasdaqTraderTickerProvider, SECCompanyTickersProvider
@@ -29,7 +34,9 @@ _PRICES_REGISTRY: dict[str, Type[PricesProvider]] = {
 }
 
 _NEWS_REGISTRY: dict[str, Type[NewsProvider]] = {
-    "yfinance": YFinanceNewsProvider,
+    "finnhub": FinnhubNewsProvider,      # documented API, needs FINNHUB_API_KEY
+    "yahoo_rss": YahooRssNewsProvider,   # keyless, best-effort (see provider docstring)
+    "yfinance": YFinanceNewsProvider,    # retired upstream endpoint; returns no news
 }
 
 
@@ -137,6 +144,9 @@ __all__ = [
     "get_fundamentals_provider",
     "get_prices_provider",
     "get_news_provider",
+    "YahooRssNewsProvider",
+    "FinnhubNewsProvider",
+    "NewsProviderNotConfigured",
     "build_fundamentals_provider",
     "build_prices_provider",
     "build_news_provider",

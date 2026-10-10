@@ -7,6 +7,56 @@ software and the earlier 0.x.0 scheme overstated its maturity. The entries
 below were previously numbered 0.1.0-0.4.0 and have been renumbered onto
 this counter; releases before 0.0.12 were never tracked in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Empty sentiment.** News was silently producing nothing: Yahoo's private
+  per-ticker endpoint behind the `yfinance` news provider has been retired
+  upstream and answers HTTP 404, so every name scored neutral with a zero
+  article count. News now defaults to a chain, `[finnhub, yahoo_rss]`, and
+  sentiment is confirmed to populate through the stage-4 path.
+
+### Added
+- `finnhub` news provider (`asset_selection.data_providers.news_provider`):
+  the documented `/company-news` API, now the default. It is the only news
+  backend here whose terms permit automated access, and it returns a real
+  per-article publisher so the source-diversity term in the
+  sentiment-confidence model is meaningful instead of inflated. Needs a free
+  key in `FINNHUB_API_KEY`, sent in the `X-Finnhub-Token` header rather than a
+  query parameter so it cannot leak into URLs, logs, or cache keys.
+- `yahoo_rss` news provider: keyless RSS headline feed, parsed with the
+  standard library (no new dependency), chained behind `finnhub` so sentiment
+  still has a route to real articles with no key configured.
+- `NewsProviderNotConfigured`: a missing credential raises **before** any
+  network call and is never swallowed, so a configuration fault cannot
+  masquerade as "this company has no news". In a chain the next provider takes
+  over; as the sole provider the run reports news unavailable.
+
+### Changed
+- `docs/us_equities/data-sources.md`: the News section rewritten, and the
+  "Rate limits & terms of service" section corrected. It previously claimed the
+  pipeline "never bypasses terms of service" while the Yahoo hosts behind
+  `yfinance` and `yahoo_rss` serve `robots.txt: Disallow: /`. The real position
+  is now documented, along with the throttling observed on the RSS host
+  (persistent HTTP 429 from datacenter IPs while price calls on the sibling
+  host still succeed).
+- Google News RSS was evaluated and **rejected on policy grounds, not
+  capability**: it is reachable and returns real headlines, but its
+  `robots.txt` disallows the feed path for all agents and names automated
+  crawlers explicitly. Reachability is not permission.
+
+### Testing
+- Suite at **405 offline deterministic tests** (16 new): Finnhub parsing, the
+  header-not-URL key contract, missing/blank key behaviour with no network
+  call, HTTP 401/403/429/5xx and error-payload handling, honest empty results,
+  and the keyless fall-through from `finnhub` to `yahoo_rss`.
+
+### Known limitation
+- Live Finnhub responses are **not** exercised here — that needs a personal API
+  key. The contract is tested; real coverage and latency are not claimed.
+  `yahoo_rss` could not be verified live either: every attempt from the
+  development environment returned HTTP 429.
+
 ## [0.0.15] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
 
 ### Added

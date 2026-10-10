@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Mapping, Optional
 # no-op (return the canonical symbol unchanged), which is the safe default.
 # Both yfinance and Stooq spell US class shares with a hyphen (BRK-B); Stooq
 # additionally needs a ``.us`` market suffix, applied by the Stooq provider.
-_DOT_HYPHEN_PROVIDERS = {"yfinance", "stooq"}
+_DOT_HYPHEN_PROVIDERS = {"yfinance", "stooq", "yahoo_rss"}
 
 # Provider families that resolve like Yahoo / yfinance (US symbols verbatim,
 # class shares with a hyphen). Kept as a set so future Yahoo-shaped providers
