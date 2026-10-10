@@ -108,5 +108,60 @@ def test_score_fundamentals_adds_explainability_columns():
     assert int(s.loc["C", "valuation_metrics_available"]) < 5
     # The fully-disclosed strong name should name a real strongest metric.
     assert isinstance(s.loc["A", "strongest_metric"], str)
-    # The empty ticker E has no metrics -> strongest/weakest are None.
-    assert s.loc["E", "strongest_metric"] is None
+    # The empty ticker E has no metrics -> strongest/weakest are missing.
+    # Asserted via pandas' own missing-value test rather than ``is None``: an
+    # object column holds the sentinel as None on pandas 1.x and as NaN on
+    # pandas >= 2.0, and both mean "absent". The pipeline normalizes either to
+    # None before serialization (see test_optional_text_fields_* below).
+    import pandas as pd
+
+    assert pd.isna(s.loc["E", "strongest_metric"])
+    assert pd.isna(s.loc["E", "weakest_metric"])
+
+
+# ---------------------------------------------------------------------------
+# Serialization of optional text fields (pandas version portability)
+# ---------------------------------------------------------------------------
+
+def test_safe_str_collapses_every_flavour_of_missing_to_none():
+    """pandas spells a missing object value as None *or* NaN depending on version.
+
+    NaN is truthy, so the previous ``row.get(x) or None`` let it through and a
+    literal ``NaN`` reached the JSON report -- invalid JSON that strict parsers
+    (JavaScript, Go) reject.
+    """
+    from asset_selection.pipelines.run_asset_selection import _safe_str
+
+    assert _safe_str(None) is None
+    assert _safe_str(float("nan")) is None
+    assert _safe_str("") is None
+    assert _safe_str("   ") is None
+    assert _safe_str("roe") == "roe"
+    assert _safe_str("  roe  ") == "roe"
+
+
+def test_optional_text_fields_never_serialize_as_nan():
+    """A NaN in any optional text column must not reach the JSON payload."""
+    import json
+    import math
+
+    from asset_selection.pipelines.run_asset_selection import _safe_str
+
+    row = {
+        "strongest_metric": float("nan"),
+        "weakest_metric": float("nan"),
+        "top_driver_pillar": float("nan"),
+        "top_drag_pillar": float("nan"),
+        "selection_bucket": float("nan"),
+        "reason": float("nan"),
+        "sentiment_model_agreement": float("nan"),
+        "finbert_device_used": float("nan"),
+    }
+    payload = {k: _safe_str(v) for k, v in row.items()}
+    assert all(v is None for v in payload.values())
+
+    # Strict JSON has no NaN literal; allow_nan=False is how we prove it.
+    text = json.dumps(payload, allow_nan=False)
+    assert "NaN" not in text
+    assert all(not isinstance(v, float) or not math.isnan(v)
+               for v in json.loads(text).values())
