@@ -17,7 +17,10 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
-_DEFAULT_CONFIG_PATH = Path("configs/binary_options_config.yaml")
+# Canonical domain config location; the flat legacy path is still honoured
+# (with a deprecation warning) so existing setups keep working.
+_DEFAULT_CONFIG_PATH = Path("configs/binary_options/default.yaml")
+_LEGACY_CONFIG_PATH = Path("configs/binary_options_config.yaml")
 
 # ---------------------------------------------------------------------------
 # Domain constants
@@ -25,9 +28,11 @@ _DEFAULT_CONFIG_PATH = Path("configs/binary_options_config.yaml")
 
 HORIZON_MIN_MINUTES = 5
 HORIZON_MAX_MINUTES = 120
-SHORT_GROUP_MAX_MINUTES = 30  # 5-30 inclusive = "short"
+# short_term = 5-15 minutes inclusive; extended_intraday = 30-120 minutes.
+# The 30-minute horizon belongs to extended_intraday by product definition.
+SHORT_TERM_MAX_MINUTES = 15
 
-HORIZON_GROUP_SHORT = "short"
+HORIZON_GROUP_SHORT = "short_term"
 HORIZON_GROUP_EXTENDED = "extended_intraday"
 
 # Provider-native intraday intervals we accept. Coarse data is never resampled
@@ -53,13 +58,16 @@ FEATURE_FAMILIES = (
     "sentiment",
 )
 
-UNIVERSE_MODES = ("custom", "watchlist", "asset-selection")
+# "catalog" (the default) selects instruments from the verified platform
+# catalog; the other modes analyze generic symbols and therefore require
+# run.research_mode -- generic market data is NOT contract availability.
+UNIVERSE_MODES = ("catalog", "custom", "watchlist", "asset-selection")
 SESSION_MODES = ("regular", "extended")
 
 
 def horizon_group(minutes: int) -> str:
     """Classify a horizon in minutes into its configuration group."""
-    return HORIZON_GROUP_SHORT if minutes <= SHORT_GROUP_MAX_MINUTES else HORIZON_GROUP_EXTENDED
+    return HORIZON_GROUP_SHORT if minutes <= SHORT_TERM_MAX_MINUTES else HORIZON_GROUP_EXTENDED
 
 
 class ConfigValidationError(ValueError):
@@ -81,8 +89,22 @@ class ConfigValidationError(ValueError):
 @dataclass
 class RunConfig:
     top_n: int = 20
-    output_dir: str = "reports"
-    processed_dir: str = "data/processed"
+    # Research mode relaxes contract-availability requirements (generic
+    # watchlists, missing payout data). Actionable output still requires a
+    # verified catalog; research mode only changes NO_TRADE reasons into
+    # analyzable research rows and is always visibly reported.
+    research_mode: bool = False
+    output_dir: str = "reports/binary_options"
+    processed_dir: str = "data/binary_options/processed"
+    input_dir: str = "data/binary_options/input"
+
+    def __post_init__(self) -> None:
+        # Migrate flat legacy paths onto the domain-separated layout so the
+        # two research products can never write into each other's outputs.
+        if self.output_dir == "reports":
+            self.output_dir = "reports/binary_options"
+        if self.processed_dir == "data/processed":
+            self.processed_dir = "data/binary_options/processed"
 
 
 @dataclass
@@ -90,12 +112,12 @@ class UniverseConfig:
     # "custom" (explicit tickers), "watchlist" (configured list / file), or
     # "asset-selection" (consume the equity pipeline's output CSV as an
     # upstream universe/quality filter -- never as a direct intraday predictor).
-    mode: str = "watchlist"
+    mode: str = "catalog"
     tickers: List[str] = field(default_factory=list)
     watchlist: List[str] = field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "SPY"])
     watchlist_file: Optional[str] = None
     # Path to data/processed/asset_selection_results.csv (or compatible).
-    asset_selection_input: str = "data/processed/asset_selection_results.csv"
+    asset_selection_input: str = "data/us_equities/processed/asset_selection_results.csv"
     # When consuming the asset-selection output, keep at most this many of the
     # top-ranked names (0/None disables the cap).
     asset_selection_top_k: Optional[int] = 25
@@ -155,12 +177,45 @@ class ProvidersConfig:
     # Ordered fallback chain; empty means use `intraday` alone. Only providers
     # that are genuinely implemented may appear here (validated).
     priority: List[str] = field(default_factory=list)
+    # Known structural feed delay per provider (seconds). Yahoo intraday data
+    # is typically ~15 minutes delayed and must never be described as
+    # real-time; short-term signals are gated on this (DATA_NOT_REAL_TIME).
+    known_delay_seconds: Dict[str, float] = field(
+        default_factory=lambda: {"yfinance": 900.0}
+    )
+
+
+@dataclass
+class InstrumentCatalogConfig:
+    """Verified platform-contract catalog policy.
+
+    Without a verified catalog the pipeline must not pretend contracts exist:
+    every row becomes NO_TRADE (INSTRUMENT_AVAILABILITY_UNKNOWN). A generic
+    watchlist is available only as an explicit research mode.
+    """
+    # Path to the manual YAML/CSV catalog (see instruments.example.yaml).
+    path: Optional[str] = None
+    provider: str = "auto"                    # auto | yaml | csv
+    platform: Optional[str] = None            # optional platform filter
+    # Catalog freshness: older than this -> every row NO_TRADE (CATALOG_STALE).
+    max_catalog_age_seconds: float = 900.0
+    # OTC contracts are excluded by default; enabling them always carries a
+    # visible OTC warning on each affected row.
+    exclude_otc: bool = True
+    # Optional asset-type filter (subset of the supported types); empty = all.
+    asset_types: List[str] = field(default_factory=list)
+    # --- contract economics gates ---
+    minimum_acceptable_payout: float = 0.0    # net profit per unit staked
+    maximum_payout_age_seconds: float = 3600.0
+    # --- platform-vs-market-data quote alignment ---
+    max_quote_diff_bps: float = 50.0
+    max_platform_quote_age_seconds: float = 300.0
 
 
 @dataclass
 class CacheConfig:
     enabled: bool = True
-    dir: str = "data/cache"
+    dir: str = "data/binary_options/cache"
     # Interval-aware TTL: ttl = clamp(interval_seconds * ttl_interval_fraction,
     # min_ttl_seconds, max_ttl_seconds). Intraday data must never inherit the
     # multi-day TTLs of the fundamentals pipeline.
@@ -178,6 +233,12 @@ class LiquidityConfig:
     min_avg_volume: float = 10_000.0            # shares per bar (rolling mean)
     min_avg_dollar_volume: float = 250_000.0    # close * volume per bar
     max_zero_volume_ratio: float = 0.20         # fraction of bars with volume == 0
+    # Volume-based liquidity screens only make sense where the feed carries
+    # real volume. Forex/index feeds typically do not; those rows skip the
+    # volume gates and carry a VOLUME_DATA_UNRELIABLE warning instead.
+    enforce_for_asset_types: List[str] = field(
+        default_factory=lambda: ["equity", "etf", "cryptocurrency"]
+    )
 
 
 @dataclass
@@ -190,6 +251,11 @@ class DataQualityConfig:
     max_abnormal_bar_return: float = 0.20
     # Rows below this data-quality score (0-100) cannot carry a live signal.
     min_data_quality_score: float = 60.0
+    # Known provider delay above this fraction of the horizon -> the data is
+    # not usable for that expiration (DATA_NOT_REAL_TIME). With yfinance's
+    # ~900s delay and the default 0.5, every 5/10/15-minute signal is honestly
+    # rejected while 60-120 minute research remains possible.
+    max_known_delay_fraction_of_horizon: float = 0.5
 
 
 @dataclass
@@ -233,7 +299,7 @@ class WeightsConfig:
     single family from dominating and caps sentiment (which, for short
     horizons, must not override live price/volume evidence).
     """
-    short: Dict[str, float] = field(default_factory=lambda: {
+    short_term: Dict[str, float] = field(default_factory=lambda: {
         "momentum": 0.30,
         "trend": 0.20,
         "mean_reversion": 0.15,
@@ -251,7 +317,7 @@ class WeightsConfig:
     })
 
     def for_group(self, group: str) -> Dict[str, float]:
-        return dict(self.short if group == HORIZON_GROUP_SHORT else self.extended_intraday)
+        return dict(self.short_term if group == HORIZON_GROUP_SHORT else self.extended_intraday)
 
 
 @dataclass
@@ -271,6 +337,12 @@ class SignalRulesConfig:
     # Volatility-regime factor: confidence is multiplied by a factor in
     # [vol_regime_floor, 1]; abnormal ranges push it toward the floor.
     vol_regime_floor: float = 0.50
+    # An abnormal-range bar (possible corrupted feed / news shock) blocks the
+    # row entirely instead of merely damping confidence.
+    block_on_abnormal_range: bool = True
+    # Minimum fraction of the horizon that must remain (based on data age) for
+    # the analysis to still describe the contract being bought.
+    min_time_remaining_fraction: float = 0.75
 
 
 @dataclass
@@ -334,6 +406,7 @@ class BinaryOptionsConfig:
     candles: CandlesConfig = field(default_factory=CandlesConfig)
     market_session: MarketSessionConfig = field(default_factory=MarketSessionConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+    instrument_catalog: InstrumentCatalogConfig = field(default_factory=InstrumentCatalogConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     rate_limits: Dict[str, float] = field(default_factory=lambda: {"yfinance": 0.4})
     liquidity: LiquidityConfig = field(default_factory=LiquidityConfig)
@@ -362,7 +435,7 @@ def load_config(
     Resolution order:
         1. explicit ``source`` argument (path or dict)
         2. ``BINARY_OPTIONS_CONFIG`` env var (path)
-        3. ``configs/binary_options_config.yaml``
+        3. ``configs/binary_options/default.yaml``
         4. dataclass defaults (no file required)
 
     Raises :class:`ConfigValidationError` (listing every problem) unless
@@ -397,6 +470,16 @@ def _resolve_path(source: Union[str, Path, None]) -> Optional[Path]:
         return Path(env)
     if _DEFAULT_CONFIG_PATH.exists():
         return _DEFAULT_CONFIG_PATH
+    if _LEGACY_CONFIG_PATH.exists():
+        import warnings
+
+        warnings.warn(
+            f"{_LEGACY_CONFIG_PATH} is deprecated; move it to "
+            f"{_DEFAULT_CONFIG_PATH} (see docs/shared/migration.md)",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return _LEGACY_CONFIG_PATH
     return None
 
 
@@ -414,12 +497,15 @@ def _from_dict(raw: Dict[str, Any]) -> BinaryOptionsConfig:
             **_filtered(MarketSessionConfig, section("market_session"))
         ),
         providers=ProvidersConfig(**_filtered(ProvidersConfig, section("providers"))),
+        instrument_catalog=InstrumentCatalogConfig(
+            **_filtered(InstrumentCatalogConfig, section("instrument_catalog"))
+        ),
         cache=CacheConfig(**_filtered(CacheConfig, section("cache"))),
         rate_limits=dict(section("rate_limits") or {"yfinance": 0.4}),
         liquidity=LiquidityConfig(**_filtered(LiquidityConfig, section("liquidity"))),
         data_quality=DataQualityConfig(**_filtered(DataQualityConfig, section("data_quality"))),
         features=FeatureParamsConfig(**_filtered(FeatureParamsConfig, section("features"))),
-        weights=WeightsConfig(**_filtered(WeightsConfig, section("weights"))),
+        weights=WeightsConfig(**_filtered(WeightsConfig, _migrate_weights(section("weights")))),
         signal_rules=SignalRulesConfig(**_filtered(SignalRulesConfig, section("signal_rules"))),
         sentiment=SentimentConfig(**_filtered(SentimentConfig, section("sentiment"))),
         payout=PayoutConfig(**_filtered(PayoutConfig, section("payout"))),
@@ -427,6 +513,28 @@ def _from_dict(raw: Dict[str, Any]) -> BinaryOptionsConfig:
         logging=LoggingConfig(**_filtered(LoggingConfig, section("logging"))),
         validation=ValidationConfig(**_filtered(ValidationConfig, section("validation"))),
     )
+
+
+def _migrate_weights(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the legacy ``weights.short`` key onto ``weights.short_term``.
+
+    The short group was renamed when the 30-minute horizon moved to
+    ``extended_intraday`` (short_term is now 5-15 minutes). Old YAMLs keep
+    working, with a deprecation warning.
+    """
+    if "short" in data and "short_term" not in data:
+        import warnings
+
+        warnings.warn(
+            "weights.short is deprecated; rename it to weights.short_term "
+            "(short_term now covers 5-15 minutes; 30 minutes belongs to "
+            "extended_intraday). See docs/shared/migration.md",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+        data = dict(data)
+        data["short_term"] = data.pop("short")
+    return data
 
 
 def _filtered(cls, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -462,6 +570,12 @@ def validate_config(cfg: BinaryOptionsConfig) -> List[str]:
         )
     if cfg.universe.max_symbols <= 0:
         problems.append("universe.max_symbols must be positive")
+    if cfg.universe.mode != "catalog" and not cfg.run.research_mode:
+        problems.append(
+            f"universe.mode '{cfg.universe.mode}' analyzes generic symbols and "
+            "requires run.research_mode: true (or --research-mode). Contract "
+            "selection needs a verified instrument catalog (universe.mode: catalog)"
+        )
 
     # --- interval ---
     interval = cfg.candles.interval
@@ -582,7 +696,7 @@ def validate_config(cfg: BinaryOptionsConfig) -> List[str]:
 
     # --- weights ---
     for group_name, weights in (
-        (HORIZON_GROUP_SHORT, cfg.weights.short),
+        (HORIZON_GROUP_SHORT, cfg.weights.short_term),
         (HORIZON_GROUP_EXTENDED, cfg.weights.extended_intraday),
     ):
         problems.extend(_validate_weights(group_name, weights))
@@ -612,6 +726,28 @@ def validate_config(cfg: BinaryOptionsConfig) -> List[str]:
             problems.append(f"{label} must be within [0, 1]")
     if not (0.0 <= cfg.data_quality.min_data_quality_score <= 100.0):
         problems.append("data_quality.min_data_quality_score must be within [0, 100]")
+
+    # --- instrument catalog ---
+    ic = cfg.instrument_catalog
+    if ic.provider not in ("auto", "yaml", "csv"):
+        problems.append(f"instrument_catalog.provider '{ic.provider}' not in (auto, yaml, csv)")
+    for label, val in (
+        ("max_catalog_age_seconds", ic.max_catalog_age_seconds),
+        ("maximum_payout_age_seconds", ic.maximum_payout_age_seconds),
+        ("max_platform_quote_age_seconds", ic.max_platform_quote_age_seconds),
+        ("max_quote_diff_bps", ic.max_quote_diff_bps),
+    ):
+        if float(val) < 0:
+            problems.append(f"instrument_catalog.{label} must be >= 0")
+    if ic.minimum_acceptable_payout < 0:
+        problems.append("instrument_catalog.minimum_acceptable_payout must be >= 0")
+    from .catalog.models import SUPPORTED_ASSET_TYPES as _TYPES
+    for t in ic.asset_types:
+        if t not in _TYPES:
+            problems.append(
+                f"instrument_catalog.asset_types entry '{t}' unsupported "
+                f"(supported: {', '.join(_TYPES)})"
+            )
 
     # --- sentiment ---
     if cfg.sentiment.min_horizon_minutes < HORIZON_MIN_MINUTES:

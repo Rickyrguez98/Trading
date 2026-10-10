@@ -33,9 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
 from trading_common.cache import Cache
-from trading_common.io import ensure_dir, write_csv, write_json
+from trading_common.io import ensure_dir, write_json
 from trading_common.rate_limiter import RateLimiter
 
 from ..config import (
@@ -48,18 +47,23 @@ from ..config import (
 )
 from ..data_providers import build_intraday_provider
 from ..data_providers import errors as err
+from ..catalog.context import build_contract_context, unknown_contract_context
+from ..catalog.providers import CatalogError, build_catalog_provider
+from ..catalog.validation import validate_catalog
 from ..data_providers.base import IntradayCandlesProvider, IntradaySeries
 from ..features.engine import compute_features
 from ..health.provider_health import run_intraday_health_check
-from ..market_session import classify_session, expiry_for
+from ..market_session import classify_session, classify_session_for_asset, expiry_for
 from ..scoring.directional import DirectionalScores, score_direction
 from ..signals.decision import (
     SIGNAL_NO_TRADE,
+    LiquidityAssessment,
     assess_liquidity,
     decide_signal,
 )
+from .. import reporting
 from ..signals.payout import break_even_win_probability
-from ..universe import resolve_universe
+from ..universe import UniverseResult, resolve_universe
 from ..utils.timeutils import iso_utc, utc_now
 from ..validation.candles import SeriesQuality, assess_series
 from ..validation.output_validation import render_markdown as render_validation_md
@@ -67,7 +71,6 @@ from ..validation.output_validation import validate_outputs
 from ..validation.run_status import (
     RUN_INVALID,
     determine_run_status,
-    render_status_banner,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +137,101 @@ class _Timer:
 
 
 # ---------------------------------------------------------------------------
+# Instrument catalog resolution
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _CatalogBundle:
+    """What Stage 1 learned from the instrument catalog (possibly nothing)."""
+    snapshot: Any = None                       # CatalogSnapshot | None
+    validation: Any = None                     # CatalogValidationResult | None
+    instrument_by_symbol: Dict[str, Any] = field(default_factory=dict)
+    stale: bool = False
+    notes: List[str] = field(default_factory=list)
+    research_note: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.research_note:
+            self.notes.append(self.research_note)
+
+
+def _resolve_catalog_universe(cfg, now) -> "tuple[UniverseResult, _CatalogBundle]":
+    """Resolve the universe from the verified instrument catalog.
+
+    Without a usable catalog the pipeline does NOT invent availability: it
+    falls back to the configured watchlist purely so that every requested
+    symbol still gets explainable NO_TRADE (INSTRUMENT_AVAILABILITY_UNKNOWN)
+    rows, and the run is degraded.
+    """
+    bundle = _CatalogBundle()
+    ic = cfg.instrument_catalog
+    universe = UniverseResult(mode="catalog")
+
+    if not ic.path:
+        bundle.notes.append(
+            "no instrument catalog configured (instrument_catalog.path) -- "
+            "contract availability is unknown for every symbol"
+        )
+        universe.symbols = list(cfg.universe.watchlist)[: cfg.universe.max_symbols]
+        universe.notes.append(
+            "watchlist used only to enumerate availability-unknown rows"
+        )
+        if not universe.symbols:
+            universe.error = (
+                "no instrument catalog and no watchlist symbols to report on"
+            )
+        return universe, bundle
+
+    try:
+        provider = build_catalog_provider(ic.path, ic.provider)
+        snapshot = provider.get_available_instruments(as_of=now, platform=ic.platform)
+    except CatalogError as exc:
+        bundle.notes.append(f"instrument catalog unusable: {exc}")
+        universe.error = f"instrument catalog unusable: {exc}"
+        return universe, bundle
+
+    result = validate_catalog(snapshot, ic, now=now)
+    bundle.snapshot = snapshot
+    bundle.validation = result
+    bundle.stale = result.stale
+    if not result.ok:
+        bundle.notes.extend(f"catalog problem: {p}" for p in result.problems)
+        universe.error = "instrument catalog failed validation: " + "; ".join(
+            result.problems[:3]
+        )
+        return universe, bundle
+    bundle.notes.extend(f"catalog warning: {w}" for w in result.warnings)
+
+    instruments = list(snapshot.instruments)
+    if ic.asset_types:
+        kept = [i for i in instruments if i.asset_type in ic.asset_types]
+        for i in instruments:
+            if i not in kept:
+                universe.dropped[i.underlying_symbol] = "asset_type_filtered"
+        instruments = kept
+    for inst in instruments:
+        issues = result.instrument_issues.get(inst.platform_asset_id)
+        if issues:
+            universe.dropped[inst.underlying_symbol] = "catalog_issues: " + "; ".join(issues)
+            continue
+        if inst.underlying_symbol in bundle.instrument_by_symbol:
+            universe.dropped[inst.underlying_symbol] = "duplicate_underlying_in_catalog"
+            continue
+        bundle.instrument_by_symbol[inst.underlying_symbol] = inst
+        universe.symbols.append(inst.underlying_symbol)
+        if inst.underlying_name:
+            universe.name_by_symbol[inst.underlying_symbol] = inst.underlying_name
+    universe.symbols = universe.symbols[: cfg.universe.max_symbols]
+    universe.notes.append(
+        f"catalog: {snapshot.provider} platform={snapshot.platform} "
+        f"instruments={len(universe.symbols)} stale={result.stale}"
+    )
+    if not universe.symbols:
+        universe.error = "catalog contained no usable instruments"
+    return universe, bundle
+
+
+# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -144,9 +242,10 @@ def run_pipeline(
     cli_watchlist_file: Optional[str] = None,
     provider: Optional[IntradayCandlesProvider] = None,
     now: Optional[datetime] = None,
+    config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the staged pipeline. ``provider`` and ``now`` are injectable so
-    tests run deterministically offline."""
+    tests run deterministically offline; ``config_path`` feeds the manifest."""
     now = now or utc_now()
     run_id = uuid.uuid4().hex[:12]
     generated_at = iso_utc(now)
@@ -155,22 +254,32 @@ def run_pipeline(
     interval_minutes = SUPPORTED_INTERVALS[interval]
     interval_seconds = interval_minutes * 60
 
-    # --- Stage 1: universe -------------------------------------------------
+    # --- Stage 1: universe / instrument catalog ------------------------------
+    # Non-catalog modes analyze generic symbols; config validation only allows
+    # them together with run.research_mode, so mode != "catalog" implies an
+    # explicit research run.
+    research_mode = cfg.run.research_mode or cfg.universe.mode != "catalog"
     s1 = StageStats("1_universe")
     with _Timer(s1):
-        universe = resolve_universe(
-            cfg, cli_tickers=cli_tickers, cli_watchlist_file=cli_watchlist_file
-        )
+        if cfg.universe.mode == "catalog":
+            universe, catalog = _resolve_catalog_universe(cfg, now)
+        else:
+            universe = resolve_universe(
+                cfg, cli_tickers=cli_tickers, cli_watchlist_file=cli_watchlist_file
+            )
+            catalog = _CatalogBundle(research_note="research mode: no contract catalog in play")
         s1.input_count = len(universe.symbols) + len(universe.dropped)
         s1.output_count = len(universe.symbols)
         for sym, reason in universe.dropped.items():
             s1.drop(reason)
         s1.notes.extend(universe.notes)
+        if catalog.notes:
+            s1.notes.extend(catalog.notes)
         if universe.error:
             s1.notes.append(universe.error)
     stages.append(s1)
-    logger.info("Stage 1 universe: %d symbols (%s mode)%s",
-                len(universe.symbols), universe.mode,
+    logger.info("Stage 1 universe: %d symbols (%s mode, research=%s)%s",
+                len(universe.symbols), universe.mode, research_mode,
                 f" ERROR: {universe.error}" if universe.error else "")
 
     # --- Stage 2: session + provider health --------------------------------
@@ -265,12 +374,25 @@ def run_pipeline(
     )
     with _Timer(s5):
         s5.input_count = len(universe.symbols) * len(cfg.horizons.minutes)
+        market_delay = float(
+            cfg.providers.known_delay_seconds.get(getattr(provider, "name", ""), 0.0)
+        )
         for sym in universe.symbols:
             series = series_by_symbol.get(sym)
             quality = quality_by_symbol.get(sym) or SeriesQuality(
                 symbol=sym, error_type=err.NO_INTRADAY_DATA
             )
-            liquidity = liquidity_by_symbol.get(sym) or assess_liquidity([], cfg)
+            instrument = catalog.instrument_by_symbol.get(sym)
+            asset_type = instrument.asset_type if instrument else "equity"
+            row_session = classify_session_for_asset(now, cfg.market_session, asset_type)
+            # Volume-based liquidity gates only where the feed carries real
+            # volume; other asset types skip them with a visible warning.
+            if asset_type in cfg.liquidity.enforce_for_asset_types:
+                liquidity = liquidity_by_symbol.get(sym) or assess_liquidity([], cfg)
+                liq_warning = None
+            else:
+                liquidity = LiquidityAssessment(ok=True, reasons=[])
+                liq_warning = "VOLUME_DATA_UNRELIABLE"
             sentiment_score = (
                 universe.sentiment_by_symbol.get(sym)
                 if cfg.sentiment.enabled else None
@@ -308,20 +430,43 @@ def run_pipeline(
                     if reference_time is not None
                     else now + timedelta(minutes=horizon)
                 )
+                contract_ctx = (
+                    build_contract_context(
+                        instrument,
+                        snapshot=catalog.snapshot,
+                        catalog_stale=catalog.stale,
+                        horizon_minutes=horizon,
+                        cfg=cfg.instrument_catalog,
+                        research_mode=research_mode,
+                        market_reference_price=quality.reference_price,
+                        now=now,
+                    )
+                    if catalog.snapshot is not None and instrument is not None
+                    else unknown_contract_context(research_mode=research_mode)
+                )
                 decision = decide_signal(
-                    scores, quality, session, liquidity, expiry_utc=expiry, cfg=cfg
+                    scores, quality, row_session, liquidity,
+                    expiry_utc=expiry, cfg=cfg,
+                    contract=contract_ctx,
+                    market_delay_seconds=market_delay,
+                    abnormal_market="ABNORMAL_RANGE" in vol_flags,
+                    asset_type=asset_type,
                 )
                 decision.warning_flags.extend(vol_flags)
+                if liq_warning:
+                    decision.warning_flags.append(liq_warning)
                 rows.append(_build_row(
                     run_id=run_id, generated_at=generated_at, symbol=sym,
                     company=universe.name_by_symbol.get(sym),
                     series=series, quality=quality, scores=scores,
-                    decision=decision, session_state=session.state,
+                    decision=decision, session_state=row_session.state,
                     interval=interval, reference_time=reference_time,
                     expiry=expiry if reference_time is not None else None,
                     horizon=horizon, payout_ratio=payout_ratio,
                     break_even=break_even, timezone_name=cfg.market_session.timezone,
                     feature_values=feature_values,
+                    contract=contract_ctx, instrument=instrument,
+                    market_delay_seconds=market_delay, now=now,
                 ))
         s5.output_count = len(rows)
         for r in rows:
@@ -358,11 +503,101 @@ def run_pipeline(
     # --- Stage 9: outputs ----------------------------------------------------
     s9 = StageStats("9_outputs")
     with _Timer(s9):
-        paths = _write_outputs(
-            cfg, rows, stages, assessment, universe, series_by_symbol,
-            quality_by_symbol, health_summary, session, run_id, generated_at,
-            payout_ratio, break_even,
-        )
+        run_dir = ensure_dir(reporting.run_dir_for(cfg, run_id))
+        paths = reporting.write_signal_csvs(cfg, rows)
+        catalog_notes = list(catalog.notes)
+        for name, subset, title, with_matrix in (
+            ("signals_all", rows, "Binary options signals — all horizons", True),
+            ("signals_short_term",
+             [r for r in rows if r["horizon_group"] == "short_term"],
+             "Binary options signals — short term (5-15 min)", False),
+            ("signals_extended_intraday",
+             [r for r in rows if r["horizon_group"] == "extended_intraday"],
+             "Binary options signals — extended intraday (30-120 min)", False),
+        ):
+            md = reporting.render_signals_md(
+                cfg, subset, assessment, generated_at, title=title,
+                horizons=cfg.horizons.minutes, catalog_notes=catalog_notes,
+                include_matrix=with_matrix,
+            )
+            (run_dir / f"{name}.md").write_text(md, encoding="utf-8")
+            paths[f"{name}_md"] = str(run_dir / f"{name}.md")
+
+        signal_counts: Dict[str, int] = {}
+        reason_counts: Dict[str, int] = {}
+        for r in rows:
+            signal_counts[r["signal"]] = signal_counts.get(r["signal"], 0) + 1
+            if r["no_trade_reason"]:
+                reason_counts[r["no_trade_reason"]] = (
+                    reason_counts.get(r["no_trade_reason"], 0) + 1
+                )
+        summary = {
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "module": "binary_options_selection",
+            "run_status": assessment.run_status,
+            "run_assessment": assessment.to_dict(),
+            "market_state": session.state,
+            "exchange_local_time": session.exchange_local_time,
+            "timezone": session.timezone,
+            "research_mode": research_mode,
+            "universe": {
+                "mode": universe.mode,
+                "symbols": universe.symbols,
+                "dropped": universe.dropped,
+                "notes": universe.notes,
+                "error": universe.error,
+            },
+            "catalog": {
+                "provider": catalog.snapshot.provider if catalog.snapshot else None,
+                "platform": catalog.snapshot.platform if catalog.snapshot else None,
+                "path": catalog.snapshot.path if catalog.snapshot else None,
+                "instruments": len(catalog.instrument_by_symbol),
+                "stale": catalog.stale,
+                "age_seconds": (
+                    catalog.snapshot.age_seconds(now) if catalog.snapshot else None
+                ),
+                "notes": catalog.notes,
+            },
+            "horizons_minutes": cfg.horizons.minutes,
+            "horizon_matrix": reporting.horizon_matrix(rows, cfg.horizons.minutes),
+            "interval": cfg.candles.interval,
+            "market_data_provider": cfg.providers.intraday,
+            "signal_counts": signal_counts,
+            "no_trade_reason_counts": reason_counts,
+            "stages": [st.to_dict() for st in stages],
+            "candidates": rows,
+        }
+        write_json(run_dir / "run_summary.json", summary)
+        paths["run_summary_json"] = str(run_dir / "run_summary.json")
+
+        diag = {
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "market_data_provider": cfg.providers.intraday,
+            "catalog_provider": catalog.snapshot.provider if catalog.snapshot else None,
+            "health_check": health_summary.to_dict() if health_summary else None,
+            "catalog": summary["catalog"],
+            "symbols": [
+                {
+                    **series_by_symbol[sym].to_meta(),
+                    "data_quality_score": (
+                        quality_by_symbol[sym].data_quality_score
+                        if sym in quality_by_symbol else None
+                    ),
+                    "stale": (
+                        quality_by_symbol[sym].stale if sym in quality_by_symbol else None
+                    ),
+                    "usable": (
+                        quality_by_symbol[sym].usable if sym in quality_by_symbol else None
+                    ),
+                }
+                for sym in sorted(series_by_symbol)
+            ],
+        }
+        paths.update(reporting.write_json_and_md(
+            run_dir, "provider_diagnostics", diag, reporting.render_diagnostics_md(diag)
+        ))
         s9.output_count = len(paths)
     stages.append(s9)
 
@@ -370,12 +605,32 @@ def run_pipeline(
     validation_result = None
     if cfg.validation.enabled:
         validation_result = validate_outputs(rows, run_status=assessment.run_status)
-        out_dir = ensure_dir(cfg.run.output_dir)
-        write_json(out_dir / "binary_options_output_validation.json", validation_result)
-        (out_dir / "binary_options_output_validation.md").write_text(
-            render_validation_md(validation_result), encoding="utf-8"
-        )
+        paths.update(reporting.write_json_and_md(
+            run_dir, "output_validation", validation_result,
+            render_validation_md(validation_result),
+        ))
         logger.info("Output validation: %s", validation_result["overall_status"])
+
+    # --- Run manifest + latest/ refresh ---------------------------------------
+    finished = utc_now()
+    manifest = reporting.build_run_manifest(
+        cfg=cfg,
+        run_id=run_id,
+        started_at=generated_at,
+        finished_at=iso_utc(finished),
+        duration_seconds=(finished - now).total_seconds(),
+        config_path=config_path,
+        catalog_path=cfg.instrument_catalog.path,
+        catalog_hash=catalog.snapshot.catalog_hash if catalog.snapshot else None,
+        market_data_provider=cfg.providers.intraday,
+        catalog_provider=catalog.snapshot.provider if catalog.snapshot else None,
+        output_paths=paths,
+        run_status=assessment.run_status,
+    )
+    write_json(run_dir / "run_manifest.json", manifest)
+    paths["run_manifest_json"] = str(run_dir / "run_manifest.json")
+    paths["latest_dir"] = reporting.refresh_latest(cfg, run_id)
+    paths["run_dir"] = str(run_dir)
 
     return {
         "run_id": run_id,
@@ -385,6 +640,7 @@ def run_pipeline(
         "paths": paths,
         "validation": validation_result,
         "session": session,
+        "manifest": manifest,
     }
 
 
@@ -396,16 +652,61 @@ def _build_row(
     *, run_id, generated_at, symbol, company, series, quality, scores,
     decision, session_state, interval, reference_time, expiry, horizon,
     payout_ratio, break_even, timezone_name, feature_values,
+    contract=None, instrument=None, market_delay_seconds=0.0, now=None,
 ) -> Dict[str, Any]:
+    # Contract-specific economics take precedence over the research-level
+    # global payout assumption; without a contract payout, break-even stays
+    # None rather than being fabricated from the config default.
+    row_payout = contract.payout_ratio if contract and contract.payout_ratio is not None else payout_ratio
+    row_break_even = (
+        round(break_even_win_probability(row_payout), 4)
+        if row_payout is not None else None
+    )
+    data_age = (
+        round(quality.data_age_seconds, 1)
+        if quality.data_age_seconds is not None else None
+    )
+    time_remaining = (
+        round(horizon * 60.0 - quality.data_age_seconds, 1)
+        if quality.data_age_seconds is not None else None
+    )
     return {
         "run_id": run_id,
         "generated_at": generated_at,
-        "symbol": symbol,
+        "analysis_timestamp": generated_at,
+        # --- underlying / contract identity ---
+        "symbol": symbol,                      # kept for compatibility
+        "underlying_symbol": symbol,
+        "underlying_name": (
+            (instrument.underlying_name if instrument else None) or company
+        ),
         "company_name": company,
-        "provider_symbol": getattr(series, "provider_symbol", None) if series else None,
+        "asset_type": instrument.asset_type if instrument else "equity",
+        "market": instrument.market if instrument else None,
+        "is_otc": bool(instrument.is_otc) if instrument else False,
+        "platform": instrument.platform if instrument else None,
+        "platform_asset_id": instrument.platform_asset_id if instrument else None,
+        "platform_asset_name": instrument.platform_asset_name if instrument else None,
+        "contract_id": instrument.contract_id if instrument else None,
+        "contract_status": instrument.contract_status if instrument else None,
+        "contract_available": bool(contract.contract_available) if contract else False,
+        "availability_known": bool(contract.availability_known) if contract else False,
+        # --- providers / provenance ---
+        "provider_symbol": (
+            (instrument.provider_symbol if instrument else None)
+            or (getattr(series, "provider_symbol", None) if series else None)
+        ),
         "provider": getattr(series, "provider", None) if series else None,
+        "market_data_provider": getattr(series, "provider", None) if series else None,
         "provider_status": getattr(series, "status", "error") if series else "error",
         "data_source": getattr(series, "data_source", None) if series else None,
+        "known_provider_delay_seconds": market_delay_seconds,
+        "catalog_provider": contract.catalog_provider if contract else None,
+        "catalog_age_seconds": (
+            round(contract.catalog_age_seconds, 1)
+            if contract and contract.catalog_age_seconds is not None else None
+        ),
+        # --- session / timing ---
         "market_state": session_state,
         "timezone": timezone_name,
         "interval": interval,
@@ -413,23 +714,50 @@ def _build_row(
             iso_utc(quality.latest_complete_close)
             if quality.latest_complete_close else None
         ),
-        "data_age_seconds": (
-            round(quality.data_age_seconds, 1)
-            if quality.data_age_seconds is not None else None
+        "latest_completed_candle_timestamp": (
+            iso_utc(quality.latest_complete_close)
+            if quality.latest_complete_close else None
         ),
+        "data_age_seconds": data_age,
+        "market_data_age_seconds": data_age,
         "reference_time": iso_utc(reference_time) if reference_time else None,
+        "reference_timestamp": iso_utc(reference_time) if reference_time else None,
         "reference_price": quality.reference_price,
+        "platform_reference_price": (
+            contract.platform_reference_price if contract else None
+        ),
+        "platform_quote_age_seconds": (
+            round(contract.platform_quote_age_seconds, 1)
+            if contract and contract.platform_quote_age_seconds is not None else None
+        ),
+        "absolute_quote_difference": (
+            contract.absolute_quote_difference if contract else None
+        ),
+        "relative_quote_difference_bps": (
+            contract.relative_quote_difference_bps if contract else None
+        ),
+        "quote_alignment_status": (
+            contract.quote_alignment_status if contract else "unavailable"
+        ),
         "horizon_minutes": horizon,
         "horizon_group": horizon_group(horizon),
         "expiry_time": iso_utc(expiry) if expiry else None,
+        "expiration_timestamp": iso_utc(expiry) if expiry else None,
+        "time_remaining_seconds": time_remaining,
+        # --- decision ---
+        "recommended_action": decision.recommended_action,
         "signal": decision.signal,
         "call_score": scores.call_score,
         "put_score": scores.put_score,
         "directional_score": scores.directional_score,
         "confidence_score": scores.confidence_score,
         "data_quality_score": quality.data_quality_score,
+        "liquidity_score": _liquidity_score(quality),
         "signal_validity": decision.signal_validity,
         "signal_strength": decision.signal_strength,
+        "ranking_validity": (
+            "actionable" if decision.signal != SIGNAL_NO_TRADE else "excluded"
+        ),
         "contradiction_ratio": scores.contradiction_ratio,
         "feature_coverage": scores.feature_coverage,
         "vol_regime_factor": scores.vol_regime_factor,
@@ -442,13 +770,29 @@ def _build_row(
         "feature_values": dict(feature_values),
         "missing_candle_count": quality.missing_count,
         "duplicate_candle_count": quality.duplicate_count,
-        "payout_ratio": payout_ratio,
-        "break_even_win_probability": break_even,
+        # --- contract economics (payout ratio = net profit per unit staked) ---
+        "payout_ratio": row_payout,
+        "payout_source": (
+            contract.payout_source
+            if contract and contract.payout_ratio is not None
+            else ("config" if payout_ratio is not None else None)
+        ),
+        "payout_timestamp": contract.payout_timestamp if contract else None,
+        "break_even_win_probability": row_break_even,
         # Always None in this milestone; the output validator errors otherwise.
         "calibrated_probability": None,
         "expected_edge": None,
         "run_status": None,  # filled after run-status assessment
     }
+
+
+def _liquidity_score(quality: SeriesQuality) -> float:
+    """Bounded 0-100 liquidity indicator: penalizes zero-volume bars only.
+
+    A fuller dollar-volume percentile model needs cross-sectional context this
+    per-symbol pipeline does not have; the honest bounded proxy is the share
+    of bars that actually traded."""
+    return round(100.0 * (1.0 - min(1.0, quality.zero_volume_ratio)), 1)
 
 
 def _rank_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -471,235 +815,6 @@ def _rank_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # Outputs
 # ---------------------------------------------------------------------------
 
-def _write_outputs(
-    cfg, rows, stages, assessment, universe, series_by_symbol,
-    quality_by_symbol, health_summary, session, run_id, generated_at,
-    payout_ratio, break_even,
-) -> Dict[str, str]:
-    out_dir = ensure_dir(cfg.run.output_dir)
-    processed_dir = ensure_dir(cfg.run.processed_dir)
-    paths: Dict[str, str] = {}
-
-    # CSV (list/dict fields serialized for flat storage)
-    csv_rows = []
-    for r in rows:
-        c = dict(r)
-        for k in ("primary_drivers", "primary_conflicts", "warning_flags"):
-            c[k] = "; ".join(c[k]) if c[k] else ""
-        for k in ("family_contributions", "missing_families", "feature_values"):
-            c[k] = "; ".join(f"{a}={b}" for a, b in c[k].items()) if c[k] else ""
-        csv_rows.append(c)
-    csv_path = processed_dir / "binary_options_candidates.csv"
-    write_csv(csv_path, pd.DataFrame(csv_rows))
-    paths["candidates_csv"] = str(csv_path)
-
-    # Markdown report
-    md_path = out_dir / "binary_options_candidates.md"
-    md_path.write_text(
-        _render_report_md(cfg, rows, assessment, generated_at, payout_ratio, break_even),
-        encoding="utf-8",
-    )
-    paths["candidates_md"] = str(md_path)
-
-    # JSON summary
-    signal_counts: Dict[str, int] = {}
-    reason_counts: Dict[str, int] = {}
-    for r in rows:
-        signal_counts[r["signal"]] = signal_counts.get(r["signal"], 0) + 1
-        if r["no_trade_reason"]:
-            reason_counts[r["no_trade_reason"]] = reason_counts.get(r["no_trade_reason"], 0) + 1
-    summary = {
-        "run_id": run_id,
-        "generated_at": generated_at,
-        "module": "binary_options_selection",
-        "run_status": assessment.run_status,
-        "run_assessment": assessment.to_dict(),
-        "market_state": session.state,
-        "exchange_local_time": session.exchange_local_time,
-        "timezone": session.timezone,
-        "universe": {
-            "mode": universe.mode,
-            "symbols": universe.symbols,
-            "dropped": universe.dropped,
-            "notes": universe.notes,
-            "error": universe.error,
-        },
-        "horizons_minutes": cfg.horizons.minutes,
-        "interval": cfg.candles.interval,
-        "provider": cfg.providers.intraday,
-        "signal_counts": signal_counts,
-        "no_trade_reason_counts": reason_counts,
-        "payout": {
-            "payout_ratio": payout_ratio,
-            "break_even_win_probability": break_even,
-            "note": (
-                "Break-even is contextual only. Confidence scores are heuristics, "
-                "not calibrated probabilities; profitability cannot be inferred "
-                "without calibrated probabilities and actual contract terms."
-            ),
-        },
-        "stages": [s.to_dict() for s in stages],
-        "candidates": rows,
-    }
-    summary_path = out_dir / "binary_options_summary.json"
-    write_json(summary_path, summary)
-    paths["summary_json"] = str(summary_path)
-
-    # Provider diagnostics
-    diag = {
-        "run_id": run_id,
-        "generated_at": generated_at,
-        "provider": cfg.providers.intraday,
-        "health_check": health_summary.to_dict() if health_summary else None,
-        "symbols": [
-            {
-                **series_by_symbol[sym].to_meta(),
-                "data_quality_score": (
-                    quality_by_symbol[sym].data_quality_score
-                    if sym in quality_by_symbol else None
-                ),
-                "stale": (
-                    quality_by_symbol[sym].stale if sym in quality_by_symbol else None
-                ),
-                "usable": (
-                    quality_by_symbol[sym].usable if sym in quality_by_symbol else None
-                ),
-            }
-            for sym in sorted(series_by_symbol)
-        ],
-    }
-    diag_json = out_dir / "binary_options_provider_diagnostics.json"
-    write_json(diag_json, diag)
-    paths["diagnostics_json"] = str(diag_json)
-    diag_md = out_dir / "binary_options_provider_diagnostics.md"
-    diag_md.write_text(_render_diagnostics_md(diag), encoding="utf-8")
-    paths["diagnostics_md"] = str(diag_md)
-    return paths
-
-
-def _render_report_md(cfg, rows, assessment, generated_at, payout_ratio, break_even) -> str:
-    lines: List[str] = ["# Binary options selection — research signals", ""]
-    lines.append(render_status_banner(assessment, generated_at))
-    lines.append("")
-    lines.append("## How to read this report")
-    lines.append("")
-    lines.append(
-        "- Each row is one **underlying x expiration horizon** with its own "
-        "features and score; a 5-minute and a 60-minute signal on the same "
-        "symbol are independent answers."
-    )
-    lines.append(
-        "- `CALL` = the weighted intraday evidence points to a settlement above "
-        "the reference price; `PUT` = below it; `NO_TRADE` = the evidence is too "
-        "close, too weak, contradictory, stale, or the data/session is unsuitable. "
-        "NO_TRADE is a first-class answer, not an error."
-    )
-    lines.append(
-        "- `confidence_score` (0-1) is a bounded **heuristic** combining signal "
-        "margin, contradiction, data quality, feature coverage, and the "
-        "volatility regime. It is **not a calibrated probability** and must not "
-        "be treated as a win rate."
-    )
-    if payout_ratio is not None:
-        lines.append(
-            f"- Configured payout ratio {payout_ratio}: break-even win probability "
-            f"= 1 / (1 + {payout_ratio}) = **{break_even:.1%}** — context only; "
-            "profitability cannot be inferred from heuristic scores."
-        )
-    lines.append(
-        "- `data_age` is the age of the latest completed candle at generation "
-        "time; stale rows are never presented as live signals."
-    )
-    lines.append("")
-
-    actionable = [r for r in rows if r["signal"] != SIGNAL_NO_TRADE]
-    no_trade = [r for r in rows if r["signal"] == SIGNAL_NO_TRADE]
-
-    lines.append(f"## Ranked signals ({len(actionable)})")
-    lines.append("")
-    if actionable:
-        top = actionable[: cfg.run.top_n]
-        header = (
-            "| # | symbol | horizon | signal | strength | validity | dir | call | put "
-            "| conf | quality | age (s) | drivers | conflicts | warnings |"
-        )
-        lines.append(header)
-        lines.append("|" + "---|" * 15)
-        for i, r in enumerate(top, 1):
-            lines.append(
-                f"| {i} | {r['symbol']} | {r['horizon_minutes']}m "
-                f"({r['horizon_group']}) | **{r['signal']}** | {r['signal_strength']} "
-                f"| {r['signal_validity']} | {r['directional_score']:+.1f} "
-                f"| {r['call_score']:.1f} | {r['put_score']:.1f} "
-                f"| {r['confidence_score']:.2f} | {r['data_quality_score']:.0f} "
-                f"| {r['data_age_seconds'] if r['data_age_seconds'] is not None else '—'} "
-                f"| {', '.join(r['primary_drivers']) or '—'} "
-                f"| {', '.join(r['primary_conflicts']) or '—'} "
-                f"| {', '.join(r['warning_flags']) or '—'} |"
-            )
-    else:
-        lines.append(
-            "_No actionable signals. This is a normal outcome — see the NO_TRADE "
-            "breakdown below for the reasons._"
-        )
-    lines.append("")
-
-    lines.append(f"## NO_TRADE rows ({len(no_trade)})")
-    lines.append("")
-    reason_counts: Dict[str, int] = {}
-    for r in no_trade:
-        reason_counts[r["no_trade_reason"]] = reason_counts.get(r["no_trade_reason"], 0) + 1
-    if reason_counts:
-        lines.append("| reason | rows |")
-        lines.append("|---|---|")
-        for reason, n in sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            lines.append(f"| {reason} | {n} |")
-    else:
-        lines.append("_None._")
-    lines.append("")
-    lines.append("---")
-    lines.append(
-        "> **Disclaimer.** Research and educational output only. Not financial "
-        "advice. Binary options are high-risk instruments and many platforms "
-        "operate under weak regulation; nothing here executes trades, sizes "
-        "stakes, or promises any outcome. Past intraday patterns do not "
-        "guarantee future results."
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _render_diagnostics_md(diag: Dict[str, Any]) -> str:
-    lines = [
-        "# Binary options provider diagnostics",
-        "",
-        f"Run `{diag['run_id']}` — provider **{diag['provider']}** — {diag['generated_at']}",
-        "",
-    ]
-    hc = diag.get("health_check")
-    if hc:
-        lines.append(
-            f"Health probe: {hc['ok_count']} ok / {hc['fail_count']} failed"
-            + (" — **SYSTEMIC FAILURE**" if hc["systemic_failure"] else "")
-        )
-        lines.append("")
-    lines.append(
-        "| symbol | status | error_type | source | candles | latest close | "
-        "quality | stale | usable |"
-    )
-    lines.append("|" + "---|" * 9)
-    for s in diag["symbols"]:
-        lines.append(
-            f"| {s['symbol']} | {s['status']} | {s['error_type'] or '—'} "
-            f"| {s['data_source'] or '—'} | {s['candle_count']} "
-            f"| {s['latest_candle_close'] or '—'} "
-            f"| {s['data_quality_score'] if s['data_quality_score'] is not None else '—'} "
-            f"| {s['stale']} | {s['usable']} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -714,7 +829,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--config", default=None, help="Path to YAML config "
-                   "(default configs/binary_options_config.yaml).")
+                   "(default configs/binary_options/default.yaml).")
     p.add_argument("--tickers", nargs="+", default=None, metavar="SYM",
                    help="Explicit underlyings; implies --universe custom.")
     p.add_argument("--watchlist", default=None, metavar="PATH",
@@ -729,8 +844,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", default=None,
                    help=f"Candle interval; one of {sorted(SUPPORTED_INTERVALS)}.")
     p.add_argument("--top", type=int, default=None, help="Top-N rows in the Markdown report.")
-    p.add_argument("--provider", default=None,
-                   help="Intraday provider name (default from YAML; 'yfinance').")
+    p.add_argument("--provider", "--market-data-provider", dest="provider",
+                   default=None,
+                   help="Intraday market-data provider (default from YAML; 'yfinance').")
+    p.add_argument("--instrument-catalog", default=None, metavar="PATH",
+                   help="Path to YOUR verified platform catalog (YAML/CSV); see "
+                        "configs/binary_options/instruments.example.yaml.")
+    p.add_argument("--catalog-provider", choices=["auto", "yaml", "csv"],
+                   default=None, help="Catalog file format (default: auto by extension).")
+    p.add_argument("--platform", default=None,
+                   help="Only analyze catalog instruments for this platform.")
+    p.add_argument("--asset-types", nargs="+", default=None, metavar="TYPE",
+                   help="Only analyze these asset types (equity etf forex index "
+                        "commodity cryptocurrency).")
+    otc = p.add_mutually_exclusive_group()
+    otc.add_argument("--exclude-otc", dest="exclude_otc", action="store_true",
+                     default=None, help="Exclude OTC contracts (default).")
+    otc.add_argument("--allow-otc", dest="exclude_otc", action="store_false",
+                     help="Analyze OTC contracts too (rows carry an OTC warning).")
+    p.add_argument("--research-mode", action="store_true",
+                   help="Explicit research analysis: relaxes contract-availability "
+                        "requirements (generic watchlists, missing payout data). "
+                        "Rows are visibly marked; nothing becomes actionable "
+                        "without a verified catalog.")
+    p.add_argument("--validate-catalog-only", action="store_true",
+                   help="Validate the instrument catalog schema/freshness, print "
+                        "the report, and exit (2 on fatal problems).")
     p.add_argument("--refresh-cache", action="store_true",
                    help="Invalidate the intraday cache before running.")
     p.add_argument("--no-cache", action="store_true", help="Disable the cache entirely.")
@@ -775,6 +914,18 @@ def _apply_cli_overrides(cfg: BinaryOptionsConfig, args: argparse.Namespace) -> 
         cfg.run.top_n = args.top
     if args.provider:
         cfg.providers.intraday = args.provider
+    if args.instrument_catalog:
+        cfg.instrument_catalog.path = args.instrument_catalog
+    if args.catalog_provider:
+        cfg.instrument_catalog.provider = args.catalog_provider
+    if args.platform:
+        cfg.instrument_catalog.platform = args.platform
+    if args.asset_types:
+        cfg.instrument_catalog.asset_types = args.asset_types
+    if args.exclude_otc is not None:
+        cfg.instrument_catalog.exclude_otc = args.exclude_otc
+    if args.research_mode:
+        cfg.run.research_mode = True
     if args.output_dir:
         cfg.run.output_dir = args.output_dir
     if args.no_cache:
@@ -786,6 +937,40 @@ def _apply_cli_overrides(cfg: BinaryOptionsConfig, args: argparse.Namespace) -> 
     if args.allow_partial is not None:
         cfg.robustness.allow_partial_results = args.allow_partial
     return validate_config(cfg)
+
+
+def _validate_catalog_cli(cfg: BinaryOptionsConfig) -> int:
+    """--validate-catalog-only: schema/freshness report, exit 2 on fatal problems."""
+    ic = cfg.instrument_catalog
+    if not ic.path:
+        print("No instrument catalog configured. Pass --instrument-catalog PATH "
+              "or set instrument_catalog.path in the YAML.", file=sys.stderr)
+        return 2
+    try:
+        snapshot = build_catalog_provider(ic.path, ic.provider).get_available_instruments(
+            platform=ic.platform
+        )
+    except CatalogError as exc:
+        print(f"Catalog unusable: {exc}", file=sys.stderr)
+        return 2
+    result = validate_catalog(snapshot, ic, now=utc_now())
+    print(f"Catalog: {ic.path}")
+    print(f"  platform:    {snapshot.platform}")
+    print(f"  instruments: {len(snapshot.instruments)}")
+    age = f"{result.age_seconds:.0f}s" if result.age_seconds is not None else "unknown"
+    print(f"  age:         {age} (stale: {result.stale})")
+    for prob in result.problems:
+        print(f"  PROBLEM: {prob}")
+    for warn in result.warnings:
+        print(f"  warning: {warn}")
+    for aid, issues in result.instrument_issues.items():
+        for issue in issues:
+            print(f"  {aid}: {issue}")
+    if result.ok:
+        print("Catalog schema: OK")
+        return 0
+    print("Catalog schema: FAILED", file=sys.stderr)
+    return 2
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -818,6 +1003,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Provider error: {exc}", file=sys.stderr)
         return 2
 
+    if args.validate_catalog_only:
+        return _validate_catalog_cli(cfg)
+
     if args.health_check_only:
         summary = run_intraday_health_check(provider, cfg)
         out_dir = ensure_dir(cfg.run.output_dir)
@@ -832,6 +1020,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         cli_tickers=args.tickers,
         cli_watchlist_file=args.watchlist,
         provider=provider,
+        config_path=args.config,
     )
     assessment = result["assessment"]
     print(f"Run {result['run_id']}: status={assessment.run_status}; "

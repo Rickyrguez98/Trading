@@ -62,9 +62,12 @@ class YFinanceIntradayProvider(IntradayCandlesProvider):
         bars: int,
         include_extended_hours: bool = False,
         ttl_seconds: Optional[int] = None,
+        provider_symbol: Optional[str] = None,
     ) -> IntradaySeries:
         now = utc_now()
-        psym = _provider_symbol(symbol)
+        # An explicit mapping (from the instrument catalog, e.g. EURUSD=X or
+        # BTC-USD) wins over the default equity dot->hyphen normalization.
+        psym = provider_symbol or _provider_symbol(symbol)
         series = IntradaySeries(
             symbol=symbol,
             provider_symbol=psym,

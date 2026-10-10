@@ -128,6 +128,7 @@ class IntradayCandlesProvider(ABC):
         bars: int,
         include_extended_hours: bool = False,
         ttl_seconds: Optional[int] = None,
+        provider_symbol: Optional[str] = None,
     ) -> IntradaySeries:
         """Return an :class:`IntradaySeries`; never raise on missing data.
 

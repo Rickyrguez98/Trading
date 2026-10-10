@@ -1,10 +1,11 @@
-.PHONY: install dev test lint run run-binary-options clean
+.PHONY: install dev test lint typecheck quality us-equities binary-options \
+        binary-options-health binary-options-validate-catalog clean
 
 install:
-	pip install -r requirements.txt
-
-dev:
+	pip install --upgrade pip
 	pip install -e ".[dev]"
+
+dev: install
 
 test:
 	pytest
@@ -12,15 +13,40 @@ test:
 lint:
 	ruff check src tests
 
-run:
-	python -m asset_selection.pipelines.run_asset_selection \
-	    --config configs/default_config.yaml --limit 50 --top 20
+# Static typing is scoped to the fully annotated shared + catalog/evaluation
+# layers; broadening it across the legacy modules is tracked in the roadmaps.
+typecheck:
+	mypy --ignore-missing-imports src/trading_common src/binary_options_selection/catalog
 
-run-binary-options:
+# Offline quality gate (mirrors .github/workflows/quality.yml)
+quality: lint test
+	python -c "import asset_selection, binary_options_selection, trading_common; print('imports OK')"
+
+us-equities:
+	python -m asset_selection.pipelines.run_asset_selection \
+	    --config configs/us_equities/default.yaml --universe sample --limit 50 --top 20
+
+binary-options:
 	python -m binary_options_selection.pipelines.run_binary_options_selection \
-	    --config configs/binary_options_config.yaml --top 20
+	    --config configs/binary_options/default.yaml \
+	    --instrument-catalog data/binary_options/input/instruments.yaml
+
+binary-options-health:
+	python -m binary_options_selection.pipelines.run_binary_options_selection \
+	    --health-check-only
+
+binary-options-validate-catalog:
+	python -m binary_options_selection.pipelines.run_binary_options_selection \
+	    --validate-catalog-only \
+	    --instrument-catalog data/binary_options/input/instruments.yaml
+
+# Legacy target names (aliases)
+run: us-equities
+run-binary-options: binary-options
 
 clean:
-	rm -rf data/cache/* data/processed/* reports/*.md reports/*.json
+	rm -rf data/us_equities/cache/* data/binary_options/cache/*
+	rm -rf data/us_equities/processed/* data/binary_options/processed/*
+	rm -rf reports/us_equities/* reports/binary_options/latest
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
-	rm -rf .pytest_cache .ruff_cache build dist *.egg-info
+	rm -rf .pytest_cache .ruff_cache .mypy_cache build dist *.egg-info

@@ -1,6 +1,6 @@
 """UTC-first time handling for intraday candles.
 
-Rules (see docs/BINARY_OPTIONS_ARCHITECTURE.md §7):
+Rules (see docs/binary_options/architecture.md §7):
 * every internal timestamp is timezone-aware UTC;
 * exchange-local timestamps are derived only at the reporting edge;
 * candle boundaries are deterministic: a candle stamped ``t`` covers

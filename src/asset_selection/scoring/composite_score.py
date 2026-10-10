@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 import pandas as pd

@@ -1,0 +1,54 @@
+name: quality
+
+# Offline-capable checks only: no live market APIs are contacted. The test
+# suite uses scripted providers and injectable clocks by design.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (packaging check)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff, enforced baseline)
+        run: ruff check src tests
+
+      - name: Type check (shared + catalog layers)
+        run: mypy --ignore-missing-imports src/trading_common src/binary_options_selection/catalog
+
+      - name: Import check
+        run: python -c "import asset_selection, binary_options_selection, trading_common; print('imports OK')"
+
+      - name: Test suite (offline, deterministic)
+        run: pytest
+
+      - name: CLI smoke (no network)
+        run: |
+          trading-us-equities --help > /dev/null
+          trading-binary-options --help > /dev/null
+          trading-binary-options --validate-catalog-only \
+            --instrument-catalog configs/binary_options/instruments.example.yaml
+
+      - name: Secret scan (basic)
+        run: |
+          ! grep -rInE "(api_key|secret|token|password)\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}" \
+            --include="*.py" --include="*.yaml" --include="*.yml" --include="*.toml" \
+            src configs || (echo "potential secret committed" && exit 1)

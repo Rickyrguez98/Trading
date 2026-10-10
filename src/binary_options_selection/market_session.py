@@ -22,6 +22,8 @@ MARKET_OPEN = "open"                 # regular session
 MARKET_PRE = "pre_market"
 MARKET_AFTER = "after_hours"
 MARKET_CLOSED = "closed"
+MARKET_247 = "open_24_7"             # continuous markets (crypto)
+MARKET_245 = "open_24_5"             # forex-style week (approximation)
 MARKET_UNKNOWN = "unknown"
 
 
@@ -94,3 +96,44 @@ def expiry_for(reference_time: datetime, horizon_minutes: int) -> datetime:
     multiples of the interval, so the expiry also lands on a boundary.
     """
     return ensure_utc(reference_time) + timedelta(minutes=int(horizon_minutes))
+
+
+def classify_session_for_asset(
+    now: datetime, cfg: MarketSessionConfig, asset_type: Optional[str]
+) -> SessionState:
+    """Session classification that depends on the asset type.
+
+    U.S. equity hours are never applied blindly to other markets:
+
+    * ``cryptocurrency`` -- continuous 24/7 market, always analyzable.
+    * ``forex`` -- approximated as 24/5 (closed Saturday/Sunday UTC). This is
+      a documented simplification: real FX opens Sunday evening / closes
+      Friday evening New York time; the staleness gate covers the edges.
+    * ``equity`` / ``etf`` / ``index`` -- the configured exchange session.
+    * anything else (``commodity``, unknown) -- ``unknown``: sessions for
+      these venues are not modeled yet, so live analysis is refused
+      (SESSION_NOT_SUPPORTED) rather than guessed.
+    """
+    at = (asset_type or "").lower()
+    if at == "cryptocurrency":
+        return SessionState(
+            MARKET_247, ensure_utc(now).isoformat(timespec="seconds"), "UTC",
+            allowed_for_analysis=True,
+        )
+    if at == "forex":
+        wd = ensure_utc(now).weekday()
+        if wd >= 5:  # Saturday/Sunday
+            return SessionState(
+                MARKET_CLOSED, ensure_utc(now).isoformat(timespec="seconds"), "UTC",
+                allowed_for_analysis=not cfg.require_open_market, detail="fx weekend",
+            )
+        return SessionState(
+            MARKET_245, ensure_utc(now).isoformat(timespec="seconds"), "UTC",
+            allowed_for_analysis=True, detail="fx 24/5 approximation",
+        )
+    if at in ("equity", "etf", "index", ""):
+        return classify_session(now, cfg)
+    return SessionState(
+        MARKET_UNKNOWN, None, None, allowed_for_analysis=False,
+        detail=f"sessions for asset type '{asset_type}' are not modeled",
+    )
