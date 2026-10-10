@@ -24,7 +24,6 @@ ENV/
 # IDE / tooling
 .vscode/
 .idea/
-.claude/
 *.swp
 .DS_Store
 
