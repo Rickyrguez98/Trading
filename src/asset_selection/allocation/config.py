@@ -115,7 +115,7 @@ class InstrumentsConfig:
     recommendations. Prices are fetched from the configured price provider —
     never invented.
     """
-    index_core_ticker: str = "SPLG"      # S&P 500 core (low-fee share class)
+    index_core_ticker: str = "VOO"       # broad S&P 500 core, low fee
     index_core_name: str = "S&P 500 index ETF"
     bond_proxy_ticker: str = "BND"       # total US bond market
     bond_proxy_name: str = "Aggregate bond ETF"

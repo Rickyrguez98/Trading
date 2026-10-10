@@ -30,7 +30,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -91,32 +91,74 @@ def build_price_lookup(
     offline: bool = False,
     overrides: Optional[Dict[str, float]] = None,
 ) -> "callable":
-    """Prices for the instrument sleeves, from the real price provider.
+    """Prices for the instrument sleeves, from the real equity price provider.
 
-    ``overrides`` are user-supplied prices (``--instrument-price SPLG=68.10``),
+    ``overrides`` are user-supplied prices (``--instrument-price VOO=68.10``),
     which win over any lookup — useful offline, and honest because the source
-    is the user rather than a fabricated value. Returns a lookup that yields
-    ``None`` when no price can be obtained: the plan then reports a dollar
-    target with no share count rather than inventing one.
+    is the user rather than a fabricated value.
+
+    The provider chain is built from the *equity* configuration (same domain,
+    same providers), so it reuses that module's provider priority, cache
+    directory and rate limits. It is constructed lazily on first use and
+    reused. A failure is logged with its cause and yields ``None``: the plan
+    then reports a dollar target with no share count rather than inventing a
+    price.
     """
     cache: Dict[str, Optional[float]] = dict(overrides or {})
     if offline:
         return lambda ticker: cache.get(ticker)
 
+    state: Dict[str, Any] = {"provider": None, "failed": False}
+
+    def _provider():
+        if state["provider"] is None and not state["failed"]:
+            try:
+                from trading_common.cache import Cache
+                from trading_common.rate_limiter import RateLimiter
+
+                from ..config import load_config as load_equity_config
+                from ..data_providers import build_prices_provider
+
+                eq = load_equity_config(None)
+                shared = Cache(
+                    directory=eq.cache.dir,
+                    enabled=eq.cache.enabled,
+                    default_ttl=eq.cache.ttl_seconds.get("prices", 43_200),
+                )
+                state["provider"] = build_prices_provider(
+                    eq,
+                    lambda namespace: shared,
+                    lambda name: RateLimiter(eq.rate_limits.get(name, 0.0)),
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                state["failed"] = True
+                logger.warning(
+                    "Could not build the price provider (%s: %s); instrument "
+                    "sleeves will report dollar targets without share counts. "
+                    "Pass --instrument-price TICKER=PRICE to supply prices.",
+                    type(exc).__name__, exc,
+                )
+        return state["provider"]
+
     def lookup(ticker: str) -> Optional[float]:
         if ticker in cache:
             return cache[ticker]
         price: Optional[float] = None
-        try:
-            from ..data_providers import build_prices_provider
-
-            provider = build_prices_provider("yfinance")
-            snap = provider.fetch(ticker, lookback_days=10)
-            value = getattr(snap, "last_close", None)
-            price = float(value) if value else None
-        except Exception as exc:  # noqa: BLE001 - reported, never fatal
-            logger.warning("Price lookup failed for %s: %s", ticker, exc)
-            price = None
+        provider = _provider()
+        if provider is not None:
+            try:
+                snap = provider.fetch(ticker, lookback_days=10)
+                value = getattr(snap, "last_close", None)
+                price = float(value) if value else None
+                if price is None:
+                    logger.warning(
+                        "No price for %s (provider status=%s, error=%s)",
+                        ticker, getattr(snap, "status", "?"),
+                        getattr(snap, "error", None),
+                    )
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                logger.warning("Price lookup failed for %s: %s: %s",
+                               ticker, type(exc).__name__, exc)
         cache[ticker] = price
         return price
 
@@ -254,7 +296,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Skip network price lookups; only --instrument-price values are used.")
     p.add_argument("--instrument-price", nargs="+", default=None, metavar="TICKER=PRICE",
                    help="Supply instrument prices yourself, e.g. --instrument-price "
-                        "SPLG=68.10 BND=73.40. Wins over the price provider.")
+                        "VOO=68.10 BND=73.40. Wins over the price provider.")
     p.add_argument("--output-dir", default=None, help="Override the report directory.")
     p.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING / ERROR.")
     return p

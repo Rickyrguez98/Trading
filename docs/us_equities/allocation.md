@@ -18,7 +18,7 @@ portfolio and sums to 1.0 — cash included.
 | --- | --- | --- |
 | `cash` | — | residual liquidity |
 | `bond_proxy` | one broad bond ETF (`BND` by default) | configuration |
-| `index_core` | one broad S&P 500 ETF (`SPLG` by default) | configuration |
+| `index_core` | one broad S&P 500 ETF (`VOO` by default) | configuration |
 | `equity_core` | single names | ranking, `candidate_role = core_candidate` |
 | `growth_satellite` | single names | ranking, `satellite_growth_candidate` |
 | `speculative` | single names | ranking, `speculative_research_only` (opt-in) |
@@ -175,7 +175,7 @@ trading-portfolio --amount 5000 --strategy aggressive --fractional-shares
 
 # no network: supply the ETF prices yourself
 trading-portfolio --amount 25000 --offline \
-    --instrument-price SPLG=68.10 BND=73.40
+    --instrument-price VOO=715.59 BND=73.40
 
 # turn the speculative sleeve off (its budget is redirected to the index core)
 trading-portfolio --amount 25000 --no-speculative

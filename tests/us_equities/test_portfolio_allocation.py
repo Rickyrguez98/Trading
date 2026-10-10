@@ -29,7 +29,7 @@ from asset_selection.pipelines.run_portfolio_allocation import (
     run_allocation,
 )
 
-PRICES = {"SPLG": 68.0, "BND": 73.0}
+PRICES = {"VOO": 68.0, "BND": 73.0}
 
 
 def _cfg(tmp_path=None, **capital):
@@ -359,7 +359,7 @@ def test_unaffordable_share_price_is_flagged():
 
 def test_missing_instrument_price_yields_dollar_target_without_shares():
     plan = _plan("balanced", prices={})           # no ETF prices available
-    splg = next(p for p in plan.positions if p.ticker == "SPLG")
+    splg = next(p for p in plan.positions if p.ticker == "VOO")
     assert splg.target_value > 0 and splg.shares == 0
     assert "PRICE_UNAVAILABLE_NO_SHARE_COUNT" in splg.warnings
     assert any(w.startswith("PRICE_UNAVAILABLE:") for w in plan.warnings)
@@ -517,8 +517,8 @@ def test_outputs_are_written(tmp_path):
 
 
 def test_cli_parses_instrument_prices():
-    assert _parse_prices(["SPLG=68.10", "bnd=73.4"]) == {"SPLG": 68.1, "BND": 73.4}
-    for bad in (["SPLG"], ["SPLG=abc"], ["SPLG=-1"]):
+    assert _parse_prices(["VOO=715.59", "bnd=73.4"]) == {"VOO": 715.59, "BND": 73.4}
+    for bad in (["VOO"], ["VOO=abc"], ["VOO=-1"]):
         with pytest.raises(ValueError):
             _parse_prices(bad)
 
@@ -538,7 +538,7 @@ def test_cli_end_to_end(tmp_path, monkeypatch, capsys):
         "--config", str(Path(__file__).resolve().parents[2]
                         / "configs" / "us_equities" / "portfolio.yaml"),
         "--amount", "25000", "--offline",
-        "--instrument-price", "SPLG=68.0", "BND=73.0",
+        "--instrument-price", "VOO=715.0", "BND=73.0",
         "--log-level", "ERROR",
     ])
     assert rc == 0
@@ -563,10 +563,82 @@ def test_cli_no_speculative_keeps_budget_balanced(tmp_path, monkeypatch):
     rc = main([
         "--amount", "25000", "--offline", "--no-speculative",
         "--allow-untrusted-ranking",
-        "--instrument-price", "SPLG=68.0", "BND=73.0", "--log-level", "ERROR",
+        "--instrument-price", "VOO=715.0", "BND=73.0", "--log-level", "ERROR",
     ])
     assert rc == 0
     df = pd.read_csv(
         tmp_path / "data" / "us_equities" / "processed" / "portfolio_allocations.csv"
     )
     assert "speculative" not in set(df["sleeve"])
+
+
+# ---------------------------------------------------------------------------
+# Live price lookup (provider wiring, no network)
+# ---------------------------------------------------------------------------
+
+def test_price_lookup_actually_calls_the_provider(monkeypatch):
+    """Regression: the lookup must build and call the real provider.
+
+    An earlier version called build_prices_provider() with the wrong arity;
+    the broad except swallowed the TypeError and every instrument silently
+    reported "no price". This asserts the provider is constructed with the
+    documented 3-argument signature and its price is returned.
+    """
+    import asset_selection.data_providers as dp
+    from asset_selection.pipelines.run_portfolio_allocation import build_price_lookup
+
+    calls = {}
+
+    class _Snap:
+        status, error, last_close = "ok", None, 123.45
+
+    class _Provider:
+        def fetch(self, ticker, lookback_days=10):
+            calls["fetched"] = ticker
+            return _Snap()
+
+    def fake_build(config, make_cache, make_rate_limiter):
+        # Exercise the callbacks exactly as the real factory does.
+        make_cache("prices")
+        make_rate_limiter("yfinance")
+        calls["built"] = True
+        return _Provider()
+
+    monkeypatch.setattr(dp, "build_prices_provider", fake_build)
+    lookup = build_price_lookup(_cfg(), offline=False)
+    assert lookup("VOO") == pytest.approx(123.45)
+    assert calls.get("built") and calls["fetched"] == "VOO"
+    # Result is cached: a second call does not re-fetch.
+    calls["fetched"] = None
+    assert lookup("VOO") == pytest.approx(123.45)
+    assert calls["fetched"] is None
+
+
+def test_price_lookup_survives_a_provider_failure(monkeypatch):
+    import asset_selection.data_providers as dp
+    from asset_selection.pipelines.run_portfolio_allocation import build_price_lookup
+
+    def boom(config, make_cache, make_rate_limiter):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(dp, "build_prices_provider", boom)
+    lookup = build_price_lookup(_cfg(), offline=False)
+    assert lookup("VOO") is None          # degrades, never raises
+
+
+def test_overrides_win_over_the_provider(monkeypatch):
+    import asset_selection.data_providers as dp
+    from asset_selection.pipelines.run_portfolio_allocation import build_price_lookup
+
+    def should_not_be_called(*a, **k):
+        raise AssertionError("provider must not be consulted for an override")
+
+    monkeypatch.setattr(dp, "build_prices_provider", should_not_be_called)
+    lookup = build_price_lookup(_cfg(), offline=False, overrides={"VOO": 700.0})
+    assert lookup("VOO") == 700.0
+
+
+def test_default_instrument_tickers_are_configured():
+    cfg = load_config("configs/us_equities/portfolio.yaml")
+    assert cfg.instruments.index_core_ticker == "VOO"
+    assert cfg.instruments.bond_proxy_ticker == "BND"

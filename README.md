@@ -80,7 +80,7 @@ portfolios, reporting every position in **percentage and money**:
 trading-portfolio --config configs/us_equities/portfolio.yaml --amount 25000
 # one strategy only, or supply ETF prices when offline:
 trading-portfolio --amount 5000 --strategy aggressive
-trading-portfolio --amount 25000 --offline --instrument-price SPLG=68.10 BND=73.40
+trading-portfolio --amount 25000 --offline --instrument-price VOO=715.59 BND=73.40
 ```
 
 Each strategy is a sleeve budget summing to 100%: cash and bonds for
