@@ -2,7 +2,12 @@
 
 All notable changes to this repository. Dates are UTC.
 
-## [0.4.0] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
+Versions use a single **0.0.N** pre-release counter: this is research
+software and the earlier 0.x.0 scheme overstated its maturity. The entries
+below were previously numbered 0.1.0-0.4.0 and have been renumbered onto
+this counter; releases before 0.0.12 were never tracked in this file.
+
+## [0.0.15] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
 
 ### Added
 - `asset_selection.allocation`: turns the selection ranking plus a capital
@@ -47,7 +52,7 @@ All notable changes to this repository. Dates are UTC.
   (VaR, drawdown, correlation) and drift-based rebalancing against existing
   holdings — all need inputs this repository does not yet produce honestly.
 
-## [0.3.0] — 2026-07-19 — Professional platform restructure
+## [0.0.14] — 2026-07-19 — Professional platform restructure
 
 ### Repository
 - Domain-separated layout: `configs/`, `data/`, `reports/`, `docs/`, and
@@ -100,7 +105,7 @@ All notable changes to this repository. Dates are UTC.
   contract-gate, matrix/manifest, evaluation-leakage, domain-separation,
   and backward-compatibility coverage.
 
-## [0.2.0] — 2026-07-18
+## [0.0.13] — 2026-07-18
 
 - Binary-options research module (intraday signals, candle validation,
   horizon-aware scoring, NO_TRADE-first decisions, output validation).
@@ -109,7 +114,7 @@ All notable changes to this repository. Dates are UTC.
 - US Equities: optional FinBERT sentiment (comparison/ensemble modes) with
   anti-fabrication guarantees.
 
-## [0.1.0]
+## [0.0.12]
 
 - Initial US Equities asset-selection research pipeline (staged funnel,
   provider health checks, coverage gating, diagnostics, output validation).
