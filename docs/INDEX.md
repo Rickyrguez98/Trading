@@ -13,6 +13,8 @@
 - [Methodology](us_equities/methodology.md) — pillar scoring, composite weights, sentiment bounds.
 - [Data sources](us_equities/data-sources.md)
 - [Outputs](us_equities/outputs.md) — file locations and schemas.
+- [Portfolio allocation](us_equities/allocation.md) — sleeves, the three risk strategies, weighting and cap formulas, money conversion, trust gate.
+- [Allocation readiness](us_equities/allocation-readiness.md) — why this architecture (and what was rejected).
 - [Sentiment models](us_equities/sentiment-models.md) — VADER / FinBERT / comparison / ensemble.
 - [Full-universe pipeline](us_equities/full-universe-pipeline.md)
 - [Roadmap](us_equities/roadmap.md)

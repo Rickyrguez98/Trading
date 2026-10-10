@@ -2,6 +2,51 @@
 
 All notable changes to this repository. Dates are UTC.
 
+## [0.4.0] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
+
+### Added
+- `asset_selection.allocation`: turns the selection ranking plus a capital
+  amount into three risk-profiled portfolios (conservative / balanced /
+  aggressive), each a sleeve budget summing to 100% over cash, a bond proxy,
+  an S&P 500 index core, quality single names, growth satellites and an
+  opt-in hard-capped speculative sleeve. Equity sleeves are filled from the
+  ranking by `candidate_role`, so selection drives allocation.
+- Weighting: `score ** (1 - tilt) * volatility ** (-tilt)` normalized to the
+  sleeve budget, reusing the `allocation_adjusted_score` selection already
+  computed (fundamentals + confidence-adjusted news − risk) without
+  re-scoring; the inverse-volatility tilt varies by strategy.
+- Concentration control: per-name cap inside each sleeve plus a
+  portfolio-wide per-sector cap across all single names (business-type
+  diversification), with unplaceable weight overflowing to the broad index
+  core and reported via named warnings (`EMPTY_SLEEVE`, `SLEEVE_SATURATED`,
+  `SECTOR_CAP_OVERFLOW`). Infeasible designs are rejected at config load.
+- Money layer: whole-share counts floored against the commission-inclusive
+  unit cost so a plan can never overspend; money conserved as
+  invested + commission + cash; un-investable targets and unaffordable share
+  prices reported rather than zeroed silently.
+- Trust gate: refuses to plan on a selection run with status
+  DIAGNOSTIC/INVALID unless explicitly overridden; a missing selection
+  verdict degrades the run. Instrument prices come from the provider or from
+  user-supplied `--instrument-price` values — never invented.
+- CLI `trading-portfolio` and `make portfolio`; outputs in
+  `data/us_equities/processed/portfolio_*.csv` and
+  `reports/us_equities/portfolio/` (Markdown with percentage **and** money,
+  order ticket, sector diversification; plus JSON summary).
+- Docs: `docs/us_equities/allocation.md` (full methodology) and
+  `allocation-readiness.md` (the architecture decision, including what was
+  deliberately rejected from a prior deep-learning trading project).
+
+### Testing
+- Suite grown to **370 offline deterministic tests** (49 new), covering
+  config validation, eligibility and sleeve assignment, weighting at both
+  tilt extremes, both caps and every overflow path, money conservation, the
+  trust gate, risk monotonicity across the three strategies, and the CLI.
+
+### Deferred
+- Mean-variance / risk parity / Black-Litterman, portfolio-level risk metrics
+  (VaR, drawdown, correlation) and drift-based rebalancing against existing
+  holdings — all need inputs this repository does not yet produce honestly.
+
 ## [0.3.0] — 2026-07-19 — Professional platform restructure
 
 ### Repository

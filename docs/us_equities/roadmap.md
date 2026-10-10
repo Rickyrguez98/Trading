@@ -10,20 +10,33 @@ milestones are sketched here so the asset-selection layer can be extended
 without rewriting it. Each future module already has a placeholder package
 under `src/asset_selection/` with a module-level docstring describing intent.
 
-## Milestone 2 — Asset Allocation
-**Package:** `asset_selection.allocation`
+## Milestone 2 — Asset Allocation — **first version implemented**
+**Package:** `asset_selection.allocation` · see [allocation.md](allocation.md)
+
+Implemented: three risk strategies (conservative / balanced / aggressive) as
+sleeve budgets over cash, bonds, an S&P 500 index core, quality single names,
+growth satellites and an opt-in capped speculative sleeve; score-weighting with
+an inverse-volatility tilt; per-name and portfolio-wide per-sector caps with
+reported overflow; whole-share money conversion with commissions; a trust gate
+on the selection run; CSV / Markdown / JSON outputs in percentage and money.
+
+Still open from the original plan:
 
 Given the ranked candidates and a notional capital base, decide *how much* to
 hold of each.
 
-Planned strategies (pluggable):
 - **Equal-weight top-K** — naive baseline, surprisingly hard to beat.
-- **Score-weighted** — weights ∝ composite score, capped per-name.
+- ~~**Score-weighted** — weights ∝ composite score, capped per-name.~~ *(done)*
 - **Risk parity** — equal risk contribution using historical covariance.
 - **Mean-variance optimization (MVO)** — with shrinkage covariance.
 - **Black-Litterman** — incorporate the composite score as a "view".
 
-Constraints: per-name cap, sector cap, turnover budget, cash buffer.
+Constraints: per-name cap *(done)*, sector cap *(done)*, cash buffer *(done)*,
+turnover budget *(open — needs drift-based rebalancing against existing
+holdings)*.
+
+Deferred deliberately: mean-variance, risk parity and Black-Litterman all need
+a return-covariance estimate this repository does not yet produce honestly.
 
 ## Milestone 3 — Risk Management
 **Package:** `asset_selection.risk`
