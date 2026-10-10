@@ -523,6 +523,40 @@ def test_cli_parses_instrument_prices():
             _parse_prices(bad)
 
 
+def test_repeated_instrument_price_flags_accumulate():
+    """Repeating the flag must not discard earlier values.
+
+    With a bare ``nargs="+"`` argparse *overwrites*, so
+    ``--instrument-price VOO=1 --instrument-price BND=2`` silently kept only
+    BND. The index-core sleeve then had no price and no share count, and the
+    largest allocation in the plan was quietly worth nothing -- reported as
+    PRICE_UNAVAILABLE_NO_SHARE_COUNT, which reads like a provider fault rather
+    than a dropped argument. Both spellings must behave identically.
+    """
+    from asset_selection.pipelines.run_portfolio_allocation import build_arg_parser
+
+    parser = build_arg_parser()
+    expected = {"VOO": 715.59, "BND": 70.22}
+
+    repeated = parser.parse_args(
+        ["--instrument-price", "VOO=715.59", "--instrument-price", "BND=70.22"]
+    ).instrument_price
+    assert _parse_prices(repeated) == expected
+
+    single = parser.parse_args(
+        ["--instrument-price", "VOO=715.59", "BND=70.22"]
+    ).instrument_price
+    assert _parse_prices(single) == expected
+
+    mixed = parser.parse_args(
+        ["--instrument-price", "VOO=715.59", "BND=70.22", "--instrument-price", "QQQ=1.5"]
+    ).instrument_price
+    assert _parse_prices(mixed) == {**expected, "QQQ": 1.5}
+
+    # Absent stays None so the provider path is used, not an empty override map.
+    assert parser.parse_args([]).instrument_price is None
+
+
 def test_cli_end_to_end(tmp_path, monkeypatch, capsys):
     processed = tmp_path / "data" / "us_equities" / "processed"
     processed.mkdir(parents=True)
