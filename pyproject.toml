@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asset-selection"
-version = "0.0.14"
+version = "0.0.15"
 description = "Trading research toolkit (free data): U.S.-equity asset selection and intraday binary-options directional signals."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -52,6 +52,7 @@ finbert = [
 # Canonical domain commands
 trading-us-equities = "asset_selection.pipelines.run_asset_selection:main"
 trading-binary-options = "binary_options_selection.pipelines.run_binary_options_selection:main"
+trading-portfolio = "asset_selection.pipelines.run_portfolio_allocation:main"
 # Legacy aliases (kept for backward compatibility)
 asset-selection = "asset_selection.pipelines.run_asset_selection:main"
 binary-options-selection = "binary_options_selection.pipelines.run_binary_options_selection:main"

@@ -14,6 +14,7 @@ required for the base pipelines.
 | Module | Package | What it answers | Documentation |
 |---|---|---|---|
 | **US Equities — Asset Selection** | `asset_selection` | Which U.S. common stocks look attractive over longer horizons on fundamentals, valuation, growth, quality, liquidity, and bounded news sentiment? | [docs/us_equities/](docs/us_equities/README.md) |
+| **US Equities — Portfolio Allocation** | `asset_selection.allocation` | Given that ranking and an amount of money, how much goes where — across an S&P 500 index core, quality names, growth satellites and a capped speculative sleeve — in three risk strategies? | [docs/us_equities/allocation.md](docs/us_equities/allocation.md) |
 | **Binary Options — Signal Research** | `binary_options_selection` | For a **verified platform contract** and a specific 5–120 minute expiration, does current intraday evidence favor `CALL`, `PUT`, or `NO_TRADE`? | [docs/binary_options/](docs/binary_options/README.md) |
 
 The modules are independent: **US Equities scores do not predict five-minute
@@ -70,6 +71,34 @@ Outputs: `data/us_equities/processed/asset_selection_results.csv`,
 `reports/us_equities/asset_selection_summary.json` (+ diagnostics and output
 validation). Manual: [docs/us_equities/README.md](docs/us_equities/README.md).
 
+## Quick start — Portfolio allocation
+
+Turns that ranking plus an amount of money into three risk-profiled
+portfolios, reporting every position in **percentage and money**:
+
+```bash
+trading-portfolio --config configs/us_equities/portfolio.yaml --amount 25000
+# one strategy only, or supply ETF prices when offline:
+trading-portfolio --amount 5000 --strategy aggressive
+trading-portfolio --amount 25000 --offline --instrument-price VOO=715.59 BND=73.40
+```
+
+Each strategy is a sleeve budget summing to 100%: cash and bonds for
+stability, a broad **S&P 500 index core**, **quality single names**, small
+**growth satellites**, and an opt-in **hard-capped speculative** sleeve.
+Single-name weights come from the score selection already computed
+(fundamentals + confidence-adjusted news − risk), tilted toward lower
+volatility, then constrained by per-name and per-sector caps so no business
+type dominates. Outputs land in
+`data/us_equities/processed/portfolio_*.csv` and
+`reports/us_equities/portfolio/`. Methodology:
+[docs/us_equities/allocation.md](docs/us_equities/allocation.md).
+
+The allocator refuses to plan on a ranking the selection run itself
+distrusted, and it never invents a price: a missing price yields a dollar
+target with no share count and a visible warning. It places no orders and
+recommends no stake sizes.
+
 ## Quick start — Binary Options
 
 ```bash
@@ -116,7 +145,7 @@ verified instrument catalog every row is honestly
 ## Tests and quality
 
 ```bash
-make test          # pytest (offline, deterministic; 320 tests)
+make test          # pytest (offline, deterministic; 370 tests)
 make lint          # ruff
 make quality       # lint + tests + packaging import checks
 ```

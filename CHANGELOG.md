@@ -7,6 +7,109 @@ software and the earlier 0.x.0 scheme overstated its maturity. The entries
 below were previously numbered 0.1.0-0.4.0 and have been renumbered onto
 this counter; releases before 0.0.12 were never tracked in this file.
 
+## [Unreleased]
+
+### Fixed
+- **A pandas NaN reaching the JSON report.** Optional text fields were
+  serialized with `row.get(x) or None`, and NaN is truthy in Python, so on
+  pandas >= 2.0 (which coerces a missing object value to NaN) a bare `NaN`
+  literal landed in the candidate payload — invalid JSON, rejected by strict
+  parsers. New `_safe_str` mirrors the existing `_safe_num` NaN guard across
+  all eight optional text fields; `reason` previously had no guard at all.
+  This was also why CI was red on Python 3.11 and green on 3.9.
+- **Empty sentiment.** News was silently producing nothing: Yahoo's private
+  per-ticker endpoint behind the `yfinance` news provider has been retired
+  upstream and answers HTTP 404, so every name scored neutral with a zero
+  article count. News now defaults to a chain, `[finnhub, yahoo_rss]`, and
+  sentiment is confirmed to populate through the stage-4 path.
+
+### Added
+- `finnhub` news provider (`asset_selection.data_providers.news_provider`):
+  the documented `/company-news` API, now the default. It is the only news
+  backend here whose terms permit automated access, and it returns a real
+  per-article publisher so the source-diversity term in the
+  sentiment-confidence model is meaningful instead of inflated. Needs a free
+  key in `FINNHUB_API_KEY`, sent in the `X-Finnhub-Token` header rather than a
+  query parameter so it cannot leak into URLs, logs, or cache keys.
+- `yahoo_rss` news provider: keyless RSS headline feed, parsed with the
+  standard library (no new dependency), chained behind `finnhub` so sentiment
+  still has a route to real articles with no key configured.
+- `NewsProviderNotConfigured`: a missing credential raises **before** any
+  network call and is never swallowed, so a configuration fault cannot
+  masquerade as "this company has no news". In a chain the next provider takes
+  over; as the sole provider the run reports news unavailable.
+
+### Changed
+- `docs/us_equities/data-sources.md`: the News section rewritten, and the
+  "Rate limits & terms of service" section corrected. It previously claimed the
+  pipeline "never bypasses terms of service" while the Yahoo hosts behind
+  `yfinance` and `yahoo_rss` serve `robots.txt: Disallow: /`. The real position
+  is now documented, along with the throttling observed on the RSS host
+  (persistent HTTP 429 from datacenter IPs while price calls on the sibling
+  host still succeed).
+- Google News RSS was evaluated and **rejected on policy grounds, not
+  capability**: it is reachable and returns real headlines, but its
+  `robots.txt` disallows the feed path for all agents and names automated
+  crawlers explicitly. Reachability is not permission.
+
+### Testing
+- Suite at **407 offline deterministic tests** (18 new), verified on
+  Python 3.9 / pandas 1.5.3 **and** Python 3.11 / pandas 3.0.6: Finnhub parsing, the
+  header-not-URL key contract, missing/blank key behaviour with no network
+  call, HTTP 401/403/429/5xx and error-payload handling, honest empty results,
+  and the keyless fall-through from `finnhub` to `yahoo_rss`.
+
+### Known limitation
+- Live Finnhub responses are **not** exercised here — that needs a personal API
+  key. The contract is tested; real coverage and latency are not claimed.
+  `yahoo_rss` could not be verified live either: every attempt from the
+  development environment returned HTTP 429.
+
+## [0.0.15] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
+
+### Added
+- `asset_selection.allocation`: turns the selection ranking plus a capital
+  amount into three risk-profiled portfolios (conservative / balanced /
+  aggressive), each a sleeve budget summing to 100% over cash, a bond proxy,
+  an S&P 500 index core, quality single names, growth satellites and an
+  opt-in hard-capped speculative sleeve. Equity sleeves are filled from the
+  ranking by `candidate_role`, so selection drives allocation.
+- Weighting: `score ** (1 - tilt) * volatility ** (-tilt)` normalized to the
+  sleeve budget, reusing the `allocation_adjusted_score` selection already
+  computed (fundamentals + confidence-adjusted news − risk) without
+  re-scoring; the inverse-volatility tilt varies by strategy.
+- Concentration control: per-name cap inside each sleeve plus a
+  portfolio-wide per-sector cap across all single names (business-type
+  diversification), with unplaceable weight overflowing to the broad index
+  core and reported via named warnings (`EMPTY_SLEEVE`, `SLEEVE_SATURATED`,
+  `SECTOR_CAP_OVERFLOW`). Infeasible designs are rejected at config load.
+- Money layer: whole-share counts floored against the commission-inclusive
+  unit cost so a plan can never overspend; money conserved as
+  invested + commission + cash; un-investable targets and unaffordable share
+  prices reported rather than zeroed silently.
+- Trust gate: refuses to plan on a selection run with status
+  DIAGNOSTIC/INVALID unless explicitly overridden; a missing selection
+  verdict degrades the run. Instrument prices come from the provider or from
+  user-supplied `--instrument-price` values — never invented.
+- CLI `trading-portfolio` and `make portfolio`; outputs in
+  `data/us_equities/processed/portfolio_*.csv` and
+  `reports/us_equities/portfolio/` (Markdown with percentage **and** money,
+  order ticket, sector diversification; plus JSON summary).
+- Docs: `docs/us_equities/allocation.md` (full methodology) and
+  `allocation-readiness.md` (the architecture decision, including what was
+  deliberately rejected from a prior deep-learning trading project).
+
+### Testing
+- Suite grown to **370 offline deterministic tests** (49 new), covering
+  config validation, eligibility and sleeve assignment, weighting at both
+  tilt extremes, both caps and every overflow path, money conservation, the
+  trust gate, risk monotonicity across the three strategies, and the CLI.
+
+### Deferred
+- Mean-variance / risk parity / Black-Litterman, portfolio-level risk metrics
+  (VaR, drawdown, correlation) and drift-based rebalancing against existing
+  holdings — all need inputs this repository does not yet produce honestly.
+
 ## [0.0.14] — 2026-07-19 — Professional platform restructure
 
 ### Repository

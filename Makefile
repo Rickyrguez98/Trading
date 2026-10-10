@@ -1,5 +1,5 @@
-.PHONY: install dev test lint typecheck quality us-equities binary-options \
-        binary-options-health binary-options-validate-catalog clean
+.PHONY: install dev test lint typecheck quality us-equities portfolio \
+        binary-options binary-options-health binary-options-validate-catalog clean
 
 install:
 	pip install --upgrade pip
@@ -25,6 +25,10 @@ quality: lint test
 us-equities:
 	python -m asset_selection.pipelines.run_asset_selection \
 	    --config configs/us_equities/default.yaml --universe sample --limit 50 --top 20
+
+portfolio:
+	python -m asset_selection.pipelines.run_portfolio_allocation \
+	    --config configs/us_equities/portfolio.yaml --amount 10000
 
 binary-options:
 	python -m binary_options_selection.pipelines.run_binary_options_selection \

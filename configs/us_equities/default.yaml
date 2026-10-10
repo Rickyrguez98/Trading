@@ -59,7 +59,17 @@ universe:
 providers:
   fundamentals: yfinance      # yfinance | finnhub (future) | fmp (future)
   prices: yfinance            # yfinance | stooq | alphavantage (future)
-  news: yfinance              # yfinance | newsapi (future) | marketaux (future)
+  # News backends, best first (see docs/us_equities/data-sources.md):
+  #   finnhub   - documented API whose terms permit automated use. Needs a free
+  #               key in FINNHUB_API_KEY. RECOMMENDED; without the key it fails
+  #               fast and the chain below moves on.
+  #   yahoo_rss - keyless RSS headline feed. Best-effort only: the feed host's
+  #               robots.txt disallows automated agents and it returns a
+  #               persistent HTTP 429 from datacenter IPs.
+  #   yfinance  - Yahoo's private news endpoint, retired upstream (HTTP 404).
+  #               Yields no articles; the run reports NO_NEWS_DATA honestly.
+  # The chain in robustness.provider_priority_by_data_type.news overrides this.
+  news: finnhub               # finnhub | yahoo_rss | yfinance (retired)
 
 # Backup-plan ladder + provider-fallback + coverage gating policy.
 # The pipeline tries primary -> secondary provider(s) live (Plan A/B), then a
@@ -77,10 +87,13 @@ robustness:
   # Allow stale cache to back a *diagnostic* run even when not used live.
   allow_stale_cache_for_diagnostic: true
   # Ordered provider names per data type (first = primary, rest = fallbacks).
-  # Empty -> use the single providers.<type> above. Example:
-  #   provider_priority_by_data_type:
-  #     prices: [yfinance, stooq]
-  provider_priority_by_data_type: {}
+  # Empty -> use the single providers.<type> above.
+  # News is chained by default so sentiment still populates without a Finnhub
+  # key: finnhub fails fast when FINNHUB_API_KEY is unset (one warning, no
+  # network call) and yahoo_rss is tried next. Add `prices: [yfinance, stooq]`
+  # here if you want a price fallback too.
+  provider_priority_by_data_type:
+    news: [finnhub, yahoo_rss]
   # If benchmark health shows a systemic provider failure, refuse to present a
   # normal ranking (the run is marked INVALID_PROVIDER_FAILURE).
   stop_on_systemic_provider_failure: true

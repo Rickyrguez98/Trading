@@ -121,7 +121,11 @@ class UniverseConfig:
 class ProvidersConfig:
     fundamentals: str = "yfinance"
     prices: str = "yfinance"
-    news: str = "yfinance"
+    # yfinance's private news endpoint was retired by Yahoo (HTTP 404). The
+    # default is finnhub: the one news backend whose terms permit automated use.
+    # It needs FINNHUB_API_KEY and fails fast without it, so the shipped config
+    # chains yahoo_rss behind it (robustness.provider_priority_by_data_type).
+    news: str = "finnhub"
 
 
 @dataclass

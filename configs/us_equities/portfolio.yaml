@@ -1,0 +1,117 @@
+# Portfolio allocation — three risk strategies built from the selection ranking.
+#
+# Research configuration only. This file decides how much of a capital amount
+# each sleeve receives; it places no orders and is not financial advice.
+#
+# Every strategy's `sleeves` block must sum to 1.0 — the budget covers the
+# WHOLE portfolio, cash included. Validation rejects budgets that do not sum
+# to 1, caps that make a sleeve unreachable, and a speculative budget without
+# an explicit opt-in.
+#
+# Full methodology: docs/us_equities/allocation.md
+
+run:
+  # The selection ranking consumed as the candidate universe.
+  input_csv: data/us_equities/processed/asset_selection_results.csv
+  # The selection run's own verdict, used as the trust gate.
+  input_summary_json: reports/us_equities/asset_selection_summary.json
+  output_dir: reports/us_equities/portfolio
+  processed_dir: data/us_equities/processed
+  # Refuse to build plans on a ranking selection itself distrusted
+  # (run_status DIAGNOSTIC / INVALID). Override with --allow-untrusted-ranking.
+  require_trusted_run: true
+
+capital:
+  # How much money is being allocated. Override per run with --amount.
+  investable_amount: 10000.0
+  currency: USD
+  # Per-order commission as a fraction of notional (0.002 = 0.20%).
+  commission_per_trade_pct: 0.002
+  # Whole shares produce a plan you could actually execute.
+  allow_fractional_shares: false
+  # Targets below this are reported as un-investable at this capital level
+  # instead of emitting 0-share rows.
+  min_position_value: 50.0
+
+instruments:
+  # The sleeves held through a single broad instrument. These are liquid,
+  # well-known ETFs used as market proxies — configuration, not advice.
+  # Prices come from the price provider; a missing price yields a dollar
+  # target with no share count plus a visible warning.
+  index_core_ticker: VOO
+  index_core_name: S&P 500 index ETF
+  bond_proxy_ticker: BND
+  bond_proxy_name: Aggregate bond ETF
+
+strategies:
+  # ---------------------------------------------------------------------
+  # LOW RISK — capital preservation
+  # ---------------------------------------------------------------------
+  conservative:
+    label: "Conservative — capital preservation"
+    description: >
+      Low risk. Most of the portfolio sits in cash, bonds and a broad S&P 500
+      index; single names are few, large and stable. No speculative sleeve.
+    sleeves:
+      cash: 0.10
+      bond_proxy: 0.40
+      index_core: 0.35
+      equity_core: 0.15
+      growth_satellite: 0.00
+      speculative: 0.00
+    max_weight_per_name: 0.04      # no single company above 4% of the portfolio
+    max_weight_per_sector: 0.15    # no business type above 15% of equities
+    max_names_per_sleeve: 6
+    inverse_vol_tilt: 0.70         # strongly prefer lower-volatility names
+    allowed_risk_buckets: [low_risk]
+    allow_speculative: false
+    overflow_sleeve: index_core
+
+  # ---------------------------------------------------------------------
+  # MEDIUM RISK — classic core and satellite
+  # ---------------------------------------------------------------------
+  balanced:
+    label: "Balanced — core and satellite"
+    description: >
+      Medium risk. A broad index plus quality single names form the core;
+      growth satellites take small weights; a token speculative sleeve is
+      allowed because allow_speculative is enabled.
+    sleeves:
+      cash: 0.05
+      bond_proxy: 0.20
+      index_core: 0.35
+      equity_core: 0.25
+      growth_satellite: 0.13
+      speculative: 0.02
+    max_weight_per_name: 0.06
+    max_weight_per_sector: 0.25
+    max_names_per_sleeve: 8
+    inverse_vol_tilt: 0.50
+    allowed_risk_buckets: [low_risk, moderate_risk]
+    allow_speculative: true
+    overflow_sleeve: index_core
+
+  # ---------------------------------------------------------------------
+  # HIGH RISK — growth tilted with a capped speculative sleeve
+  # ---------------------------------------------------------------------
+  aggressive:
+    label: "Aggressive — growth tilted"
+    description: >
+      High risk. Smaller stability sleeves, a larger growth satellite
+      allocation and a hard-capped speculative sleeve for asymmetric
+      outcomes. Expect materially larger drawdowns; the speculative sleeve
+      can lose its entire value.
+    sleeves:
+      cash: 0.03
+      bond_proxy: 0.05
+      index_core: 0.27
+      equity_core: 0.30
+      growth_satellite: 0.25
+      speculative: 0.10
+    max_weight_per_name: 0.10
+    max_weight_per_sector: 0.35
+    max_names_per_sleeve: 10
+    inverse_vol_tilt: 0.25         # lean into the selection score
+    allowed_risk_buckets: [low_risk, moderate_risk, high_risk]
+    allow_speculative: true
+    overflow_sleeve: index_core
