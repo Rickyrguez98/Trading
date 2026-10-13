@@ -210,6 +210,14 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Override the report output directory."
     )
     p.add_argument(
+        "--processed-dir", default=None,
+        help=(
+            "Override where the results CSV and cleaned universe are written. "
+            "--output-dir moves only the reports; without this, a small custom "
+            "run would overwrite the main ranking in data/us_equities/processed."
+        ),
+    )
+    p.add_argument(
         "--log-level", default=None,
         help="Override the log level: DEBUG / INFO / WARNING / ERROR."
     )
@@ -891,6 +899,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.sentiment.model = args.sentiment_model
     if args.output_dir:
         config.run.output_dir = args.output_dir
+    if args.processed_dir:
+        config.run.processed_dir = args.processed_dir
     if args.use_cache_on_provider_failure:
         config.robustness.use_cache_on_provider_failure = True
     if args.max_cache_age_days is not None:
