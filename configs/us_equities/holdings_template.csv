@@ -1,0 +1,4 @@
+ticker,shares,avg_cost,currency,market,purchase_date,broker,notes
+NVDA,10,3850.00,MXN,SIC,2025-03-14,GBM,example: US stock bought in pesos through the SIC
+AAPL,2.5,180.20,USD,US,2025-06-02,GBM Trading USA,example: US stock held in dollars
+WALMEX *,40,62.15,MXN,BMV,14/01/2025,GBM,example: Mexican listing; day-first dates are fine

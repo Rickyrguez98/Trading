@@ -26,7 +26,10 @@ jobs:
       - name: Install (packaging check)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # The pdf extra is small and lets the statement-parser tests run here.
+          # The forecast extra (Chronos + torch) is too heavy for CI; its test
+          # skips cleanly when the package is absent.
+          pip install -e ".[dev,pdf]"
 
       - name: Lint (ruff, enforced baseline)
         run: ruff check src tests
@@ -43,6 +46,8 @@ jobs:
       - name: CLI smoke (no network)
         run: |
           trading-us-equities --help > /dev/null
+          trading-portfolio --help > /dev/null
+          trading-monitor --help > /dev/null
           trading-binary-options --help > /dev/null
           trading-binary-options --validate-catalog-only \
             --instrument-catalog configs/binary_options/instruments.example.yaml

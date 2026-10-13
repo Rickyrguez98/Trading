@@ -47,12 +47,22 @@ finbert = [
     "torch>=2.1",
     "transformers>=4.40",
 ]
+pdf = [
+    # Optional: read brokerage statement PDFs in trading-monitor (MIT licensed).
+    "pdfplumber>=0.11",
+]
+forecast = [
+    # Optional: the Chronos-2 deep-learning forecaster for trading-monitor.
+    # chronos-forecasting requires Python >= 3.10 and pulls in torch.
+    "chronos-forecasting>=2.0; python_version >= '3.10'",
+]
 
 [project.scripts]
 # Canonical domain commands
 trading-us-equities = "asset_selection.pipelines.run_asset_selection:main"
 trading-binary-options = "binary_options_selection.pipelines.run_binary_options_selection:main"
 trading-portfolio = "asset_selection.pipelines.run_portfolio_allocation:main"
+trading-monitor = "asset_selection.pipelines.run_portfolio_monitor:main"
 # Legacy aliases (kept for backward compatibility)
 asset-selection = "asset_selection.pipelines.run_asset_selection:main"
 binary-options-selection = "binary_options_selection.pipelines.run_binary_options_selection:main"
