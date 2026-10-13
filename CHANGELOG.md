@@ -65,6 +65,48 @@ this counter; releases before 0.0.12 were never tracked in this file.
   `yahoo_rss` could not be verified live either: every attempt from the
   development environment returned HTTP 429.
 
+### Added — Portfolio monitor (US Equities Milestone 3)
+- `trading-monitor` (`asset_selection.monitoring`): SELL / TRIM / HOLD / ADD /
+  REVIEW for the positions you already own, with share counts, money, the
+  evidence behind each call and an outlook. Inputs: the holdings CSV template
+  or a brokerage statement PDF (GBM / DriveWealth vocabulary, optional
+  `[pdf]` extra), written back out as an auditable CSV.
+- Valuation in MXN or USD; SIC returns split exactly into the stock's dollar
+  return and the USDMXN move, converting each lot at its own purchase date.
+- Thesis rules about the business, not the price: read from a full-universe
+  ranking (fundamentals scores are cross-sectional and meaningless when a
+  dozen stocks are scored alone); price-driven exclusions never break a
+  thesis; missing data is UNKNOWN; index and bond funds are STRATEGIC and only
+  rebalanced. A loss alone, or a gain alone, never triggers a sale; ADD and
+  TRIM both wait for the rebalance band.
+- Forecasting: a demeaned block bootstrap (no directional view) and the
+  optional Chronos-2 deep-learning model (`[forecast]` extra, Python >= 3.10).
+  Each is validated per stock against a random walk (pinball loss,
+  Diebold-Mariano with HLN correction and Newey-West variance), with an
+  independent-window guard and Benjamini-Hochberg control across the run. A
+  forecast can influence an action only if it is directional and survives all
+  of that.
+- `trading-us-equities --processed-dir`: `--output-dir` moved only the
+  reports, so a small custom run would have overwritten the main ranking.
+- Docs: `docs/us_equities/monitoring.md`, and
+  `docs/us_equities/broker-integration-options.md` (step 3 research: GBM has
+  no client API; Ley Fintech Art. 76 customer-data rules are still
+  unpublished; IBKR Flex Web Service is the official read-only route).
+
+### Found by running on real data (fixed before release)
+- A dozen-stock rescore graded holdings against each other and recommended
+  selling half a healthy portfolio, including the S&P 500 index fund.
+- Chronos produced negative price quantiles at long horizons; `log()` turned
+  them into NaN and silently erased that stock's validation.
+- One stock "beat the random walk" at p = 0.0037 — about what luck predicts
+  across 24 tests; it does not survive the run-level correction.
+
+### Testing
+- 192 new tests (600 in total), passing on Python 3.9 / pandas 1.5.3 and on
+  Python 3.11 / pandas 3.0.6 with Chronos installed. The validation is tested
+  from both sides: no false skill on pure random walks, and real skill
+  detected for an oracle that sees the future.
+
 ## [0.0.15] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
 
 ### Added

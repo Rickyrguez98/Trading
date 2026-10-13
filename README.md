@@ -99,6 +99,30 @@ distrusted, and it never invents a price: a missing price yields a dollar
 target with no share count and a visible warning. It places no orders and
 recommends no stake sizes.
 
+## Quick start — Portfolio monitor
+
+For the stocks you **already own**: SELL, TRIM, HOLD or ADD per position, with
+the evidence, share counts and money, from a holdings CSV or a brokerage
+statement PDF:
+
+```bash
+trading-monitor --holdings configs/us_equities/holdings_template.csv
+trading-monitor --holdings estado_de_cuenta.pdf            # pip install '.[pdf]'
+trading-monitor --holdings my_holdings.csv \
+    --target data/us_equities/processed/portfolio_balanced.csv --cash 5000
+trading-monitor --holdings my_holdings.csv --forecast chronos   # pip install '.[forecast]'
+```
+
+Values are reported in MXN by default, with SIC gains split into the stock's
+dollar return and the peso move. The thesis check reads the full selection
+ranking; index and bond funds are only ever rebalanced; a loss alone never
+triggers a sale. Forecasts (a volatility bootstrap, or the Chronos-2 deep
+learning model) are validated per stock against a random walk with
+false-discovery control, and only a validated directional edge may influence
+an action — on real data so far, none has. Methodology:
+[docs/us_equities/monitoring.md](docs/us_equities/monitoring.md). Connecting a
+broker instead of a file: [options](docs/us_equities/broker-integration-options.md).
+
 ## Quick start — Binary Options
 
 ```bash
