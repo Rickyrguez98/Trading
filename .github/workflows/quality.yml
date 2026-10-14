@@ -27,9 +27,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # The pdf extra is small and lets the statement-parser tests run here.
-          # The forecast extra (Chronos + torch) is too heavy for CI; its test
-          # skips cleanly when the package is absent.
-          pip install -e ".[dev,pdf]"
+          # The app extra installs only on Python >= 3.10 (version markers), so
+          # the web tests run on 3.11 and skip on 3.9. The forecast extra
+          # (Chronos + torch) is too heavy for CI; its test skips cleanly.
+          pip install -e ".[dev,pdf,app]"
 
       - name: Lint (ruff, enforced baseline)
         run: ruff check src tests
@@ -38,7 +39,7 @@ jobs:
         run: mypy --ignore-missing-imports src/trading_common src/binary_options_selection/catalog
 
       - name: Import check
-        run: python -c "import asset_selection, binary_options_selection, trading_common; print('imports OK')"
+        run: python -c "import asset_selection, binary_options_selection, trading_common, trading_app.services; print('imports OK')"
 
       - name: Test suite (offline, deterministic)
         run: pytest
@@ -48,6 +49,7 @@ jobs:
           trading-us-equities --help > /dev/null
           trading-portfolio --help > /dev/null
           trading-monitor --help > /dev/null
+          trading-app --help > /dev/null
           trading-binary-options --help > /dev/null
           trading-binary-options --validate-catalog-only \
             --instrument-catalog configs/binary_options/instruments.example.yaml

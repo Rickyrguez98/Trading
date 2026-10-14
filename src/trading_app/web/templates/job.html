@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }}{% endblock %}
+{% block head %}{% if not job.done %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block content %}
+<h1>{{ job.title }}</h1>
+<p class="sub">Started {{ job.created_at[:19]|replace('T', ' ') }} UTC
+  {% if job.finished_at %}· finished {{ job.finished_at[:19]|replace('T', ' ') }} UTC{% endif %}</p>
+
+{% if not job.done %}
+  <div class="note">Running… this page refreshes every 3 seconds. You can leave it; the job keeps going.</div>
+{% elif job.state == 'succeeded' %}
+  <div class="note ok">Finished successfully.
+    {% if job.kind == 'selection' %}<a href="/selection">See the ranking</a>
+    {% elif job.kind == 'allocation' %}<a href="/allocation">See the plans</a>
+    {% else %}<a href="/monitor">See the recommendations</a>{% endif %}</div>
+{% else %}
+  <div class="note bad">Failed (exit code {{ job.returncode if job.returncode is not none else 'unknown' }}). The log below shows why.</div>
+{% endif %}
+
+<p><code>{{ job.command }}</code></p>
+<pre class="log">{{ log or '(no output yet)' }}</pre>
+{% endblock %}

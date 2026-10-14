@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Allocate{% endblock %}
+{% block content %}
+<h1>Step 2 · Portfolio allocation</h1>
+<p class="sub">Turns the ranking and an amount into conservative, balanced and aggressive portfolios — every position in percent and money.</p>
+
+{% if not ranking.exists %}<div class="note warn">There is no full-universe ranking yet; run step 1 first.</div>{% endif %}
+
+{% if running %}
+  <div class="note">An allocation is running: <a href="/jobs/{{ running.id }}">{{ running.title }}</a></div>
+{% else %}
+<div class="card">
+  <form method="post" action="/allocation/run" class="inline">
+    <label>Amount to invest <input type="number" name="amount" step="0.01" min="1" required placeholder="25000"></label>
+    <label>Strategy
+      <select name="strategy"><option value="">All three</option>
+        {% for s in strategies %}<option value="{{ s }}">{{ s|capitalize }}</option>{% endfor %}</select></label>
+    <label class="check"><input type="checkbox" name="offline" value="1"> offline (no price lookups)</label>
+    <button class="btn">Build plans</button>
+  </form>
+</div>
+{% endif %}
+
+{% if plans %}
+<h2>Plans</h2>
+<p>{% for p in plans %}<a class="btn {{ '' if p.strategy == chosen else 'ghost' }}" href="/allocation?strategy={{ p.strategy }}">{{ p.strategy|capitalize }}</a> {% endfor %}</p>
+{% set s = (summary or {}).get('strategies', {}).get(chosen) %}
+{% if s %}<p class="sub">Invested {{ s.invested_value|money }} · cash {{ s.cash_value|money }} · equity {{ s.equity_weight_pct|pct }} · effective positions {{ s.effective_positions|num }}</p>{% endif %}
+<div class="table-wrap"><table>
+  <tr><th>Ticker</th><th>Sleeve</th><th>Sector</th><th class="num">Target</th><th class="num">Actual</th>
+      <th class="num">Price</th><th class="num">Shares</th><th class="num">Money</th><th>Warnings</th></tr>
+  {% for r in rows %}
+  <tr><td><strong>{{ r.ticker }}</strong></td><td>{{ (r.sleeve or '')|replace('_', ' ') }}</td><td>{{ r.sector or '—' }}</td>
+      <td class="num">{{ r.target_weight_pct|pct(2) }}</td><td class="num">{{ r.realized_weight_pct|pct(2) }}</td>
+      <td class="num">{{ r.price|money }}</td><td class="num">{{ r.shares|num(0) }}</td>
+      <td class="num">{{ r.invested_value|money }}</td><td class="wrap">{{ r.warnings if r.warnings not in (None, '[]') else '' }}</td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="sub">No plans yet.</p>{% endif %}
+{% endblock %}

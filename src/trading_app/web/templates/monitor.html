@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Monitor{% endblock %}
+{% block content %}
+<h1>Step 4 · Portfolio monitor</h1>
+<p class="sub">Sell, trim, hold or add for what you already own — with the evidence, the money involved, and forecasts shown with their measured accuracy.</p>
+
+{% if ranking.stale or not ranking.exists %}<div class="note warn">The thesis check reads the full selection ranking, which is {{ 'missing' if not ranking.exists else (ranking.age_days|string + ' days old') }}. <a href="/selection">Refresh it</a> for a current view.</div>{% endif %}
+
+{% if running %}
+  <div class="note">The monitor is running: <a href="/jobs/{{ running.id }}">{{ running.title }}</a></div>
+{% else %}
+<div class="card">
+  <form method="post" action="/monitor/run" enctype="multipart/form-data" class="inline">
+    <label>Holdings from
+      <select name="option">{% for c in ('A','B','C') %}<option value="{{ c }}" {{ 'selected' if c == settings.broker_option }}>Option {{ c }}</option>{% endfor %}</select></label>
+    <label>File (A: statement PDF · B: optional CSV) <input type="file" name="file" accept=".pdf,.csv"></label>
+    <label>Rebalance against
+      <select name="target"><option value="">No target plan</option>
+        {% for p in plans %}<option value="{{ p.strategy }}">{{ p.strategy|capitalize }} plan</option>{% endfor %}</select></label>
+    <label>New cash (MXN) <input type="number" name="cash" value="0" min="0" step="0.01"></label>
+    <label>Forecast
+      <select name="forecast"><option value="bootstrap">Bootstrap (fast)</option>
+        <option value="chronos" {{ '' if chronos else 'disabled' }}>Chronos-2 {{ '' if chronos else '(install the forecast extra)' }}</option></select></label>
+    <label class="check"><input type="checkbox" name="refresh" value="1"> refresh news</label>
+    <button class="btn">Run monitor</button>
+  </form>
+</div>
+{% endif %}
+
+{% if view %}
+{% set s = view.summary %}
+<h2>Latest result</h2>
+<div class="note {{ 'ok' if s.status == 'VALID' else 'warn' }}">
+  <strong>{{ s.status }}</strong> · {{ (s.generated_at or '')[:16]|replace('T', ' ') }} UTC ·
+  value {{ s.totals.market_value|money }} {{ s.reporting_currency }} · P/L {{ s.totals.unrealized_pl|money }} {{ s.reporting_currency }}
+  {% for r in s.status_reasons %}<br>– {{ r }}{% endfor %}
+</div>
+<div class="table-wrap"><table>
+  <tr><th>Ticker</th><th>Action</th><th class="num">Shares</th><th class="num">Money</th><th class="num">Weight</th>
+      <th class="num">P/L %</th><th>Thesis</th><th>Confidence</th><th>Why</th></tr>
+  {% for p in s.positions %}{% set rec = p.recommendation %}
+  <tr><td><strong>{{ p.ticker }}</strong><br><span class="sub">{{ p.market }}</span></td>
+      <td class="act {{ rec.action }}">{{ rec.action }}</td>
+      <td class="num">{{ rec.shares_delta if rec.shares_delta else '—' }}</td>
+      <td class="num">{{ rec.value_delta_reporting|money if rec.value_delta_reporting else '—' }}</td>
+      <td class="num">{{ rec.current_weight_pct|pct }}</td>
+      <td class="num">{{ p.valuation.unrealized_pl_pct|pct(1, True) }}</td>
+      <td>{{ rec.thesis_status }}</td><td>{{ rec.confidence }}</td><td class="wrap">{{ rec.rule }}</td></tr>
+  {% endfor %}
+</table></div>
+
+<h2>Why, per position</h2>
+{% for p in s.positions %}{% set rec = p.recommendation %}
+<details>
+  <summary>{{ p.ticker }} — <span class="act {{ rec.action }}">{{ rec.action }}</span> · composite {{ rec.composite_score }}</summary>
+  {% if rec.outlook %}<p><strong>Outlook:</strong> {{ rec.outlook }}</p>{% endif %}
+  <ul class="ev">{% for e in rec.evidence %}<li><code>{{ e.factor }}</code> ({{ '%+.2f'|format(e.score) }}) {{ e.summary }}</li>{% endfor %}</ul>
+  {% for b in rec.blockers %}<p>⚠ {{ b }}</p>{% endfor %}
+  <p class="sub">Bought {{ p.first_purchase_date or 'date unknown' }} · avg cost {{ p.avg_cost|money }} {{ p.currency }} · review by {{ rec.review_by }}</p>
+</details>
+{% endfor %}
+<p class="sub">Source: {{ view.source }}</p>
+{% else %}<p class="sub">No monitor result yet.</p>{% endif %}
+{% endblock %}
