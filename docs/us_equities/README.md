@@ -6,11 +6,19 @@ Ranks U.S.-listed common stocks using a transparent combination of
 **fundamentals**, **growth**, **valuation**, **quality**, and **news
 sentiment**, sourced exclusively from free / public APIs.
 
-## Current scope — Milestone 1: Asset Selection
+## Scope
 
-The first milestone is to discriminate between assets and surface a ranked
-shortlist of candidates that look attractive on both **company quality** and
-**market expectations**. The pipeline:
+This manual covers **step 1, asset selection** in detail. The later steps of
+the US-equities workflow have their own documents:
+
+| Step | Command | Document |
+|---|---|---|
+| 1. Select — rank the US universe | `trading-us-equities` | this manual |
+| 2. Allocate — three risk strategies in % and money | `trading-portfolio` | [allocation.md](allocation.md) |
+| 3. Buy — manually; choose how holdings are read (A/B/C) | `trading-monitor --list-brokers` | [broker-integration-options.md](broker-integration-options.md) |
+| 4. Monitor — sell / trim / hold / add on what you own | `trading-monitor` | [monitoring.md](monitoring.md) |
+
+Step 1, the selection pipeline:
 
 1. Builds a U.S. common-stock universe from free, public sources.
 2. Pulls fundamentals, prices, and recent news for each ticker (cached).
@@ -20,16 +28,21 @@ shortlist of candidates that look attractive on both **company quality** and
 5. Combines them into a configurable composite score and ranks candidates.
 6. Emits a CSV, a Markdown top-N report, and a JSON summary.
 
+Fundamentals scores are **cross-sectional**: each stock is measured against
+the others scored in the same run. A full-universe run is therefore the
+reference every later step relies on — re-run it monthly (see the root
+README, "Re-running the full selection").
+
 ## Out of scope (for now)
 
-- Live trading or order routing.
-- Asset allocation / portfolio construction.
+- Live trading or order routing (buying stays manual by design).
 - Risk parity, mean-variance optimization, factor models.
-- Backtesting, walk-forward analysis, transaction-cost modeling.
+- Backtesting the selection or allocation strategies, and transaction-cost
+  modeling. (The monitor's forecaster is validated walk-forward against a
+  random walk, but that tests the forecast, not a trading strategy.)
 
-These are sketched in [roadmap.md](roadmap.md) and have
-placeholder modules (`src/asset_selection/{allocation,backtesting,risk}/`) that
-the current pipeline does **not** depend on.
+These are sketched in [roadmap.md](roadmap.md); the placeholder modules
+`src/asset_selection/{backtesting,risk}/` are not used by any pipeline.
 
 ---
 
@@ -210,7 +223,8 @@ modes, flags, agreement categories, and outputs.
 | `--top N`                            | Top-N for the Markdown report. |
 | `--refresh-cache`                    | Invalidate cached provider responses before running. |
 | `--no-cache`                         | Disable cache entirely for this run. |
-| `--output-dir PATH`                  | Override the default `reports/` directory. |
+| `--output-dir PATH`                  | Override the report directory (default `reports/us_equities`). |
+| `--processed-dir PATH`               | Override where the results CSV and cleaned universe go (default `data/us_equities/processed`). Use it for small `--tickers` runs so they don't overwrite the main ranking. |
 | `--log-level LEVEL`                  | DEBUG / INFO / WARNING / ERROR. |
 | `--health-check-only`                | Probe the providers against benchmark mega-caps (AAPL, MSFT, GOOGL, NVDA, BRK.B), write `reports/provider_health.json`, and exit **without** running the pipeline. Exit `2` on a systemic failure. |
 | `--no-provider-health-check`         | Skip the pre-run benchmark health probe (it runs by default so a provider outage is caught before a misleading ranking). |
@@ -222,14 +236,14 @@ modes, flags, agreement categories, and outputs.
 
 After it finishes, look at:
 
-- `data/processed/universe_clean.csv` — the cleaned stage-1 universe.
-- `data/processed/asset_selection_results.csv` — full ranking with all metrics.
-- `reports/top_candidates.md` — human-readable top-N report, **prefixed with a run-status banner** so the table can never be read without its validity caveat.
-- `reports/asset_selection_summary.json` — machine-readable run summary, including `run_status`, `ranking_validity`, stages, provider failures, coverage, fallback usage, cache provenance, and exchange breakdown.
-- `reports/provider_diagnostics.md` / `reports/provider_diagnostics.json` — the single artifact that answers "can I trust today's ranking, and if not, why?" (see [Run status and provider reliability](#run-status-and-provider-reliability)).
-- `reports/provider_health.json` — benchmark mega-cap health probe (also the only output of `--health-check-only`).
-- `reports/universe_summary.json` — universe-only report (stage stats + exchange counts), produced even when the pipeline aborts.
-- `reports/output_validation.md` / `reports/output_validation.json` — a post-run self-audit of the produced candidates (see [Output validation](#output-validation) below).
+- `data/us_equities/processed/universe_clean.csv` — the cleaned stage-1 universe.
+- `data/us_equities/processed/asset_selection_results.csv` — full ranking with all metrics.
+- `reports/us_equities/top_candidates.md` — human-readable top-N report, **prefixed with a run-status banner** so the table can never be read without its validity caveat.
+- `reports/us_equities/asset_selection_summary.json` — machine-readable run summary, including `run_status`, `ranking_validity`, stages, provider failures, coverage, fallback usage, cache provenance, and exchange breakdown.
+- `reports/us_equities/provider_diagnostics.md` / `.json` — the single artifact that answers "can I trust today's ranking, and if not, why?" (see [Run status and provider reliability](#run-status-and-provider-reliability)).
+- `reports/us_equities/provider_health.json` — benchmark mega-cap health probe (also the only output of `--health-check-only`).
+- `reports/us_equities/universe_summary.json` — universe-only report (stage stats + exchange counts), produced even when the pipeline aborts.
+- `reports/us_equities/output_validation.md` / `.json` — a post-run self-audit of the produced candidates (see [Output validation](#output-validation) below).
 
 ## Universe and staged filtering
 

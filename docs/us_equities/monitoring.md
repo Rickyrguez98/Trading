@@ -7,7 +7,11 @@ on how likely and how soon the price reaches a level. Research output only:
 nothing is executed and nothing here is financial advice.
 
 ```bash
-# Holdings from the CSV template (always works)
+# Your configured broker option (default B: data/us_equities/holdings/my_holdings.csv)
+trading-monitor --init-holdings     # once, to create the holdings CSV
+trading-monitor
+
+# A specific CSV
 trading-monitor --holdings my_holdings.csv
 
 # ...or straight from a statement PDF (pip install '.[pdf]')
@@ -26,7 +30,21 @@ Outputs: `reports/us_equities/monitoring/portfolio_monitor.md` (the report),
 `data/us_equities/processed/monitoring/` the per-position table and
 `monitor_orders.csv` — the order ticket you would key into GBM by hand.
 
-## 1. Input: your holdings
+## 1. Input: your holdings (broker option A, B or C)
+
+The monitor reads holdings through the **broker option** you pick —
+`broker.option` in `configs/us_equities/monitoring.yaml`, or
+`--broker A|B|C` per run (`trading-monitor --list-brokers` shows which are
+ready):
+
+- **A** — a GBM / DriveWealth statement PDF (below);
+- **B** — the holdings CSV (default; `trading-monitor --init-holdings` creates
+  it under `data/`, which git ignores);
+- **C** — Interactive Brokers' read-only Flex Web Service. Lot-level positions
+  carry their open dates; shorts, options and non-USD/MXN positions are skipped
+  and listed. Setup: [broker-integration-options.md](broker-integration-options.md).
+
+All three produce the same lots, so everything below applies equally.
 
 ### CSV (recommended source of truth)
 
@@ -232,7 +250,9 @@ and the report says so on every position.
 
 ## 7. Limitations
 
-- No broker connection yet — see
+- GBM has no API, so GBM holdings come from a file (options A/B); automatic
+  reading (option C) needs an Interactive Brokers account and is tested on
+  synthetic responses only — see
   [broker-integration-options.md](broker-integration-options.md).
 - PDF parsing is unverified against a real GBM statement.
 - Mexican listings (BMV) are outside the US-equity selection model: they are

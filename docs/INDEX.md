@@ -16,7 +16,7 @@
 - [Portfolio allocation](us_equities/allocation.md) — sleeves, the three risk strategies, weighting and cap formulas, money conversion, trust gate.
 - [Allocation readiness](us_equities/allocation-readiness.md) — why this architecture (and what was rejected).
 - [Portfolio monitor](us_equities/monitoring.md) — SELL / TRIM / HOLD / ADD on current holdings: inputs (CSV, statement PDF), thesis rules, forecasting and its validation against a random walk.
-- [Broker integration options](us_equities/broker-integration-options.md) — GBM and other brokers: what can (and cannot) be connected, with sources.
+- [Broker options A / B / C](us_equities/broker-integration-options.md) — how the monitor reads your holdings (statement PDF, holdings CSV, read-only IBKR Flex), how to choose, setup, and the research behind it.
 - [Sentiment models](us_equities/sentiment-models.md) — VADER / FinBERT / comparison / ensemble.
 - [Full-universe pipeline](us_equities/full-universe-pipeline.md)
 - [Roadmap](us_equities/roadmap.md)

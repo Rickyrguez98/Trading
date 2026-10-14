@@ -93,6 +93,23 @@ this counter; releases before 0.0.12 were never tracked in this file.
   no client API; Ley Fintech Art. 76 customer-data rules are still
   unpublished; IBKR Flex Web Service is the official read-only route).
 
+### Added — Broker options A / B / C
+- The monitor reads holdings through a selectable broker option:
+  **A** statement PDF, **B** holdings CSV (default), **C** Interactive Brokers
+  Flex Web Service (read-only). Choose with `broker.option` in
+  `configs/us_equities/monitoring.yaml` or `trading-monitor --broker A|B|C`;
+  `--list-brokers` shows which options are ready; `--init-holdings` creates
+  the personal CSV under `data/` (git-ignored).
+- `asset_selection.monitoring.ibkr_flex`: SendRequest / GetStatement with
+  polling for "statement in progress" codes, explained error codes, and lot-
+  level open dates. The token comes from the environment only, is scrubbed from
+  every error message, is never logged, and is only sent to
+  `*.interactivebrokers.com`; the raw statement (with the account ID) is never
+  saved. Shorts, options and non-USD/MXN positions are skipped and listed.
+  Tested against synthetic responses built on the Flex XML schema; not yet run
+  against a live account.
+- The monitor now loads `.env` like the selection CLI, so keys kept there work.
+
 ### Found by running on real data (fixed before release)
 - A dozen-stock rescore graded holdings against each other and recommended
   selling half a healthy portfolio, including the S&P 500 index fund.

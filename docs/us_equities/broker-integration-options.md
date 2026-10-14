@@ -1,11 +1,43 @@
-# Step 3 — Connecting a broker: options (decision pending)
+# Step 3 — Connecting a broker: options A, B and C
 
-**Status:** research complete, decision open. Investing is manual today (GBM).
-Researched 2026-10-13. Nothing here places orders: this repository never
-executes trades, automates a broker login, or stores credentials.
+**Status:** all three options are implemented and selectable; **B is the
+default**. Investing itself stays manual. Researched 2026-10-13. Nothing here
+places orders: this repository never executes trades, never logs in with a
+password, and never stores credentials.
 
 The question: can the monitor (`trading-monitor`, step 4) read your portfolio
 straight from your broker instead of from a file?
+
+## Choosing an option
+
+```bash
+trading-monitor --list-brokers        # shows A, B, C, the selected one, and whether each is ready
+```
+
+Set the default in `configs/us_equities/monitoring.yaml`:
+
+```yaml
+broker:
+  option: B          # A = statement PDF, B = holdings CSV, C = IBKR Flex
+```
+
+or override one run with `trading-monitor --broker A|B|C`. Passing
+`--holdings file.pdf` / `file.csv` implies A / B.
+
+| Option | Set up once | Each time |
+|---|---|---|
+| **A** statement PDF | `pip install -e ".[pdf]"` | Download the month's estado de cuenta, then `trading-monitor --broker A --holdings estado.pdf` (or set `broker.statement_pdf`). Audit `data/us_equities/processed/monitoring/extracted_*.csv`. |
+| **B** holdings CSV | `trading-monitor --init-holdings` creates `data/us_equities/holdings/my_holdings.csv` from the template | Add one row per purchase (`ticker,shares,avg_cost,currency,market,purchase_date`); run `trading-monitor`. |
+| **C** IBKR Flex | In Client Portal → **Performance & Reports → Flex Queries**: the gear next to *Flex Web Service Configuration* enables the service and generates a token (choose 1-year validity); the **+** next to *Activity Flex Query* creates a query — add *Open Positions*, level of detail *Lot*, date format `yyyyMMdd` — and its "i" icon shows the query ID. Put `IBKR_FLEX_TOKEN` and `IBKR_FLEX_QUERY_ID` in `.env`. | `trading-monitor --broker C` |
+
+How option C protects the token: it is read from the environment only, never
+written anywhere, never logged; IBKR requires it in the URL, so request URLs
+are never logged and error messages are scrubbed of it; it is only ever sent
+to `https://*.interactivebrokers.com`. The raw statement (which contains your
+account ID) is never saved — only the extracted positions. Shorts, options and
+non-USD/MXN positions are skipped and listed, never guessed. Option C has been
+tested against synthetic IBKR responses built on the Flex XML schema, not yet
+against a live account.
 
 ## Findings
 
@@ -51,6 +83,8 @@ straight from your broker instead of from a file?
 | **D** | **Ask GBM** (`plus@gbm.com`) whether any client data API exists | One email | Certainty | Given the Article 76 situation, the answer is most likely no. |
 | ✗ | Unofficial GBM login (`gbmplus`, scraping) | — | — | Not offered: password automation, unmaintained, likely against GBM's terms. |
 
+Option D from the original research (asking GBM by email whether a client API exists) needs no code; it remains worth one email.
+
 **Recommendation:** **A + B now** — keep a CSV as the source of truth and use
 the PDF to cross-check monthly — and **D** in parallel, since it costs one
 email. Choose **C** only if automatic updates are worth changing broker; the
@@ -64,6 +98,8 @@ connector would be a read-only adapter producing the same lots the CSV does.
 - Article 76 secondary rules still pending (2026): <https://www.elfinanciero.com.mx/opinion/colaborador-invitado/2026/01/07/el-emprendimiento-demanda-open-finance-lleva-a-la-cnbv-ante-el-juez/>, <https://armor-aml.com/que-viene-para-la-ley-fintech-en-el-2026-cuando-open-finance-y-el-sandbox-siguen-pendientes/>
 - `gbmplus` package metadata: <https://pypi.org/project/gbmplus/>
 - IBKR Flex Web Service: <https://www.interactivebrokers.com/campus/ibkr-api-page/flex-web-service/>
+- Generating the Flex token and query ID (third-party walkthrough): <https://help.tradezella.com/en/articles/6063403-interactive-broker-how-to-sync-your-interactive-broker-ibkr-account-with-tradezella>
+- Flex XML `OpenPosition` attribute names (open-source parser `ibflex`): <https://github.com/csingley/ibflex>
 - IBKR for Mexican residents (third-party review): <https://brokerchooser.com/es/broker-reviews/interactive-brokers-review/interactive-brokers-mexico>
 - Alpaca and non-US individuals: <https://forum.alpaca.markets/t/live-trading-as-a-non-us-citizen/115>
 - Webull's entry into Mexico via Flink: <https://www.fintechfutures.com/m-a/us-stock-trading-app-webull-enters-mexico-with-flink-acquisition>
