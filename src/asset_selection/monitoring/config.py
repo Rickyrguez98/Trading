@@ -127,7 +127,22 @@ class DecisionConfig:
 
 
 @dataclass
+class BrokerConfig:
+    """Where holdings come from: A = statement PDF, B = holdings CSV, C = IBKR Flex."""
+    option: str = "B"
+    # Personal files live under data/, which git ignores: holdings never get committed.
+    holdings_csv: str = "data/us_equities/holdings/my_holdings.csv"
+    statement_pdf: Optional[str] = None
+    # Option C reads credentials from these environment variables only.
+    ibkr_token_env: str = "IBKR_FLEX_TOKEN"
+    ibkr_query_id_env: str = "IBKR_FLEX_QUERY_ID"
+    ibkr_poll_seconds: float = 5.0
+    ibkr_max_wait_seconds: float = 120.0
+
+
+@dataclass
 class MonitoringConfig:
+    broker: BrokerConfig = field(default_factory=BrokerConfig)
     run: RunConfig = field(default_factory=RunConfig)
     trend: TrendConfig = field(default_factory=TrendConfig)
     events: EventsConfig = field(default_factory=EventsConfig)
@@ -183,6 +198,7 @@ def _from_dict(raw: Dict[str, Any]) -> MonitoringConfig:
         return v if isinstance(v, dict) else {}
 
     return MonitoringConfig(
+        broker=BrokerConfig(**_filtered(BrokerConfig, section("broker"))),
         run=RunConfig(**_filtered(RunConfig, section("run"))),
         trend=TrendConfig(**_filtered(TrendConfig, section("trend"))),
         events=EventsConfig(**_filtered(EventsConfig, section("events"))),
@@ -204,6 +220,13 @@ def validate_config(cfg: MonitoringConfig) -> List[str]:
     """Return every problem found (empty list = valid)."""
     p: List[str] = []
     r, t, f, d = cfg.run, cfg.trend, cfg.forecast, cfg.decision
+
+    if str(cfg.broker.option).strip().lower() not in {
+        "a", "b", "c", "pdf", "csv", "ibkr", "statement_pdf", "holdings_csv", "ibkr_flex",
+    }:
+        p.append("broker.option must be A (statement PDF), B (holdings CSV) or C (IBKR Flex)")
+    if cfg.broker.ibkr_poll_seconds <= 0 or cfg.broker.ibkr_max_wait_seconds <= 0:
+        p.append("broker.ibkr_poll_seconds and broker.ibkr_max_wait_seconds must be positive")
 
     if str(r.reporting_currency).upper() not in VALID_CURRENCIES:
         p.append(f"run.reporting_currency must be one of {VALID_CURRENCIES}")

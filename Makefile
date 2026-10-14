@@ -3,7 +3,7 @@
 
 install:
 	pip install --upgrade pip
-	pip install -e ".[dev]"
+	pip install -e ".[dev,pdf]"
 
 dev: install
 

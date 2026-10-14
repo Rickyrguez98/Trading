@@ -2,6 +2,22 @@
 # Every threshold that turns evidence into SELL / TRIM / HOLD / ADD lives here.
 # Methodology: docs/us_equities/monitoring.md
 
+# Where your holdings come from (docs/us_equities/broker-integration-options.md):
+#   A  GBM statement PDF   -- monthly; set statement_pdf (or pass --holdings file.pdf)
+#   B  holdings CSV        -- recommended; `trading-monitor --init-holdings` creates it
+#   C  Interactive Brokers -- read-only Flex Web Service; set IBKR_FLEX_TOKEN and
+#                             IBKR_FLEX_QUERY_ID in your environment / .env
+# Override per run with `trading-monitor --broker A|B|C`.
+# See which options are ready right now: `trading-monitor --list-brokers`.
+broker:
+  option: B
+  holdings_csv: data/us_equities/holdings/my_holdings.csv   # under data/, never committed
+  statement_pdf: null
+  ibkr_token_env: IBKR_FLEX_TOKEN
+  ibkr_query_id_env: IBKR_FLEX_QUERY_ID
+  ibkr_poll_seconds: 5
+  ibkr_max_wait_seconds: 120
+
 run:
   output_dir: reports/us_equities/monitoring
   processed_dir: data/us_equities/processed/monitoring

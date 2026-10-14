@@ -39,13 +39,15 @@ from ..logging_config import configure_logging
 from ..monitoring.config import MonitoringConfig, MonitoringConfigError, load_config
 from ..monitoring.decision import decide_all
 from ..monitoring.forecast import apply_run_level_fdr, forecast_series, make_forecaster
-from ..monitoring.holdings import (
-    HoldingsError,
-    aggregate_lots,
-    load_holdings_csv,
-    parse_number,
-    write_holdings_csv,
+from ..monitoring.broker import (
+    BrokerConfigError,
+    infer_option,
+    init_holdings,
+    load_holdings,
+    readiness,
+    resolve_option,
 )
+from ..monitoring.holdings import HoldingsError, parse_number
 from ..monitoring.market_data import (
     FX_SYMBOL,
     MarketData,
@@ -67,6 +69,13 @@ from ..monitoring.valuation import assign_weights, compute_valuation, conversion
 
 logger = logging.getLogger(__name__)
 
+try:  # a local .env may hold FINNHUB_API_KEY / IBKR_FLEX_TOKEN; it is git-ignored
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover - python-dotenv is a core dependency
+    pass
+
 _US_UNIVERSE_CANDIDATES = (
     "data/us_equities/processed/universe_clean.csv",
     "data/processed/universe_clean.csv",
@@ -81,12 +90,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="trading-monitor",
         description=(
-            "Recommend SELL / TRIM / HOLD / ADD for the stocks you already own, from a holdings "
-            "CSV or a brokerage statement PDF. Research output only; no orders are placed."
+            "Recommend SELL / TRIM / HOLD / ADD for the stocks you already own. Holdings come from "
+            "the broker option you pick: A = GBM statement PDF, B = holdings CSV, C = Interactive "
+            "Brokers Flex (read-only). Research output only; no orders are placed."
         ),
     )
-    p.add_argument("--holdings", required=True,
-                   help="Holdings CSV (see configs/us_equities/holdings_template.csv) or a statement PDF.")
+    p.add_argument("--broker", default=None, metavar="A|B|C",
+                   help="Where holdings come from: A (statement PDF), B (holdings CSV), C (IBKR Flex). "
+                        "Default: broker.option in the config, or inferred from --holdings.")
+    p.add_argument("--holdings", default=None,
+                   help="Holdings CSV or statement PDF for this run (overrides the configured path).")
+    p.add_argument("--list-brokers", action="store_true",
+                   help="Show broker options A/B/C, which one is selected and whether each is ready; then exit.")
+    p.add_argument("--init-holdings", action="store_true",
+                   help="Create your holdings CSV (broker.holdings_csv) from the template; then exit.")
     p.add_argument("--config", default=None, help="Monitoring YAML (default configs/us_equities/monitoring.yaml).")
     p.add_argument("--target", default=None,
                    help="Target portfolio CSV from trading-portfolio (e.g. data/us_equities/processed/"
@@ -142,31 +159,6 @@ def _us_universe() -> Optional[Set[str]]:
             except Exception:  # noqa: BLE001 - a hint only
                 return None
     return None
-
-
-def load_holdings(path: str, processed_dir: Path) -> Tuple[List[Holding], Optional[Dict], str, List[str]]:
-    """Holdings from CSV or PDF.
-
-    Returns (holdings, extraction report for a PDF, source path, input problems).
-    """
-    src = Path(path)
-    if src.suffix.lower() == ".pdf":
-        from ..monitoring.pdf_statement import extract_holdings_from_pdf
-
-        lots, report = extract_holdings_from_pdf(src, us_universe=_us_universe())
-        review = write_holdings_csv(lots, processed_dir / f"extracted_{src.stem}.csv")
-        report.review_csv = str(review)
-        return aggregate_lots(lots), report.to_dict(), str(src), []
-    lots, report = load_holdings_csv(src)
-    holdings = aggregate_lots(lots)
-    for h in holdings:
-        sources = {l.source for l in h.lots}
-        for msg in report.warnings:
-            where, _, text = msg.partition(": ")
-            if where in sources:
-                h.warnings.append(text)
-    problems = [f"skipped {m}" for m in report.skipped]
-    return holdings, None, str(src), problems
 
 
 def refresh_selection(tickers: List[str], cfg: MonitoringConfig) -> Tuple[Dict[str, SelectionSignals], Optional[str]]:
@@ -366,6 +358,17 @@ def _set_status(result: MonitorResult, extraction: Optional[Dict]) -> None:
     result.status = "DEGRADED" if degraded else ("PARTIAL" if result.status_reasons else "VALID")
 
 
+def _print_brokers(cfg: MonitoringConfig, selected) -> int:
+    print("Broker options for trading-monitor (pick one: --broker A|B|C or broker.option in the config)\n")
+    for r in readiness(cfg.broker):
+        mark = "->" if r.option.code == selected.code else "  "
+        state = "ready" if r.ready else "not ready"
+        print(f"{mark} {r.option.code}  {r.option.label:<52} [{state}] {r.detail}")
+        print(f"      how: {r.option.how}")
+    print("\nDetails and trade-offs: docs/us_equities/broker-integration-options.md")
+    return 0
+
+
 def _ensure(path: str) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
@@ -394,15 +397,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.run.output_dir = args.output_dir
 
     try:
+        option = (resolve_option(args.broker) if args.broker
+                  else infer_option(args.holdings) or resolve_option(cfg.broker.option))
+    except BrokerConfigError as exc:
+        print(f"Input error: {exc}", file=sys.stderr)
+        return 2
+    if args.list_brokers:
+        return _print_brokers(cfg, option)
+    if args.init_holdings:
+        try:
+            created = init_holdings(cfg.broker)
+        except BrokerConfigError as exc:
+            print(f"Input error: {exc}", file=sys.stderr)
+            return 2
+        print(f"Created {created} from the template. Replace the example rows with your holdings "
+              "(one row per purchase), then run: trading-monitor")
+        return 0
+
+    try:
         price_pins = _parse_pairs(args.price, "--price")
         fx_pin = _parse_pairs([args.fx] if args.fx else None, "--fx")
         if fx_pin and set(fx_pin) != {"USDMXN"}:
             raise ValueError("--fx expects USDMXN=RATE")
         processed = _ensure(cfg.run.processed_dir)
-        holdings, extraction, source, problems = load_holdings(args.holdings, processed)
+        if option.code == "C" and args.offline:
+            raise ValueError("option C downloads your positions from IBKR and cannot run with --offline")
+        loaded = load_holdings(option, cfg.broker, path=args.holdings, processed_dir=processed,
+                               us_universe=_us_universe())
     except (HoldingsError, ValueError, FileNotFoundError) as exc:
         print(f"Input error: {exc}", file=sys.stderr)
         return 2
+    holdings, extraction, source, problems = loaded.holdings, loaded.extraction, loaded.source, loaded.problems
+    logger.info("holdings from broker option %s (%s): %d position(s)", option.code, option.label, len(holdings))
 
     rl = RateLimiter(0.4)
     cache = Cache(directory=cfg.run.cache_dir, enabled=True, default_ttl=cfg.run.cache_ttl_seconds)
