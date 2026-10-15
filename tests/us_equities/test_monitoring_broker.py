@@ -316,3 +316,16 @@ def test_missing_configured_holdings_file_points_to_init(tmp_path):
     cfg = BrokerConfig(holdings_csv=str(tmp_path / "nope.csv"))
     with pytest.raises(BrokerConfigError, match="--init-holdings"):
         load_holdings(OPTIONS["B"], cfg, path=None, processed_dir=tmp_path)
+
+
+def test_the_personal_holdings_file_is_really_git_ignored():
+    """Checking the path starts with data/ was not enough: holdings/ was not ignored."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None or not Path(".git").exists():
+        pytest.skip("needs a git checkout")
+    cfg = load_config("configs/us_equities/monitoring.yaml")
+    for path in (cfg.broker.holdings_csv, "data/us_equities/holdings/my_holdings.backup-20261015.csv"):
+        res = subprocess.run(["git", "check-ignore", "-q", path], capture_output=True)
+        assert res.returncode == 0, f"{path} is not git-ignored"
