@@ -43,6 +43,8 @@ try:
 except Exception:  # noqa: BLE001 - .env is optional
     pass
 
+from trading_common.throttle import ProviderPaused, throttle_summary
+
 from ..config import AppConfig, load_config
 from ..criticality import resolve_static_critical_set
 from ..data_providers import (
@@ -763,7 +765,12 @@ def _stage4_sentiment(
         try:
             articles = news_provider.fetch(ticker, max_age_days=scfg.max_age_days)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Stage 4 news fetch raised for %s: %s", ticker, exc)
+            if isinstance(exc, ProviderPaused):
+                # The throttle already logged the pause once; one line per
+                # skipped ticker would only bury it.
+                logger.debug("Stage 4 news skipped for %s: %s", ticker, exc)
+            else:
+                logger.warning("Stage 4 news fetch raised for %s: %s", ticker, exc)
             articles = []
             stats.record_failure(
                 ticker, None, "error", f"{type(exc).__name__}: {exc}",
@@ -1227,6 +1234,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("Markdown     : %s", md_path)
     logger.info("JSON summary : %s", json_path)
     logger.info("Total runtime: %.1fs", total_runtime)
+    for name, t in throttle_summary().items():
+        if t["pauses_taken"] or t["skipped_calls"] or t["paused"]:
+            logger.info("Rate limiting: %s paused %d time(s), skipped %d call(s)%s",
+                        name, t["pauses_taken"], t["skipped_calls"],
+                        " and is still paused" if t["paused"] else "")
     logger.info(
         "Run status   : %s (ranking_validity=%s).%s",
         status["run_status"], status["ranking_validity"],

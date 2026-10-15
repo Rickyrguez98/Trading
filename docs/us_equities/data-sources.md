@@ -157,6 +157,32 @@ robustness:
 
 ## Rate limits & terms of service
 
+### How "429 Too Many Requests" is handled
+
+Every provider call goes through a shared throttle
+(`src/trading_common/throttle.py`), one per provider name:
+
+| Provider | Spacing between calls | On a 429 | After repeated 429s |
+|---|---|---|---|
+| Yahoo prices + fundamentals (`yfinance`, shared) | 0.4 s | pause 30 s, 60 s, 120 s, 240 s, 300 s, then continue | paused 10 min, then one probe |
+| Yahoo news feed (`yahoo_rss`) | 2 s | pause 5 s | after 2 in a row: paused 10 min, its calls skipped |
+| Finnhub | 1.1 s (free plan: 60/min) | pause 15–60 s | after 4 in a row: paused 5 min |
+
+A `Retry-After` header is always honoured when the server sends one. Pauses
+are shared, so the health check and every pipeline stage wait out the same
+pause instead of each retrying on its own. The quick automatic retries
+(transient network faults) no longer retry a 429 at all.
+
+Measured on 2026-10-15: the Yahoo news feed answers 429 to every request from
+this network, with no `Retry-After`, and has done so for days -- a block, not
+a rate limit, so no amount of waiting gets past it. With the throttle it costs
+one 5-second pause and two warning lines per run, instead of ~7 seconds of
+retries for each of 150 tickers (16 minutes) and 150 warnings. Yahoo prices and
+fundamentals had **zero** rate-limit failures across all 4,757 stocks in the
+same run at 0.4 s spacing; the longer pauses are there so a temporary throttle
+ends in a completed run rather than in failed tickers.
+
+
 We are **guests** on every one of these services. The pipeline:
 
 - caches every external response on disk;

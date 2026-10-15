@@ -10,7 +10,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from trading_common.throttle import get_throttle, is_rate_limited
 
 from dataclasses import fields as _dc_fields
 
@@ -20,6 +22,11 @@ from .base import Fundamentals, FundamentalsProvider
 from .symbols import likely_no_data_reason, to_provider_symbol, was_remapped
 
 logger = logging.getLogger(__name__)
+
+
+def _not_rate_limited(exc: BaseException) -> bool:
+    """Quick retries are for transient faults; rate limits go to the throttle."""
+    return not is_rate_limited(exc)
 
 _FUND_FIELDS = {f.name for f in _dc_fields(Fundamentals)}
 
@@ -85,7 +92,8 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
     def cache_identifier(self, ticker: str) -> str:
         return to_provider_symbol(ticker.strip().upper(), self.name)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
     def _fetch_info(self, provider_symbol: str) -> Dict[str, Any]:
         import yfinance as yf
 
@@ -116,7 +124,7 @@ class YFinanceFundamentalsProvider(FundamentalsProvider):
         )
 
         try:
-            info = self._fetch_info(provider_symbol)
+            info = get_throttle("yfinance").call(self._fetch_info, provider_symbol)
         except Exception as exc:  # noqa: BLE001 - report-and-continue semantics
             logger.warning(
                 "yfinance info fetch errored for %s (as %s): %s",

@@ -21,7 +21,9 @@ from dataclasses import fields as _dc_fields
 from typing import Any, Dict
 
 import pandas as pd
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from trading_common.throttle import get_throttle, is_rate_limited
 
 from . import errors as err
 from .base import PriceSnapshot, PricesProvider
@@ -34,6 +36,11 @@ from .symbols import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _not_rate_limited(exc: BaseException) -> bool:
+    """Quick retries are for transient faults; rate limits go to the throttle."""
+    return not is_rate_limited(exc)
 
 _STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 _PRICE_FIELDS = {f.name for f in _dc_fields(PriceSnapshot)}
@@ -49,7 +56,8 @@ class StooqPricesProvider(PricesProvider):
     def cache_identifier(self, ticker: str, lookback_days: int = 90) -> str:
         return f"{_stooq_symbol(ticker)}:{lookback_days}"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
     def _download_csv(self, stooq_symbol: str) -> pd.DataFrame:
         # Imported lazily so the dependency is only needed when Stooq is used.
         import urllib.request
@@ -96,7 +104,8 @@ class StooqPricesProvider(PricesProvider):
         # to the ladder's ``(symbol, lookback_days)`` signature with a wrapper.
         hist, used_symbol, transport_exc = _run_symbol_ladder(
             ticker, variants, self.name,
-            lambda sym, _days: self._download_csv(sym), lookback_days, snap,
+            lambda sym, _days: get_throttle("stooq").call(self._download_csv, sym),
+            lookback_days, snap,
         )
         snap.provider_symbol = used_symbol
 

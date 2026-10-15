@@ -9,6 +9,23 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Fixed — rate limiting ("429 Too Many Requests")
+- A 429 used to be retried three times within about three seconds and then
+  given up on, ticker after ticker. On 2026-10-15 the Yahoo news feed answered
+  429 to all 150 shortlisted tickers: ~16 minutes of retries and 150 warnings
+  for no data. Every provider call now goes through a shared throttle
+  (`trading_common.throttle`): requests are spaced (yfinance 0.4 s, Yahoo news
+  2 s, Finnhub 1.1 s); a 429 pauses that provider -- for as long as
+  `Retry-After` asks, otherwise with escalating pauses -- and then continues;
+  repeated 429s pause the provider for a cooldown so its calls are skipped
+  instead of hammering it, followed by a single probe.
+- Measured live: a 12-ticker run that hits the blocked news feed takes one
+  5-second pause and logs two warnings; prices and fundamentals stay 12/12.
+- Stage 4 logs a skipped ticker at debug level while its provider is paused,
+  and every run ends with a rate-limiting summary line.
+- Quick automatic retries (tenacity) now skip rate-limit errors, which only the
+  throttle handles, so a 429 is no longer answered with an immediate retry.
+
 ### Fixed
 - **`--instrument-price` silently discarded all but the last value.** The flag
   used `nargs="+"` without `action="extend"`, so argparse *overwrote* on repeat:

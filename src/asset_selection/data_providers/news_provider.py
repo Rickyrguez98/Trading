@@ -32,12 +32,19 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from trading_common.throttle import get_throttle, is_rate_limited, parse_retry_after
 
 from .base import NewsItem, NewsProvider
 from .symbols import to_provider_symbol
 
 logger = logging.getLogger(__name__)
+
+
+def _not_rate_limited(exc: BaseException) -> bool:
+    """Quick retries are for transient faults; rate limits go to the throttle."""
+    return not is_rate_limited(exc)
 
 
 class NewsProviderNotConfigured(RuntimeError):
@@ -52,7 +59,8 @@ class NewsProviderNotConfigured(RuntimeError):
 class YFinanceNewsProvider(NewsProvider):
     name = "yfinance"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
     def _download(self, provider_symbol: str) -> List[Dict[str, Any]]:
         import yfinance as yf
 
@@ -76,7 +84,7 @@ class YFinanceNewsProvider(NewsProvider):
         # caller (stage 4) catches and classifies the exception via
         # errors.classify_exception so a systemic news outage is visible rather
         # than masquerading as "no news".
-        raw = self._download(provider_symbol)
+        raw = get_throttle("yfinance").call(self._download, provider_symbol)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         items: List[NewsItem] = []
@@ -198,7 +206,8 @@ class YahooRssNewsProvider(NewsProvider):
     }
     _TIMEOUT = 20
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
     def _download(self, provider_symbol: str) -> List[Dict[str, Any]]:
         import xml.etree.ElementTree as ET
 
@@ -211,7 +220,7 @@ class YahooRssNewsProvider(NewsProvider):
             timeout=self._TIMEOUT,
         )
         # 404/429/5xx must surface as provider failures, not as "no news".
-        resp.raise_for_status()
+        _raise_for_status(resp)
         root = ET.fromstring(resp.content)
 
         out: List[Dict[str, Any]] = []
@@ -237,7 +246,7 @@ class YahooRssNewsProvider(NewsProvider):
         if cached is not None:
             return [NewsItem(**row) for row in cached]
 
-        raw = self._download(provider_symbol)
+        raw = get_throttle(self.name).call(self._download, provider_symbol)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         now_iso = self._now_iso()
@@ -333,7 +342,8 @@ class FinnhubNewsProvider(NewsProvider):
             )
         return key
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
     def _download(self, provider_symbol: str, max_age_days: int) -> List[Dict[str, Any]]:
         import requests
 
@@ -352,7 +362,7 @@ class FinnhubNewsProvider(NewsProvider):
             timeout=self._TIMEOUT,
         )
         # 401/403/429/5xx must surface as provider failures, not as "no news".
-        resp.raise_for_status()
+        _raise_for_status(resp)
         payload = resp.json()
         if isinstance(payload, dict):
             # The API reports auth/plan problems as a JSON object with "error".
@@ -373,7 +383,7 @@ class FinnhubNewsProvider(NewsProvider):
         if cached is not None:
             return [NewsItem(**row) for row in cached]
 
-        raw = self._download(provider_symbol, max_age_days)
+        raw = get_throttle(self.name).call(self._download, provider_symbol, max_age_days)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         now_iso = self._now_iso()
@@ -402,3 +412,21 @@ class FinnhubNewsProvider(NewsProvider):
             )
         self._cache_set(cache_id, [it.__dict__ for it in items])
         return items
+
+
+
+def _raise_for_status(resp: Any) -> None:
+    """Like ``raise_for_status``, but a 429 carries the server's ``Retry-After``.
+
+    The URL is deliberately left out of the 429 message: for Finnhub it would
+    be harmless (the key travels in a header), but no provider's URL needs to
+    be in a log line to explain a rate limit.
+    """
+    if getattr(resp, "status_code", 200) == 429:
+        import requests
+
+        headers = getattr(resp, "headers", None) or {}
+        exc = requests.HTTPError("429 Client Error: Too Many Requests", response=resp)
+        exc.retry_after = parse_retry_after(headers.get("Retry-After"))  # type: ignore[attr-defined]
+        raise exc
+    resp.raise_for_status()

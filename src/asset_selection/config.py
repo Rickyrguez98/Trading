@@ -427,7 +427,11 @@ class AppConfig:
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
-    rate_limits: Dict[str, float] = field(default_factory=lambda: {"yfinance": 0.4})
+    # Minimum seconds between calls per provider. Finnhub's free plan allows
+    # 60 calls a minute; the Yahoo news feed rate-limits aggressively.
+    rate_limits: Dict[str, float] = field(
+        default_factory=lambda: {"yfinance": 0.4, "yahoo_rss": 2.0, "finnhub": 1.1}
+    )
     prices: PricesConfig = field(default_factory=PricesConfig)
     sentiment: SentimentConfig = field(default_factory=SentimentConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
@@ -502,7 +506,8 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
         providers=ProvidersConfig(**_filtered(ProvidersConfig, section("providers"))),
         robustness=RobustnessConfig(**_filtered(RobustnessConfig, section("robustness"))),
         cache=CacheConfig(**_filtered(CacheConfig, section("cache"))),
-        rate_limits=dict(section("rate_limits") or {"yfinance": 0.4}),
+        rate_limits={**{"yfinance": 0.4, "yahoo_rss": 2.0, "finnhub": 1.1},
+                     **dict(section("rate_limits") or {})},
         prices=PricesConfig(**_filtered(PricesConfig, section("prices"))),
         sentiment=SentimentConfig(**_filtered(SentimentConfig, section("sentiment"))),
         scoring=ScoringConfig(**_filtered(ScoringConfig, section("scoring"))),
