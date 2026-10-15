@@ -134,6 +134,22 @@ this counter; releases before 0.0.12 were never tracked in this file.
   from both sides: no false skill on pure random walks, and real skill
   detected for an oracle that sees the future.
 
+### Added — Trading app (first structure)
+- `trading-app` (`trading_app`): a local web app over the whole US-equities
+  workflow — dashboard, selection (full or sample), allocation, broker option
+  picker with holdings-file creator and uploader, monitor results with evidence
+  and outlook — plus a JSON API documented at `/api/docs`.
+- Layers: `trading_app.services` is plain Python (no web framework) and runs the
+  same pipeline commands the CLIs document, as background jobs with logs and
+  exit codes on disk; `trading_app.web` is FastAPI with server-rendered pages.
+  A sample selection run stays in its job folder and can never replace the
+  full-universe ranking.
+- Local-only by design: loopback binding, a localhost Host-header check (DNS
+  rebinding), refusal of cross-origin writes, validated argument lists instead
+  of shell strings, checked uploads, escaped output, no credentials accepted.
+- New optional extra `app` (FastAPI, uvicorn, Jinja2, python-multipart), with
+  version markers: current releases of those need Python >= 3.10.
+
 ## [0.0.15] — 2026-10-10 — Portfolio allocation (US Equities Milestone 2)
 
 ### Added

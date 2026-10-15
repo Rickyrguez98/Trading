@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Trading app{% endblock %} · Trading</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="/">Trading</a>
+    <nav>
+      <a href="/" class="{{ 'on' if active == 'dashboard' }}">Dashboard</a>
+      <a href="/selection" class="{{ 'on' if active == 'selection' }}">1 · Select</a>
+      <a href="/allocation" class="{{ 'on' if active == 'allocation' }}">2 · Allocate</a>
+      <a href="/broker" class="{{ 'on' if active == 'broker' }}">3 · Broker</a>
+      <a href="/monitor" class="{{ 'on' if active == 'monitor' }}">4 · Monitor</a>
+      <a href="/api/docs">API</a>
+    </nav>
+  </div>
+</header>
+<main>
+  {% if msg %}<div class="note ok">{{ msg }}</div>{% endif %}
+  {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer>Research output only — not financial advice. This app never places orders; buying and selling stay manual.</footer>
+</body>
+</html>

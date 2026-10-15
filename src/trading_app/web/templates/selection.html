@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Select{% endblock %}
+{% block content %}
+<h1>Step 1 · Stock selection</h1>
+<p class="sub">Ranks the US common-stock universe on fundamentals, valuation, growth, quality, liquidity and news sentiment.</p>
+
+{% if ranking.exists %}
+  <div class="note {{ 'warn' if ranking.stale else 'ok' }}">
+    Current ranking: {{ ranking.rows }} stocks from {{ (ranking.generated_at or '')[:10] }} ({{ ranking.age_days }} days old)
+    {% if ranking.run_status %}· run status <strong>{{ ranking.run_status }}</strong>{% endif %}
+    {% if ranking.stale %}— older than 30 days; the monitor's thesis check needs a fresh one.{% endif %}
+  </div>
+{% else %}
+  <div class="note warn">No full-universe ranking yet. Every later step reads it, so run the full selection first.</div>
+{% endif %}
+
+{% if running %}
+  <div class="note">A selection run is in progress: <a href="/jobs/{{ running.id }}">{{ running.title }}</a></div>
+{% else %}
+<div class="grid">
+  <div class="card">
+    <h3>Full universe</h3>
+    <p>About 4,800 stocks. Takes a long time (most of it pricing every stock at Yahoo's rate limit). Replaces the ranking every step reads.</p>
+    <form method="post" action="/selection/run"><input type="hidden" name="mode" value="full">
+      <button class="btn">Run full selection</button></form>
+  </div>
+  <div class="card">
+    <h3>Quick sample</h3>
+    <p>A small test run. Its results stay in the job folder and never replace the full ranking (scores are relative to the set scored together).</p>
+    <form method="post" action="/selection/run" class="inline"><input type="hidden" name="mode" value="sample">
+      <label>Tickers <input type="number" name="limit" value="50" min="5" max="500"></label>
+      <button class="btn ghost">Run sample</button></form>
+  </div>
+</div>
+{% endif %}
+
+<h2>Top 25</h2>
+{% if rows %}
+<div class="table-wrap"><table>
+  <tr><th class="num">#</th><th>Ticker</th><th>Company</th><th>Sector</th><th class="num">Score</th>
+      <th class="num">Fundamentals</th><th class="num">Sentiment</th><th>Role</th><th>Eligible</th></tr>
+  {% for r in rows %}
+  <tr><td class="num">{{ r.rank }}</td><td><strong>{{ r.ticker }}</strong></td><td>{{ (r.company_name or '')[:34] }}</td>
+      <td>{{ r.sector or '—' }}</td><td class="num">{{ r.final_score|num }}</td><td class="num">{{ r.fundamentals_score|num }}</td>
+      <td class="num">{{ r.effective_sentiment_score|num }}</td><td>{{ (r.candidate_role or '—')|replace('_', ' ') }}</td>
+      <td>{{ 'yes' if r.eligible_for_allocation in (True, 'True', 'true') else 'no' }}</td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="sub">Nothing to show yet.</p>{% endif %}
+{% endblock %}

@@ -1,4 +1,4 @@
-.PHONY: install dev test lint typecheck quality us-equities portfolio monitor \
+.PHONY: install dev test lint typecheck quality us-equities portfolio monitor app \
         binary-options binary-options-health binary-options-validate-catalog clean
 
 install:
@@ -20,7 +20,7 @@ typecheck:
 
 # Offline quality gate (mirrors .github/workflows/quality.yml)
 quality: lint test
-	python -c "import asset_selection, binary_options_selection, trading_common; print('imports OK')"
+	python -c "import asset_selection, binary_options_selection, trading_common, trading_app.services; print('imports OK')"
 
 us-equities:
 	python -m asset_selection.pipelines.run_asset_selection \
@@ -35,6 +35,10 @@ HOLDINGS ?= configs/us_equities/holdings_template.csv
 monitor:
 	python -m asset_selection.pipelines.run_portfolio_monitor \
 	    --config configs/us_equities/monitoring.yaml --holdings $(HOLDINGS)
+
+# Local web app (needs: pip install -e ".[app]", Python >= 3.10)
+app:
+	python -m trading_app.cli
 
 binary-options:
 	python -m binary_options_selection.pipelines.run_binary_options_selection \

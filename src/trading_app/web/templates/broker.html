@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Broker{% endblock %}
+{% block content %}
+<h1>Step 3 · Broker option</h1>
+<p class="sub">Buying stays manual. Choose how the monitor reads what you hold.</p>
+
+<form method="post" action="/broker/option">
+<div class="grid">
+  {% for o in broker.options %}
+  <label class="card" style="cursor:pointer">
+    <span class="step"><input type="radio" name="option" value="{{ o.code }}" {{ 'checked' if o.selected }}> Option {{ o.code }}</span>
+    <span class="big" style="color:var(--ink)">{{ o.label }}</span>
+    <span><span class="badge {{ 'ok' if o.ready else 'warn' }}">{{ 'ready' if o.ready else 'not ready' }}</span> {{ o.detail }}</span>
+    <span>{{ o.how }}</span>
+  </label>
+  {% endfor %}
+</div>
+<p><button class="btn">Use the selected option</button></p>
+</form>
+
+{% if broker.selected == 'B' %}
+<h2>Your holdings file (option B)</h2>
+<p class="sub"><code>{{ broker.holdings_csv }}</code> — under <code>data/</code>, never committed. One row per purchase.</p>
+{% if holdings %}
+<div class="table-wrap"><table>
+  <tr>{% for k in holdings[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+  {% for row in holdings %}<tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}
+</table></div>
+<p class="sub">Edit the file in any spreadsheet or text editor, or replace it with an upload (the old file is backed up).</p>
+{% else %}
+<form method="post" action="/broker/init"><button class="btn">Create my holdings file from the template</button></form>
+{% endif %}
+<div class="card" style="margin-top:12px">
+  <form method="post" action="/broker/upload" enctype="multipart/form-data" class="inline">
+    <label>Replace holdings with a CSV <input type="file" name="file" accept=".csv" required></label>
+    <button class="btn ghost">Upload</button>
+  </form>
+</div>
+{% elif broker.selected == 'A' %}
+<h2>Option A</h2>
+<p>Download the month's statement (estado de cuenta) from the GBM app and upload it on the <a href="/monitor">Monitor</a> page. The extraction is saved as a CSV for you to audit.</p>
+{% else %}
+<h2>Option C</h2>
+<p>In IBKR Client Portal open <strong>Performance &amp; Reports → Flex Queries</strong>: the gear next to <em>Flex Web Service Configuration</em> generates a token; create an <em>Activity Flex Query</em> with <em>Open Positions</em> at <em>Lot</em> level (date format <code>yyyyMMdd</code>) and note its ID.
+Put them in <code>.env</code> as <code>{{ broker.ibkr_env[0] }}</code> and <code>{{ broker.ibkr_env[1] }}</code>, then restart the app. The app never asks for or stores the token; it is read-only either way.</p>
+{% endif %}
+{% endblock %}

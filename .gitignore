@@ -16,6 +16,7 @@ pip-wheel-metadata/
 # Virtual environments
 .env
 .venv/
+.venv*/
 venv/
 env/
 ENV/
@@ -46,6 +47,8 @@ data/*/processed/*
 data/*/cache/*
 # Personal holdings (trading-monitor --init-holdings): never commit
 data/*/holdings/*
+# The app's local state: settings, uploaded statements, job logs
+data/app/
 !data/*/input/.gitkeep
 !data/*/raw/.gitkeep
 !data/*/processed/.gitkeep

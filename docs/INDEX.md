@@ -7,6 +7,9 @@
 - [Architecture audit](shared/architecture-audit.md) — the pre-restructure baseline and migration plan.
 - [Git authorship](shared/git-authorship.md) — repository identity policy and history notes.
 
+## Trading app (`trading_app`)
+- [App guide](app.md) — install (Python ≥ 3.10), pages, JSON API, architecture (services → jobs → web), security model, roadmap.
+
 ## US Equities (`asset_selection`)
 - [Module manual](us_equities/README.md) — full usage guide (modes, flags, outputs, interpretation).
 - [Architecture](us_equities/architecture.md)

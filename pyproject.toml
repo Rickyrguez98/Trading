@@ -56,6 +56,15 @@ forecast = [
     # chronos-forecasting requires Python >= 3.10 and pulls in torch.
     "chronos-forecasting>=2.0; python_version >= '3.10'",
 ]
+app = [
+    # Optional: the local web app (trading-app). Current FastAPI, uvicorn and
+    # python-multipart require Python >= 3.10.
+    "fastapi>=0.110; python_version >= '3.10'",
+    "uvicorn>=0.29; python_version >= '3.10'",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9; python_version >= '3.10'",
+    "httpx>=0.27; python_version >= '3.10'",
+]
 
 [project.scripts]
 # Canonical domain commands
@@ -63,12 +72,16 @@ trading-us-equities = "asset_selection.pipelines.run_asset_selection:main"
 trading-binary-options = "binary_options_selection.pipelines.run_binary_options_selection:main"
 trading-portfolio = "asset_selection.pipelines.run_portfolio_allocation:main"
 trading-monitor = "asset_selection.pipelines.run_portfolio_monitor:main"
+trading-app = "trading_app.cli:main"
 # Legacy aliases (kept for backward compatibility)
 asset-selection = "asset_selection.pipelines.run_asset_selection:main"
 binary-options-selection = "binary_options_selection.pipelines.run_binary_options_selection:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+trading_app = ["web/templates/*.html", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

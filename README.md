@@ -17,6 +17,7 @@ required for the base pipelines.
 | **US Equities — Asset Selection** | `trading-us-equities` | Which U.S. common stocks look attractive over longer horizons on fundamentals, valuation, growth, quality, liquidity and bounded news sentiment? | [docs/us_equities/](docs/us_equities/README.md) |
 | **US Equities — Portfolio Allocation** | `trading-portfolio` | Given that ranking and an amount of money, how much goes where — S&P 500 index core, quality names, growth satellites, a capped speculative sleeve — in three risk strategies? | [allocation.md](docs/us_equities/allocation.md) |
 | **US Equities — Portfolio Monitor** | `trading-monitor` | For what you **already own**: sell, trim, hold or add — with the evidence, the money involved, and a forecast whose accuracy is measured, not assumed? | [monitoring.md](docs/us_equities/monitoring.md) |
+| **Trading app** | `trading-app` | The four US-equities steps in one local web interface (dashboard, forms, background jobs, JSON API). Python ≥ 3.10. | [docs/app.md](docs/app.md) |
 | **Binary Options — Signal Research** | `trading-binary-options` | For a **verified platform contract** and a 5–120 minute expiration, does intraday evidence favor `CALL`, `PUT` or `NO_TRADE`? | [docs/binary_options/](docs/binary_options/README.md) |
 
 The two products are independent: **US Equities scores do not predict
@@ -196,6 +197,22 @@ How it decides (all thresholds in `configs/us_equities/monitoring.yaml`):
   today the outlooks describe **risk**, not direction. Details:
   [monitoring.md](docs/us_equities/monitoring.md).
 
+## The app (optional): the whole workflow in your browser
+
+```bash
+python3.11 -m venv .venv311 && source .venv311/bin/activate   # the app needs Python >= 3.10
+pip install -e ".[dev,pdf,app]"
+trading-app                                                    # opens http://127.0.0.1:8765
+```
+
+A local web app over the same commands: a dashboard of all four steps, buttons
+to run the full or a sample selection, an allocation form with every plan in
+percent and money, the broker option picker (with a holdings-file creator and
+uploader), and the monitor with its evidence and outlook — plus a JSON API at
+`/api/docs`. Long runs are background jobs with a live log. It only listens on
+your own machine, refuses requests from other websites, and never places
+orders. Guide and architecture: [docs/app.md](docs/app.md).
+
 ## Monthly routine
 
 ```bash
@@ -230,6 +247,7 @@ Manual: [docs/binary_options/README.md](docs/binary_options/README.md).
 ```
 src/
 ├── trading_common/             # generic infra: cache, rate limiting, IO, error taxonomy
+├── trading_app/                # local web app: services (no framework) -> FastAPI -> pages
 ├── asset_selection/            # US Equities
 │   ├── data_providers/         #   prices, fundamentals, news (finnhub, yahoo_rss, ...)
 │   ├── fundamentals/ scoring/ sentiment/ validation/ health/
