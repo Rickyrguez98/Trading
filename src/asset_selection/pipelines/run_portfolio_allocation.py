@@ -294,9 +294,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Build plans even when the selection run was not trustworthy.")
     p.add_argument("--offline", action="store_true",
                    help="Skip network price lookups; only --instrument-price values are used.")
-    p.add_argument("--instrument-price", nargs="+", default=None, metavar="TICKER=PRICE",
-                   help="Supply instrument prices yourself, e.g. --instrument-price "
-                        "VOO=68.10 BND=73.40. Wins over the price provider.")
+    # action="extend" so that REPEATING the flag accumulates. With a bare
+    # nargs="+" argparse overwrites, so `--instrument-price VOO=1 \
+    # --instrument-price BND=2` silently kept only BND and the index-core
+    # sleeve was left with no price and no share count.
+    p.add_argument("--instrument-price", nargs="+", action="extend", default=None,
+                   metavar="TICKER=PRICE",
+                   help="Supply instrument prices yourself. Repeatable, and accepts "
+                        "several per flag: --instrument-price VOO=68.10 BND=73.40. "
+                        "Wins over the price provider.")
     p.add_argument("--output-dir", default=None, help="Override the report directory.")
     p.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING / ERROR.")
     return p

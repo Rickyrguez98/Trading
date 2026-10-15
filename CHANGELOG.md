@@ -10,6 +10,16 @@ this counter; releases before 0.0.12 were never tracked in this file.
 ## [Unreleased]
 
 ### Fixed
+- **`--instrument-price` silently discarded all but the last value.** The flag
+  used `nargs="+"` without `action="extend"`, so argparse *overwrote* on repeat:
+  `--instrument-price VOO=715.59 --instrument-price BND=70.22` kept only BND.
+  The index core — the largest sleeve in every strategy — was then left with no
+  price and no share count, and the plan quietly parked that money in cash. On
+  a balanced $25,000 plan it left $8,587 (34% of the portfolio) uninvested
+  while reporting `PRICE_UNAVAILABLE_NO_SHARE_COUNT`, which reads like a
+  provider fault rather than a dropped argument. The existing test covered the
+  string-to-dict helper but never the argparse wiring, which is why it slipped
+  through; the new test covers both spellings and the mixed form.
 - **A pandas NaN reaching the JSON report.** Optional text fields were
   serialized with `row.get(x) or None`, and NaN is truthy in Python, so on
   pandas >= 2.0 (which coerces a missing object value to NaN) a bare `NaN`
@@ -53,7 +63,7 @@ this counter; releases before 0.0.12 were never tracked in this file.
   crawlers explicitly. Reachability is not permission.
 
 ### Testing
-- Suite at **407 offline deterministic tests** (18 new), verified on
+- Suite at **408 offline deterministic tests** (19 new), verified on
   Python 3.9 / pandas 1.5.3 **and** Python 3.11 / pandas 3.0.6: Finnhub parsing, the
   header-not-URL key contract, missing/blank key behaviour with no network
   call, HTTP 401/403/429/5xx and error-payload handling, honest empty results,
