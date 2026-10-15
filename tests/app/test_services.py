@@ -264,3 +264,16 @@ def test_monitor_option_a_needs_a_pdf(wf):
 def test_set_broker_option(wf):
     assert wf.set_broker_option("c").broker_option == "C"
     assert wf.settings.broker_option == "C"
+
+
+def test_app_state_and_uploaded_statements_are_really_git_ignored():
+    """Uploads are bank statements and settings are personal: git must ignore them."""
+    import subprocess
+
+    if shutil.which("git") is None or not (REPO / ".git").exists():
+        pytest.skip("needs a git checkout")
+    for path in ("data/app/settings.json", "data/app/uploads/upload-20261015-000000.pdf",
+                 "data/app/jobs/20261015-000000-abcdef/log.txt",
+                 "data/us_equities/holdings/my_holdings.csv"):
+        res = subprocess.run(["git", "check-ignore", "-q", path], cwd=REPO, capture_output=True)
+        assert res.returncode == 0, f"{path} is not git-ignored"
