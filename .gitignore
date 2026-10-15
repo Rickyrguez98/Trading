@@ -44,10 +44,13 @@ data/*/input/*
 data/*/raw/*
 data/*/processed/*
 data/*/cache/*
+# Personal holdings (trading-monitor --init-holdings): never commit
+data/*/holdings/*
 !data/*/input/.gitkeep
 !data/*/raw/.gitkeep
 !data/*/processed/.gitkeep
 !data/*/cache/.gitkeep
+!data/*/holdings/.gitkeep
 # legacy flat layout (still ignored if present locally)
 data/raw/*
 data/processed/*

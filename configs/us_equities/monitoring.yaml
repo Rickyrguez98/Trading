@@ -1,0 +1,80 @@
+# Portfolio monitor (trading-monitor) — US Equities Milestone 3.
+# Every threshold that turns evidence into SELL / TRIM / HOLD / ADD lives here.
+# Methodology: docs/us_equities/monitoring.md
+
+# Where your holdings come from (docs/us_equities/broker-integration-options.md):
+#   A  GBM statement PDF   -- monthly; set statement_pdf (or pass --holdings file.pdf)
+#   B  holdings CSV        -- recommended; `trading-monitor --init-holdings` creates it
+#   C  Interactive Brokers -- read-only Flex Web Service; set IBKR_FLEX_TOKEN and
+#                             IBKR_FLEX_QUERY_ID in your environment / .env
+# Override per run with `trading-monitor --broker A|B|C`.
+# See which options are ready right now: `trading-monitor --list-brokers`.
+broker:
+  option: B
+  holdings_csv: data/us_equities/holdings/my_holdings.csv   # under data/, never committed
+  statement_pdf: null
+  ibkr_token_env: IBKR_FLEX_TOKEN
+  ibkr_query_id_env: IBKR_FLEX_QUERY_ID
+  ibkr_poll_seconds: 5
+  ibkr_max_wait_seconds: 120
+
+run:
+  output_dir: reports/us_equities/monitoring
+  processed_dir: data/us_equities/processed/monitoring
+  # MXN is what a GBM client experiences: SIC positions move with USDMXN too.
+  reporting_currency: MXN
+  history_years: 5
+  # The "is the thesis still intact?" check reads the latest full ranking.
+  # Use --refresh-signals to score your holdings directly instead.
+  selection_results_csv: data/us_equities/processed/asset_selection_results.csv
+  selection_summary_json: reports/us_equities/asset_selection_summary.json
+  max_price_age_days: 5
+
+trend:
+  sma_short: 50
+  sma_long: 200
+  volatility_window: 63
+  volatility_regime_lookback: 252
+  volatility_regime_alert: 1.5     # current vol / its 1-year median
+
+events:
+  earnings_blackout_days: 7        # no ADD this close to an earnings report
+  surprise_history: 4
+
+forecast:
+  # bootstrap: fast, no dependencies, NO directional view (volatility only).
+  # chronos:   Amazon Chronos-2 deep-learning model, zero-shot.
+  #            pip install '.[forecast]'  (Python >= 3.10)
+  backend: bootstrap
+  chronos_model: amazon/chronos-2
+  horizons: [21, 63, 126]          # trading days: ~1, 3 and 6 months
+  context_days: 512
+  gain_targets_pct: [5, 10, 20]
+  n_paths: 2000
+  block_length: 10
+  bootstrap_window_days: 756
+  bootstrap_drift: zero            # 'zero' or an annual drift, e.g. 0.06
+  seed: 7
+  # Walk-forward test against a random walk. A forecast influences a decision
+  # only where this test finds a statistically significant edge.
+  validate: true
+  validation_origins: 24
+  validation_step: 21
+  validation_alpha: 0.05
+  min_history_days: 300
+
+decision:
+  commission_pct: 0.002
+  allow_fractional_shares: false
+  min_trade_value: 500             # reporting currency
+  rebalance_band: 0.25             # trim above target x 1.25, room to add below target
+  max_weight_per_name: 0.15        # cap used when no --target portfolio is given
+  fundamentals_weak: 50
+  fundamentals_broken: 40
+  sentiment_positive: 60
+  sentiment_negative: 40
+  min_sentiment_confidence: 0.3
+  add_threshold: 1.5
+  trim_fraction_on_weakness: 0.5
+  drawdown_review_pct: 25
+  reinvest_proceeds: true

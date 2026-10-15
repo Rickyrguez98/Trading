@@ -1,9 +1,9 @@
-.PHONY: install dev test lint typecheck quality us-equities portfolio \
+.PHONY: install dev test lint typecheck quality us-equities portfolio monitor \
         binary-options binary-options-health binary-options-validate-catalog clean
 
 install:
 	pip install --upgrade pip
-	pip install -e ".[dev]"
+	pip install -e ".[dev,pdf]"
 
 dev: install
 
@@ -29,6 +29,12 @@ us-equities:
 portfolio:
 	python -m asset_selection.pipelines.run_portfolio_allocation \
 	    --config configs/us_equities/portfolio.yaml --amount 10000
+
+# HOLDINGS=path/to/holdings.csv (or a statement .pdf); see configs/us_equities/holdings_template.csv
+HOLDINGS ?= configs/us_equities/holdings_template.csv
+monitor:
+	python -m asset_selection.pipelines.run_portfolio_monitor \
+	    --config configs/us_equities/monitoring.yaml --holdings $(HOLDINGS)
 
 binary-options:
 	python -m binary_options_selection.pipelines.run_binary_options_selection \
