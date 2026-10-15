@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import List, Optional
 
 from asset_selection.monitoring.config import load_config as load_monitoring_config
 
@@ -20,6 +20,7 @@ class AppSettings:
     broker_option: str = "B"
     holdings_csv: str = "data/us_equities/holdings/my_holdings.csv"
     statement_pdf: Optional[str] = None
+    watchlist: Optional[List[str]] = None    # dashboard charts; None = holdings + top of the ranking
 
 
 def load_settings(paths: Paths) -> AppSettings:
@@ -44,6 +45,10 @@ def load_settings(paths: Paths) -> AppSettings:
 def save_settings(paths: Paths, settings: AppSettings) -> None:
     if settings.broker_option not in ("A", "B", "C"):
         raise ValueError("broker option must be A, B or C")
+    if settings.watchlist is not None:
+        from .market import normalize_symbol
+
+        settings.watchlist = list(dict.fromkeys(normalize_symbol(x) for x in settings.watchlist))
     paths.app_dir.mkdir(parents=True, exist_ok=True)
     tmp = paths.settings_json.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")

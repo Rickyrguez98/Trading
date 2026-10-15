@@ -3,15 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Trading app{% endblock %} · Trading</title>
+  <title>{% block title %}Dashboard{% endblock %} · Finance Bull</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+  <link rel="apple-touch-icon" href="/static/brand/favicon-180.png">
+  <script>try { var t = localStorage.getItem("fb.theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
   <link rel="stylesheet" href="/static/style.css">
   {% block head %}{% endblock %}
 </head>
 <body>
-<header>
+<header class="top">
   <div class="bar">
-    <a class="brand" href="/">Trading</a>
-    <nav>
+    <a class="brand" href="/" aria-label="Finance Bull, dashboard">
+      <img src="/static/brand/logo-mark.webp" alt="" width="85" height="46">
+      <span><span class="word">Finance Bull</span><span class="tag">Equity research</span></span>
+    </a>
+    <nav class="main">
       <a href="/" class="{{ 'on' if active == 'dashboard' }}">Dashboard</a>
       <a href="/selection" class="{{ 'on' if active == 'selection' }}">1 · Select</a>
       <a href="/allocation" class="{{ 'on' if active == 'allocation' }}">2 · Allocate</a>
@@ -19,6 +25,7 @@
       <a href="/monitor" class="{{ 'on' if active == 'monitor' }}">4 · Monitor</a>
       <a href="/api/docs">API</a>
     </nav>
+    <button class="theme-btn" id="theme-btn" type="button" title="Switch light / dark">Theme</button>
   </div>
 </header>
 <main>
@@ -26,6 +33,27 @@
   {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
   {% block content %}{% endblock %}
 </main>
-<footer>Research output only — not financial advice. This app never places orders; buying and selling stay manual.</footer>
+<footer>
+  <span class="word">Finance Bull</span> · Research output only — not financial advice. This app never places orders;
+  buying and selling stay manual.<br>
+  Market data: Yahoo Finance (unofficial, may be delayed). Charts: TradingView Lightweight Charts™.
+</footer>
+<script>
+(function () {
+  var btn = document.getElementById("theme-btn"), root = document.documentElement;
+  function current() {
+    return root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }
+  function label() { btn.textContent = current() === "dark" ? "Light mode" : "Dark mode"; }
+  btn.addEventListener("click", function () {
+    root.dataset.theme = current() === "dark" ? "light" : "dark";
+    try { localStorage.setItem("fb.theme", root.dataset.theme); } catch (e) {}
+    label();
+    document.dispatchEvent(new CustomEvent("themechange"));
+  });
+  label();
+})();
+</script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

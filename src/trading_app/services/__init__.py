@@ -9,7 +9,7 @@ from __future__ import annotations
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from asset_selection.monitoring.broker import BrokerConfigError, init_holdings
 from asset_selection.monitoring.config import BrokerConfig
@@ -17,21 +17,29 @@ from asset_selection.monitoring.config import BrokerConfig
 from . import commands, status
 from .commands import InvalidRequest
 from .jobs import Job, JobConflict, JobManager
+from .market import (
+    BENCHMARK, MarketData, MarketDataError, chart_payload, clean, generated_at, normalize_symbol, sector_payload,
+)
 from .paths import STRATEGIES, Paths, default_paths
 from .settings import AppSettings, load_settings, save_settings
 
 __all__ = [
-    "InvalidRequest", "Job", "JobConflict", "Paths", "STRATEGIES", "Workflow", "default_paths",
+    "InvalidRequest", "Job", "JobConflict", "MarketDataError", "Paths", "STRATEGIES", "WATCHLIST_MAX",
+    "Workflow", "default_paths",
 ]
 
 ALLOWED_UPLOADS = {".csv", ".pdf"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+WATCHLIST_DEFAULT_SIZE = 8
+WATCHLIST_MAX = 24
 
 
 class Workflow:
-    def __init__(self, paths: Optional[Paths] = None, jobs: Optional[JobManager] = None) -> None:
+    def __init__(self, paths: Optional[Paths] = None, jobs: Optional[JobManager] = None,
+                 market: Optional[MarketData] = None) -> None:
         self.paths = paths or default_paths()
         self.jobs = jobs or JobManager(self.paths.jobs_dir, cwd=self.paths.root)
+        self.market = market or MarketData(self.paths.app_dir / "cache" / "market")
 
     # -- settings -------------------------------------------------------
     @property
@@ -129,6 +137,78 @@ class Workflow:
                                params={"option": opt, "target": target_strategy, "cash": cash,
                                        "forecast": forecast}, job_id=job_id)
 
+    # -- dashboard charts -------------------------------------------------
+    def watchlist(self) -> List[str]:
+        saved = self.settings.watchlist
+        if saved is not None:
+            return list(saved)
+        return status.default_watchlist(self.paths, self.settings, WATCHLIST_DEFAULT_SIZE)
+
+    def add_to_watchlist(self, raw: str) -> List[str]:
+        symbol = _symbol(raw)
+        current = self.watchlist()
+        if symbol in current:
+            return current
+        if len(current) >= WATCHLIST_MAX:
+            raise InvalidRequest(f"the watchlist holds up to {WATCHLIST_MAX} symbols; remove one first")
+        try:
+            self.market.bars(symbol)           # refuse a symbol Yahoo has no prices for
+        except MarketDataError as exc:
+            raise InvalidRequest(str(exc)) from None
+        return self._save_watchlist(current + [symbol])
+
+    def remove_from_watchlist(self, raw: str) -> List[str]:
+        symbol = _symbol(raw)
+        return self._save_watchlist([x for x in self.watchlist() if x != symbol])
+
+    def reset_watchlist(self) -> List[str]:
+        s = self.settings
+        s.watchlist = None
+        save_settings(self.paths, s)
+        return self.watchlist()
+
+    def _save_watchlist(self, symbols: List[str]) -> List[str]:
+        s = self.settings
+        s.watchlist = symbols
+        save_settings(self.paths, s)
+        return list(s.watchlist)
+
+    def market_chart(self, raw: str) -> Dict[str, Any]:
+        """One stock: a year of candles, indicators, Fibonacci levels and statistics."""
+        symbol = _symbol(raw)
+        payload = chart_payload(symbol, self.market.bars(symbol))
+        meta = self.market.meta(symbol, status.ranking_meta(self.paths))
+        payload.update(sector=meta.get("sector"), name=status.short_name(meta.get("name")))
+        return clean(payload)
+
+    def market_sectors(self) -> Dict[str, Any]:
+        """The watchlist grouped by sector, each against the S&P 500."""
+        known = status.ranking_meta(self.paths)
+        groups: Dict[str, Dict[str, Any]] = {}
+        names: Dict[str, Optional[str]] = {}
+        errors: Dict[str, str] = {}
+        for symbol in self.watchlist():
+            try:
+                frame = self.market.bars(symbol)
+            except MarketDataError as exc:
+                errors[symbol] = str(exc)
+                continue
+            meta = self.market.meta(symbol, known)
+            names[symbol] = status.short_name(meta.get("name"))
+            groups.setdefault(meta.get("sector") or "Other", {})[symbol] = frame
+        try:
+            benchmark = self.market.bars(BENCHMARK)
+        except MarketDataError as exc:
+            benchmark, errors[BENCHMARK] = None, str(exc)
+        sectors = []
+        for name in sorted(groups, key=lambda n: (-len(groups[n]), n)):
+            try:
+                sectors.append(sector_payload(name, groups[name], benchmark=benchmark))
+            except MarketDataError as exc:
+                errors[name] = str(exc)
+        return clean({"sectors": sectors, "names": names, "benchmark": "S&P 500" if benchmark is not None else None,
+                      "errors": errors, "generated_at": generated_at()})
+
     # -- reads ----------------------------------------------------------
     def dashboard(self) -> Dict[str, object]:
         s = self.settings
@@ -136,9 +216,17 @@ class Workflow:
             "ranking": status.ranking_info(self.paths),
             "plans": status.plan_infos(self.paths),
             "broker": status.broker_status(self.paths, s),
+            "holdings": len(status.holdings_symbols(self.paths, s)),
             "monitor": status.latest_monitor(self.paths, self.jobs),
             "jobs": self.jobs.list(limit=8),
         }
+
+
+def _symbol(raw: str) -> str:
+    try:
+        return normalize_symbol(raw)
+    except ValueError as exc:
+        raise InvalidRequest(str(exc)) from None
 
 
 def safe_init_holdings(wf: Workflow) -> str:

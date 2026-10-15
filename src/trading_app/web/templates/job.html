@@ -2,6 +2,7 @@
 {% block title %}{{ job.title }}{% endblock %}
 {% block head %}{% if not job.done %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
 {% block content %}
+<div class="eyebrow">Job {{ job.id }}</div>
 <h1>{{ job.title }}</h1>
 <p class="sub">Started {{ job.created_at[:19]|replace('T', ' ') }} UTC
   {% if job.finished_at %}· finished {{ job.finished_at[:19]|replace('T', ' ') }} UTC{% endif %}</p>
@@ -17,6 +18,26 @@
   <div class="note bad">Failed (exit code {{ job.returncode if job.returncode is not none else 'unknown' }}). The log below shows why.</div>
 {% endif %}
 
+{% if progress %}
+<div class="progress">
+  {% for st in progress %}
+  <div class="stage {{ 'done' if st.done }} {{ 'pausing' if st.pausing }}">
+    <div class="row">
+      <strong>{{ st.name }}</strong>
+      <span>{{ '{:,}'.format(st.n) }} / {{ '{:,}'.format(st.total) }} · {{ st.pct }}%
+        · {{ st.elapsed }} elapsed{% if not st.done and st.eta and st.eta != '?' %} · about {{ st.eta }} left{% endif %}</span>
+    </div>
+    <div class="track"><div class="fill" style="width: {{ st.pct }}%"></div></div>
+    {% if st.pausing and not job.done %}
+      <p class="fine">Yahoo answered "429 Too Many Requests": the run is pausing as asked and will carry on with the same
+        stock — nothing is skipped.</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <p><code>{{ job.command }}</code></p>
-<pre class="log">{{ log or '(no output yet)' }}</pre>
+<pre class="log">{% for line in (log or '(no output yet)').split('\n') %}{% if '429' in line or 'rate limit' in line|lower or 'pausing' in line %}<span class="hl">{{ line }}</span>{% else %}{{ line }}{% endif %}
+{% endfor %}</pre>
 {% endblock %}

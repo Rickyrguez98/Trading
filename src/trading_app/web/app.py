@@ -9,6 +9,7 @@ Nothing here places orders or accepts broker credentials.
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import quote, urlparse
@@ -20,8 +21,10 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Undefined
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from ..services import STRATEGIES, InvalidRequest, JobConflict, Workflow, safe_init_holdings, status
-from ..services.jobs import Job
+from ..services import (
+    STRATEGIES, WATCHLIST_MAX, InvalidRequest, JobConflict, MarketDataError, Workflow, safe_init_holdings, status,
+)
+from ..services.jobs import Job, selection_progress
 
 HERE = Path(__file__).resolve().parent
 LOCAL_HOSTS = ["127.0.0.1", "localhost", "testserver"]
@@ -36,7 +39,7 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=LOCAL_HOSTS)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
     templates = Jinja2Templates(directory=str(HERE / "templates"))
-    templates.env.filters.update(money=_money, pct=_pct, num=_num)
+    templates.env.filters.update(money=_money, pct=_pct, num=_num, short=status.short_name)
     app.state.workflow = wf
 
     @app.middleware("http")
@@ -66,7 +69,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     # ------------------------------------------------------------------ pages
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
-        return page(request, "dashboard.html", d=wf.dashboard())
+        now = datetime.now()
+        return page(request, "dashboard.html", d=wf.dashboard(), today=f"{now.day} {now:%B %Y}")
 
     @app.get("/selection", response_class=HTMLResponse)
     def selection(request: Request):
@@ -146,7 +150,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_page(request: Request, job_id: str):
         job = _job_or_404(wf, job_id)
-        return page(request, "job.html", job=job, log=wf.jobs.log_tail(job.id, 60))
+        progress = selection_progress(wf.jobs.log_text(job.id)) if job.kind == "selection" else []
+        return page(request, "job.html", job=job, log=wf.jobs.log_tail(job.id, 60), progress=progress)
 
     # -------------------------------------------------------------------- API
     @app.get("/api/status")
@@ -198,7 +203,40 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     @app.get("/api/jobs/{job_id}")
     def api_job(job_id: str):
         job = _job_or_404(wf, job_id)
-        return {**_job_dict(wf, job), "log_tail": wf.jobs.log_tail(job.id, 60)}
+        progress = selection_progress(wf.jobs.log_text(job.id)) if job.kind == "selection" else []
+        return {**_job_dict(wf, job), "log_tail": wf.jobs.log_tail(job.id, 60), "progress": progress}
+
+    @app.get("/api/market/watchlist")
+    def api_watchlist():
+        return {"symbols": wf.watchlist(), "custom": wf.settings.watchlist is not None, "max": WATCHLIST_MAX}
+
+    @app.post("/api/market/watchlist")
+    def api_watchlist_change(body: Dict[str, Any]):
+        try:
+            if body.get("reset"):
+                wf.reset_watchlist()
+            elif body.get("add"):
+                wf.add_to_watchlist(str(body["add"]))
+            elif body.get("remove"):
+                wf.remove_from_watchlist(str(body["remove"]))
+            else:
+                raise InvalidRequest("send one of: add, remove, reset")
+        except InvalidRequest as exc:
+            raise HTTPException(400, str(exc)) from None
+        return api_watchlist()
+
+    @app.get("/api/market/chart/{symbol}")
+    def api_chart(symbol: str):
+        try:
+            return wf.market_chart(symbol)
+        except InvalidRequest as exc:
+            raise HTTPException(400, str(exc)) from None
+        except MarketDataError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @app.get("/api/market/sectors")
+    def api_sectors():
+        return wf.market_sectors()
 
     @app.post("/api/jobs/{kind}", status_code=202)
     def api_start(kind: str, body: Dict[str, Any]):

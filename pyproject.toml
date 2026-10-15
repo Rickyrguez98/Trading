@@ -81,7 +81,7 @@ binary-options-selection = "binary_options_selection.pipelines.run_binary_option
 where = ["src"]
 
 [tool.setuptools.package-data]
-trading_app = ["web/templates/*.html", "web/static/*"]
+trading_app = ["web/templates/*.html", "web/static/*", "web/static/brand/*", "web/static/vendor/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

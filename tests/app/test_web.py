@@ -108,7 +108,7 @@ def test_pages_show_the_pipeline_outputs(env):
     mon = client.get("/monitor").text
     assert "thesis intact; within band" in mon and "uptrend" in mon
     dash = client.get("/").text
-    assert "2 ranked stocks" in dash and "1 HOLD" in dash
+    assert '<span class="value">2</span>' in dash and "ranked" in dash and "1 HOLD" in dash
 
 
 def test_outputs_are_html_escaped(env):

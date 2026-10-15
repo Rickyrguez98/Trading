@@ -1,57 +1,96 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>Your investing workflow</h1>
-<p class="sub">Select stocks, allocate money across three risk levels, buy by hand, then monitor what you own.</p>
-
 {% set r = d.ranking %}
-<div class="grid">
-  <div class="card">
-    <div class="step">Step 1 · Select</div>
+<section class="hero">
+  <div>
+    <div class="eyebrow">Market overview · {{ today }}</div>
+    <h1>Portfolio intelligence</h1>
+    <p class="sub">A year of daily prices for the stocks you follow, read through trend, volatility, momentum and
+      Fibonacci retracement — alongside the selection, allocation and monitoring workflow that produced them.</p>
+  </div>
+  <img class="hero-logo" src="/static/brand/logo-full.webp" alt="Finance Bull" width="230" height="160">
+</section>
+
+<div class="kpis">
+  <a class="kpi" href="/selection">
+    <span class="label">1 · Stock selection</span>
     {% if r.exists %}
-      <div class="big">{{ r.rows }} ranked stocks</div>
-      <p>From {{ (r.generated_at or '')[:10] }} ({{ r.age_days }} days ago)
-        {% if r.run_status %}<span class="badge {{ 'ok' if r.run_status in ('VALID','PARTIAL') else 'bad' }}">{{ r.run_status }}</span>{% endif %}</p>
-      {% if r.stale %}<p><span class="badge warn">stale</span> older than 30 days — re-run it</p>{% endif %}
+      <span class="value">{{ r.rows }}</span>
+      <span class="meta">ranked · {{ (r.generated_at or '')[:10] }}
+        {% if r.run_status %}<span class="badge {{ 'ok' if r.run_status in ('VALID','PARTIAL') else 'bad' }}">{{ r.run_status }}</span>{% endif %}
+        {% if r.stale %}<span class="badge warn">stale</span>{% endif %}</span>
     {% else %}
-      <div class="big">No ranking yet</div><p>Run the full selection once to start.</p>
+      <span class="value">—</span><span class="meta">No ranking yet: run the full selection</span>
     {% endif %}
-    <a class="btn ghost" href="/selection">Open</a>
-  </div>
-
-  <div class="card">
-    <div class="step">Step 2 · Allocate</div>
+  </a>
+  <a class="kpi" href="/allocation">
+    <span class="label">2 · Allocation</span>
     {% if d.plans %}
-      <div class="big">{{ d.plans|length }} plan{{ 's' if d.plans|length != 1 }}</div>
-      {% for p in d.plans %}<p>{{ p.strategy|capitalize }}: {{ p.positions }} positions · {{ p.invested|money(0) }} invested</p>{% endfor %}
+      <span class="value">{{ d.plans|length }} plan{{ 's' if d.plans|length != 1 }}</span>
+      <span class="meta">{% for p in d.plans %}{{ p.strategy|capitalize }} {{ p.positions }}{{ ' · ' if not loop.last }}{% endfor %} positions</span>
     {% else %}
-      <div class="big">No plans yet</div><p>Turn the ranking and an amount into three strategies.</p>
+      <span class="value">—</span><span class="meta">Three risk levels from the ranking</span>
     {% endif %}
-    <a class="btn ghost" href="/allocation">Open</a>
-  </div>
-
-  <div class="card">
-    <div class="step">Step 3 · Broker</div>
+  </a>
+  <a class="kpi" href="/broker">
+    <span class="label">3 · Holdings</span>
+    <span class="value">{{ d.holdings }} position{{ 's' if d.holdings != 1 }}</span>
     {% for o in d.broker.options if o.selected %}
-      <div class="big">Option {{ o.code }}</div>
-      <p>{{ o.label }}</p>
-      <p><span class="badge {{ 'ok' if o.ready else 'warn' }}">{{ 'ready' if o.ready else 'not ready' }}</span> {{ o.detail }}</p>
+      <span class="meta">Broker option {{ o.code }} <span class="badge {{ 'ok' if o.ready else 'warn' }}">{{ 'ready' if o.ready else 'not ready' }}</span></span>
     {% endfor %}
-    <a class="btn ghost" href="/broker">Open</a>
+  </a>
+  <a class="kpi" href="/monitor">
+    <span class="label">4 · Monitor</span>
+    {% if d.monitor %}
+      <span class="value">{% for a, n in d.monitor.actions.items() %}<span class="act {{ a }}">{{ n }} {{ a }}</span>{{ ' · ' if not loop.last }}{% endfor %}</span>
+      <span class="meta">{{ (d.monitor.generated_at or '')[:10] }} · <span class="badge {{ 'ok' if d.monitor.summary.status == 'VALID' else 'warn' }}">{{ d.monitor.summary.status }}</span></span>
+    {% else %}
+      <span class="value">—</span><span class="meta">Sell / trim / hold / add for what you own</span>
+    {% endif %}
+  </a>
+</div>
+
+<section id="markets">
+  <div class="section-head">
+    <div>
+      <h2>Markets</h2>
+      <p class="sub">Daily prices for the last 12 months, adjusted for splits and dividends.</p>
+    </div>
+    <div class="seg" role="group" aria-label="Chart view">
+      <button type="button" data-view="stock" class="on">By stock</button>
+      <button type="button" data-view="sector">By sector</button>
+    </div>
   </div>
 
-  <div class="card">
-    <div class="step">Step 4 · Monitor</div>
-    {% if d.monitor %}
-      <div class="big">{% for a, n in d.monitor.actions.items() %}<span class="act {{ a }}">{{ n }} {{ a }}</span>{{ ' · ' if not loop.last }}{% endfor %}</div>
-      <p>{{ (d.monitor.generated_at or '')[:16]|replace('T', ' ') }} UTC · status
-        <span class="badge {{ 'ok' if d.monitor.summary.status == 'VALID' else 'warn' }}">{{ d.monitor.summary.status }}</span></p>
-    {% else %}
-      <div class="big">Not run yet</div><p>Recommendations for what you already own.</p>
-    {% endif %}
-    <a class="btn ghost" href="/monitor">Open</a>
+  <div class="toolbar">
+    <div class="chips" id="wl-chips" aria-live="polite"></div>
+    <form class="add" id="wl-form" autocomplete="off">
+      <input id="wl-input" name="symbol" maxlength="16" placeholder="Add a ticker: AAPL, BRK.B, WALMEX.MX" aria-label="Ticker to add">
+      <button class="btn" type="submit">Add</button>
+    </form>
+    <button class="btn ghost small" type="button" id="wl-reset" title="Back to your holdings plus the top of the ranking">Reset</button>
   </div>
-</div>
+
+  <div class="toggles" id="ind-toggles">
+    <label class="tog"><input type="checkbox" data-ind="sma" checked><span class="sw sma50"></span>SMA 50 / 200</label>
+    <label class="tog"><input type="checkbox" data-ind="bb" checked><span class="sw bb"></span>Bollinger bands (20, 2σ)</label>
+    <label class="tog"><input type="checkbox" data-ind="fib" checked><span class="sw fib"></span>Fibonacci retracement</label>
+    <label class="tog"><input type="checkbox" data-ind="vol" checked><span class="sw vol"></span>Volume</label>
+    <label class="tog"><input type="checkbox" data-ind="rsi" checked><span class="sw rsi"></span>RSI (14)</label>
+  </div>
+
+  <div class="note bad" id="wl-msg" hidden></div>
+  <div class="chart-grid" id="chart-grid"></div>
+  <noscript><div class="empty">The charts need JavaScript.</div></noscript>
+
+  <p class="fine">How to read these: the 50- and 200-day moving averages show trend (50 above 200 is the
+    classic "golden cross"); Bollinger bands show where price sits against its recent volatility; RSI above 70 or
+    below 30 marks stretched momentum; Fibonacci levels are the 23.6–78.6% retracements of the year's swing
+    between its low and high. They describe past prices only — they are not forecasts or recommendations.
+    The sector view rebases every stock to 0% a year ago and compares an equal-weight sector index with the S&amp;P 500.
+    Prices are cached for six hours.</p>
+</section>
 
 <h2>Recent jobs</h2>
 {% if d.jobs %}
@@ -66,4 +105,8 @@
   {% endfor %}
 </table></div>
 {% else %}<p class="sub">No jobs yet.</p>{% endif %}
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/app.js"></script>
 {% endblock %}
