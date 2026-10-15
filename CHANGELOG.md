@@ -9,6 +9,33 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Added — app dashboard v2 ("Finance Bull")
+- **Market charts on the dashboard.** A year of daily candles for every symbol
+  in a watchlist (default: your holdings, then the top eligible stocks of the
+  ranking), each with SMA 50/200, Bollinger bands (20, 2σ), Fibonacci
+  retracement levels of the year's swing, volume and an RSI (14) pane, plus a
+  statistics strip (52-week range, volatility, drawdown, trend, Fibonacci zone,
+  ATR). A **By sector** view rebases every stock to 0%, adds an equal-weight
+  sector index and the S&P 500, and reports each sector's lead or lag.
+  Symbols are added and removed on the page (validated against Yahoo, saved in
+  `data/app/settings.json`). New API: `/api/market/watchlist`,
+  `/api/market/chart/{symbol}`, `/api/market/sectors`. The studies are labelled
+  as descriptive, not forecasts.
+- Prices are cached for six hours and fetched one at a time; a chart request
+  has its own short rate-limit policy, so a page never waits minutes.
+- Charts use TradingView Lightweight Charts 5.2.1 (Apache-2.0), vendored with
+  its licence and pinned by hash; nothing is loaded from a CDN.
+- **Professional redesign** for presentations: Finance Bull logo and favicon,
+  navy / ivory / gold theme taken from the logo, serif headings, headline
+  tiles, light and dark mode with a switch, phone-width layout.
+- The selection job page shows a progress bar per stage and highlights
+  rate-limit pauses; the selection page explains how pauses work and how long
+  a full run takes.
+
+### Fixed — app
+- Finished job processes are now collected (they were left as zombies until
+  the app exited, which also showed up as a `ResourceWarning` in tests).
+
 ### Fixed — rate limiting ("429 Too Many Requests")
 - A 429 used to be retried three times within about three seconds and then
   given up on, ticker after ticker. On 2026-10-15 the Yahoo news feed answered
