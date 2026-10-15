@@ -12,9 +12,14 @@ when the provider says "too many requests" anyway:
   ``base_pause, 2x, 4x, ... max_pause``.
 * **Stop hammering a provider that is blocking.** After ``give_up_after``
   rate-limited calls in a row the provider is paused for ``cooldown``
-  seconds: calls fail immediately with :class:`ProviderPaused` (classified as
-  rate-limited, so the run reports it honestly), then a single probe call is
-  allowed. A successful call resets everything.
+  seconds, then a single probe call is allowed. A successful call resets
+  everything. While paused, a provider either
+  - **waits** (``wait_when_paused``, used for prices and fundamentals): the
+    call sleeps until the probe and then carries on, so no ticker is skipped.
+    Only after ``max_waits`` cooldowns in a row without a single success --
+    a block, not a throttle -- does it stop waiting, so a run cannot hang; or
+  - **fails fast** (news): calls raise :class:`ProviderPaused` (classified
+    as rate-limited, so the run reports it honestly) without sending anything.
 
 Only rate-limit signals trigger this. Other failures (timeouts, 5xx, parse
 errors) go to the caller's own retry policy unchanged.
@@ -56,6 +61,8 @@ class ThrottlePolicy:
     give_up_after: int = 6           # rate-limited calls in a row before pausing the provider
     cooldown: float = 600.0          # how long a paused provider is skipped before a probe
     max_retry_after: float = 600.0   # longest server-requested wait honoured
+    wait_when_paused: bool = False   # sleep through a cooldown instead of failing fast
+    max_waits: int = 3               # cooldowns in a row to wait through before failing fast
 
 
 def is_rate_limited(exc: BaseException) -> bool:
@@ -95,21 +102,32 @@ class Throttle:
         self.paused_until: Optional[float] = None
         self.pauses_taken = 0
         self.skipped_calls = 0
+        self.cooldowns = 0               # cooldowns in a row without a successful call
 
     # ------------------------------------------------------------------
     def call(self, fn: Callable[..., T], *args, **kwargs) -> T:
-        """Run ``fn``; on rate limiting, pause and retry; fail fast while paused."""
+        """Run ``fn``; on rate limiting, pause and retry; while paused, wait or fail fast."""
         while True:
+            wait, until = 0.0, None
             with self._lock:
                 if self.paused_until is not None:
                     remaining = self.paused_until - self._clock()
-                    if remaining > 0:
+                    if remaining > 0 and not self._may_wait():
                         self.skipped_calls += 1
                         raise ProviderPaused(
                             f"{self.name} paused after repeated 429 Too Many Requests "
                             f"(rate limited); next attempt in {remaining:.0f}s"
                         )
-                    self.paused_until = None     # cooldown over: let one probe through
+                    if remaining > 0:
+                        wait, until = remaining, self.paused_until
+                    else:
+                        self.paused_until = None     # cooldown over: let one probe through
+            if wait:
+                self._wait(wait)
+                with self._lock:                     # waited it out: this call is the probe
+                    if self.paused_until == until:
+                        self.paused_until = None
+                continue
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001 - only rate limits are handled here
@@ -117,15 +135,23 @@ class Throttle:
                     raise
                 pause = self._after_rate_limit(exc)
                 if pause is None:
+                    with self._lock:
+                        waiting = self._may_wait()
+                    if waiting:
+                        continue                     # sleep through the cooldown, then retry this call
                     raise
                 self._wait(pause)
                 continue
             with self._lock:
-                if self.consecutive or self.skipped_calls:
+                if self.consecutive or self.skipped_calls or self.cooldowns:
                     logger.info("%s is answering again after rate limiting", self.name)
                 self.consecutive = 0
                 self.skipped_calls = 0
+                self.cooldowns = 0
             return result
+
+    def _may_wait(self) -> bool:
+        return self.policy.wait_when_paused and self.cooldowns <= self.policy.max_waits
 
     def _after_rate_limit(self, exc: BaseException) -> Optional[float]:
         """Record a rate-limited call; the pause to take, or None to give up now."""
@@ -135,11 +161,19 @@ class Throttle:
             if self.consecutive >= p.give_up_after:
                 self.paused_until = self._clock() + p.cooldown
                 self.consecutive = 0
-                logger.warning(
-                    "%s keeps answering 429 Too Many Requests; pausing it for %.0fs and "
-                    "skipping its calls meanwhile (no request is sent while paused)",
-                    self.name, p.cooldown,
-                )
+                self.cooldowns += 1
+                if self._may_wait():
+                    logger.warning(
+                        "%s keeps answering 429 Too Many Requests; waiting %.0fs before trying "
+                        "again (no request is sent meanwhile and no ticker is skipped)",
+                        self.name, p.cooldown,
+                    )
+                else:
+                    logger.warning(
+                        "%s keeps answering 429 Too Many Requests; pausing it for %.0fs and "
+                        "skipping its calls meanwhile (no request is sent while paused)",
+                        self.name, p.cooldown,
+                    )
                 return None
             retry_after = getattr(exc, "retry_after", None)
             if retry_after is not None and 0 < retry_after <= p.max_retry_after:
@@ -163,6 +197,7 @@ class Throttle:
             self.paused_until = None
             self.pauses_taken = 0
             self.skipped_calls = 0
+            self.cooldowns = 0
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +205,14 @@ class Throttle:
 # ---------------------------------------------------------------------------
 
 DEFAULT_POLICIES: Dict[str, ThrottlePolicy] = {
-    # Prices and fundamentals: worth waiting for, so a full run completes through
-    # a temporary throttle (30s, 60s, 120s, 240s, 300s before pausing the source).
-    "yfinance": ThrottlePolicy(base_pause=30.0, max_pause=300.0, give_up_after=6, cooldown=600.0),
-    "stooq": ThrottlePolicy(base_pause=30.0, max_pause=300.0, give_up_after=6, cooldown=600.0),
+    # Prices and fundamentals: worth waiting for, so a full run completes every
+    # ticker through a temporary throttle: 30s, 60s, 120s, 240s, 300s, then a
+    # 10-minute wait, up to three times in a row (about an hour) before
+    # concluding Yahoo is blocking and failing the rest fast.
+    "yfinance": ThrottlePolicy(base_pause=30.0, max_pause=300.0, give_up_after=6, cooldown=600.0,
+                               wait_when_paused=True, max_waits=3),
+    "stooq": ThrottlePolicy(base_pause=30.0, max_pause=300.0, give_up_after=6, cooldown=600.0,
+                            wait_when_paused=True, max_waits=3),
     # News is best-effort context: a blocked feed is paused quickly instead of
     # costing ~7s of retries per ticker.
     "yahoo_rss": ThrottlePolicy(base_pause=5.0, max_pause=30.0, give_up_after=2, cooldown=600.0),

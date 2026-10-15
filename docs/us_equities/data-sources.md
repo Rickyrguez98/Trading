@@ -164,7 +164,7 @@ Every provider call goes through a shared throttle
 
 | Provider | Spacing between calls | On a 429 | After repeated 429s |
 |---|---|---|---|
-| Yahoo prices + fundamentals (`yfinance`, shared) | 0.4 s | pause 30 s, 60 s, 120 s, 240 s, 300 s, then continue | paused 10 min, then one probe |
+| Yahoo prices + fundamentals (`yfinance`, shared) | 0.4 s | pause 30 s, 60 s, 120 s, 240 s, 300 s, then continue | wait 10 min, then continue with the same ticker (none is skipped); after 3 such waits in a row with no success (~1 h), stop waiting and report the rest as rate-limited |
 | Yahoo news feed (`yahoo_rss`) | 2 s | pause 5 s | after 2 in a row: paused 10 min, its calls skipped |
 | Finnhub | 1.1 s (free plan: 60/min) | pause 15–60 s | after 4 in a row: paused 5 min |
 

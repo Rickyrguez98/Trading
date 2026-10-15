@@ -25,6 +25,12 @@ this counter; releases before 0.0.12 were never tracked in this file.
   and every run ends with a rate-limiting summary line.
 - Quick automatic retries (tenacity) now skip rate-limit errors, which only the
   throttle handles, so a 429 is no longer answered with an immediate retry.
+- Prices and fundamentals never skip a ticker because of a pause: when Yahoo
+  keeps answering 429 the run waits out the 10-minute cooldown and carries on
+  with the same ticker. Only after three cooldowns in a row without one
+  successful call (about an hour -- a block, not a throttle) does it stop
+  waiting and report the remaining tickers as rate-limited, so a run can never
+  hang. News, which is best-effort, still fails fast while paused.
 
 ### Fixed
 - **`--instrument-price` silently discarded all but the last value.** The flag

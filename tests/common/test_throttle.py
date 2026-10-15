@@ -167,3 +167,59 @@ def test_the_test_suite_never_really_sleeps(_throttle_state):
     t.call(fn)
     assert len(_throttle_state) == 1 and _throttle_state[0] >= 30   # recorded, not slept
     assert th._sleep is not __import__("time").sleep
+
+
+# ---------------------------------------------------------------------------
+# Prices and fundamentals wait through a cooldown instead of skipping tickers
+# ---------------------------------------------------------------------------
+
+def _waiting(clock, max_waits=3):
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock.t += seconds                         # time passes while we wait
+
+    t = Throttle("prov", ThrottlePolicy(base_pause=30, max_pause=300, give_up_after=3, cooldown=600,
+                                        wait_when_paused=True, max_waits=max_waits),
+                 sleep=sleep, clock=clock)
+    return t, slept
+
+
+def test_a_waiting_provider_sleeps_through_the_cooldown_and_finishes_the_call():
+    clock = Clock()
+    t, slept = _waiting(clock)
+    fn, calls = _flaky(_429(), _429(), _429(), "ok")
+    assert t.call(fn) == "ok"                      # the same call is retried, nothing is skipped
+    assert calls["n"] == 4 and t.skipped_calls == 0
+    assert any(600 <= s <= 602 for s in slept)     # the 10-minute cooldown was waited out
+    assert t.cooldowns == 0 and t.paused_until is None
+
+
+def test_calls_arriving_during_a_cooldown_wait_rather_than_fail():
+    clock = Clock()
+    t, slept = _waiting(clock)
+    t.paused_until = clock.t + 300
+    t.cooldowns = 1
+    fn, calls = _flaky("ok")
+    assert t.call(fn) == "ok" and calls["n"] == 1
+    assert 300 <= slept[0] <= 302 and t.skipped_calls == 0
+
+
+def test_a_permanent_block_stops_waiting_after_max_waits():
+    clock = Clock()
+    t, _ = _waiting(clock, max_waits=2)
+    fn, calls = _flaky(_429())
+    with pytest.raises(RateLimitedError):          # 3 cooldowns (> max_waits) -> give up
+        t.call(fn)
+    assert t.cooldowns == 3
+    with pytest.raises(ProviderPaused):            # and the rest fail fast instead of hanging
+        t.call(fn)
+    assert calls["n"] == 9                         # 3 tries x 3 cycles, nothing after
+
+
+def test_prices_and_fundamentals_wait_news_fails_fast():
+    assert get_throttle("yfinance").policy.wait_when_paused is True
+    assert get_throttle("stooq").policy.wait_when_paused is True
+    assert get_throttle("yahoo_rss").policy.wait_when_paused is False
+    assert get_throttle("finnhub").policy.wait_when_paused is False
