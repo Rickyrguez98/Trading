@@ -82,11 +82,15 @@ than 30 days.
 
 1. **Optional but recommended:** put a free `FINNHUB_API_KEY` in `.env` so news
    sentiment is populated.
-2. **Run it** — plan for about an hour and keep the laptop awake. Measured on
-   2026-10-15: 53 minutes in total — ~32 to price ~4,800 stocks, ~3 for
-   fundamentals, ~17 for news (that run had no Finnhub key, so the news stage
-   spent its time retrying a rate-limited feed and found no articles). To run it
-   in the background and keep a log:
+2. **Run it** — plan for 35–40 minutes and keep the laptop awake. Measured on
+   2026-10-15: ~32 minutes to price ~4,800 stocks and ~3 for fundamentals; the
+   news stage then spent ~17 minutes retrying a feed that answered "429 Too Many
+   Requests" to every ticker. Rate limits are now handled automatically: calls
+   are spaced, a 429 pauses and the run continues with the same stock (no stock
+   is skipped for prices or fundamentals), and a blocked news feed is skipped
+   after two tries, so that stage takes seconds. Details:
+   [data-sources.md](docs/us_equities/data-sources.md#how-429-too-many-requests-is-handled).
+   To run it in the background and keep a log:
 
    ```bash
    mkdir -p logs
