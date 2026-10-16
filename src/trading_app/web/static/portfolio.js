@@ -87,9 +87,54 @@
     });
   }
 
+  // ------------------------------------------------- next month (model)
+  function outlookCell(td, ol, lot) {
+    td.textContent = "";
+    function line(cls) { var d = document.createElement("div"); if (cls) d.className = cls; td.appendChild(d); return d; }
+    function add(parent, text, cls, tag) {
+      var e = document.createElement(tag || "span"); if (cls) e.className = cls; e.textContent = text; parent.appendChild(e); return e;
+    }
+    if (!ol || ol.status === "error") { add(line("cc-name"), "no prices: " + ((ol && ol.error) || "unavailable")); return; }
+    if (ol.status !== "ok") { add(line("cc-name"), "not enough price history (" + (ol.history_days || 0) + " days)"); return; }
+    var range = line("ol-range");
+    add(range, "$" + price(ol.expected_low) + " – $" + price(ol.expected_high));
+    var sell = line("ol-sell");
+    add(sell, "Sell limit ");
+    add(sell, "$" + price(ol.sell_limit), "", "b");
+    if (lot && lot.limit_vs_cost_pct != null) add(sell, " " + pct(lot.limit_vs_cost_pct), toneOf(lot.limit_vs_cost_pct));
+    var stop = line("ol-sell");
+    add(stop, "Stop ");
+    add(stop, "$" + price(ol.stop), "", "b");
+    if (lot && lot.stop_vs_cost_pct != null) add(stop, " " + pct(lot.stop_vs_cost_pct), toneOf(lot.stop_vs_cost_pct));
+    var note = line("cc-name");
+    var held = ol.validated_months ? "range held " + ol.range_held_months + " of " + ol.validated_months + " past months"
+                                   : "short history (" + ol.history_days + " days): not back-tested";
+    note.textContent = "fills ~" + Math.round(ol.sell_limit_touch * 100) + "% / hit ~" + Math.round(ol.stop_touch * 100) +
+      "% of months · " + held;
+    if (lot && lot.limit_above_cost === false) add(line("cc-name neg"), "limit is below what this lot cost");
+  }
+
+  function loadOutlook() {
+    var cells = table.querySelectorAll("td.js-outlook");
+    if (!cells.length) return;
+    fetch("/api/portfolio/outlook").then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (res) {
+      Array.prototype.forEach.call(table.querySelectorAll("tr[data-open]"), function (tr) {
+        var key = tr.getAttribute("data-open"), sym = key.split("|")[0];
+        var td = tr.querySelector("td.js-outlook");
+        if (td) outlookCell(td, res.symbols[sym], res.lots[key]);
+      });
+    }).catch(function (e) {
+      Array.prototype.forEach.call(cells, function (td) { td.textContent = "unavailable (" + e.message + ")"; });
+    });
+  }
+
   setInterval(function () { if (nextAt && !busy && !failed) label(); }, 1000);
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden && nextAt && Date.now() >= nextAt) refresh();     // a tab left in the background catches up
   });
   refresh();
+  loadOutlook();          // daily numbers: once per page load is enough
 })();

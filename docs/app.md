@@ -65,6 +65,7 @@ jobs through the environment; the app never asks for them.
 | GET | `/api/portfolio` | Summary and one row per purchase lot (`?live=true` refreshes prices first) |
 | GET | `/api/portfolio/quotes` | Live prices and results for open lots; Yahoo is asked at most every 5 minutes |
 | GET | `/api/portfolio/chart-data` | Your symbols, first purchase per symbol, buy/sell markers, average cost |
+| GET | `/api/portfolio/outlook` | Next month's range and sell levels per open stock, and each lot's levels against its cost |
 | GET | `/portfolio/operations.csv`, `/portfolio/executions.csv` | Downloads: the operations table; the raw executions |
 
 Starting a job returns `202` with the job; a second job of the same kind while
@@ -151,6 +152,29 @@ left by fractional rounding are reported as a residue, not as a position.
 5-minute bar; the page refreshes them every five minutes (with a countdown) and
 the server asks Yahoo at most once per five minutes per stock, however many
 tabs are open. Prices are in the account's currency (USD).
+
+**Next month · sell levels (last column, open lots only).** For each stock
+you hold, the monitor's forecast engine simulates 2,000 possible next months
+(21 trading days) by resampling the stock's own past daily moves in blocks,
+**with the trend removed** — so it has no view on direction, only on how far
+the price usually travels:
+
+| Shown | How it is computed | How to read it |
+|---|---|---|
+| Range | Average of each simulated month's highest and lowest close | The typical top and bottom of the coming month |
+| Sell limit | Level reached at some point in half of the simulated months | A limit sell there has about an even chance of filling within a month |
+| Stop | Level reached in the weakest quarter of the simulated months | A protective exit hit only in the weaker months |
+| % vs cost | Each level against what that lot cost you (with commission) | Red when the limit would still sell at a loss |
+| Range held *n* of *m* | Walk-forward check: past months in which the real price ended inside the model's 80% band | Should be about 8 in 10; fewer means the stock moved more than its history suggested |
+
+Stocks with less than ~300 days of prices (recent listings) get a range but no
+back-test, and say so; under 60 days there is no outlook. Closing prices only:
+intraday swings are wider, so levels are touched somewhat more often than
+stated. Computed once per trading day per stock (`data/app/cache/market/outlook/`)
+and included in the CSV. These are statistical levels from past volatility —
+not a prediction of direction and not financial advice; the project's
+forecast tests found no reliable directional edge (see
+[monitoring.md](us_equities/monitoring.md)).
 
 **Charts.** One chart per stock you have traded, starting before your first
 purchase, with ▲ at each buy and ▼ at each sale, and your average cost as a
