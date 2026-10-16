@@ -29,7 +29,7 @@ SELLS = (FIX / "confirmation_sells.pdf").read_bytes()
 
 
 def _bars(n=520, start=100.0):
-    closes = start * (1.001 ** np.arange(n))
+    closes = start * np.exp(np.cumsum(np.random.default_rng(3).normal(0.0005, 0.02, n)))   # seeded random walk
     idx = pd.bdate_range(end=pd.Timestamp("2026-10-14"), periods=n)
     return pd.DataFrame({"open": closes, "high": closes * 1.01, "low": closes * 0.99, "close": closes,
                          "volume": 1e6}, index=idx)
@@ -212,3 +212,68 @@ def test_portfolio_chart_endpoints(client):
 def test_portfolio_writes_are_same_origin_only(client):
     r = client.post("/portfolio/clear", headers={"Origin": "https://evil.example"})
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Next month's range and sell levels
+# ---------------------------------------------------------------------------
+
+def _noisy(n=520, seed=1):
+    rng = np.random.default_rng(seed)
+    closes = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, n)))
+    idx = pd.bdate_range(end=pd.Timestamp("2026-10-14"), periods=n)
+    return pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes, "volume": 1e6}, index=idx)
+
+
+def test_month_outlook_levels_mean_what_they_say():
+    from trading_app.services.outlook import lot_levels, month_outlook
+
+    bars = _noisy()
+    o = month_outlook(bars, key="TEST")
+    last = bars["close"].iloc[-1]
+    assert o["status"] == "ok" and o["horizon_days"] == 21 and o["as_of"] == "2026-10-14"
+    assert o["low_p10"] < o["expected_low"] < last < o["expected_high"] < o["high_p90"]
+    assert o["stop"] < last < o["sell_limit"]
+    assert o["sell_limit_touch"] == pytest.approx(0.5, abs=0.01) and o["stop_touch"] == pytest.approx(0.25, abs=0.01)
+    assert o["validated_months"] and o["range_held_months"] <= o["validated_months"]
+    assert month_outlook(bars, key="TEST") == o                              # seeded: same answer every time
+    lv = lot_levels(o, cost_per_share=last)
+    assert lv["limit_vs_cost_pct"] > 0 > lv["stop_vs_cost_pct"] and lv["limit_above_cost"]
+    assert lot_levels(o, cost_per_share=o["sell_limit"] * 2)["limit_above_cost"] is False
+
+
+def test_month_outlook_is_honest_about_short_histories():
+    from trading_app.services.outlook import month_outlook
+
+    assert month_outlook(_noisy(40), key="NEW")["status"] == "insufficient_history"
+    short = month_outlook(_noisy(150), key="IPO")
+    assert short["status"] == "ok" and short["validated_months"] is None    # shown, but not back-tested
+
+
+def test_outlooks_are_computed_once_per_trading_day(wf, monkeypatch):
+    import trading_app.services.portfolio as pmod
+
+    calls = []
+    real = pmod.month_outlook
+    monkeypatch.setattr(pmod, "month_outlook", lambda bars, key: calls.append(key) or real(bars, key=key))
+    wf.portfolio.import_pdfs([("b.pdf", BUYS)])
+    first = wf.portfolio.outlooks()
+    again = wf.portfolio.outlooks()
+    assert sorted(calls) == ["AAPL", "BRK-B", "NVDA"] and first == again
+    assert set(first) == {"AAPL", "BRK.B", "NVDA"} and first["AAPL"]["status"] == "ok"
+
+
+def test_outlook_api_csv_and_column(client):
+    client.post("/portfolio/import", files=[("files", ("b.pdf", BUYS, "application/pdf")),
+                                            ("files", ("s.pdf", SELLS, "application/pdf"))])
+    res = client.get("/api/portfolio/outlook").json()
+    assert res["horizon_days"] == 21 and set(res["symbols"]) == {"AAPL", "BRK.B"}
+    lot = next(v for k, v in res["lots"].items() if k.startswith("AAPL|"))
+    assert set(lot) == {"limit_vs_cost_pct", "stop_vs_cost_pct", "limit_above_cost"}
+    rows = list(csv.DictReader(io.StringIO(client.get("/portfolio/operations.csv").text)))
+    aapl = next(r for r in rows if r["symbol"] == "AAPL" and r["status"] == "OPEN")
+    closed = next(r for r in rows if r["status"] == "CLOSED")
+    assert float(aapl["sell_limit"]) > float(aapl["stop"]) > 0 and aapl["outlook_as_of"] == "2026-10-14"
+    assert closed["sell_limit"] == "" and closed["next_month_low"] == ""
+    page = client.get("/portfolio").text
+    assert "Next month · sell levels" in page and page.count('js-outlook') == 2 and "not a" in page

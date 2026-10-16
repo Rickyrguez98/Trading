@@ -113,7 +113,7 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     def portfolio_operations_csv():
         pf = wf.portfolio
         view = pf.view()
-        body = pf.operations_csv(pf.rows(view, pf.quotes(view)))
+        body = pf.operations_csv(pf.rows(view, pf.quotes(view), pf.outlooks(view)))
         return _csv(body, f"portfolio_operations_{date.today():%Y%m%d}.csv")
 
     @app.get("/portfolio/executions.csv")
@@ -310,6 +310,18 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
                       "operations": [{k: r[k] for k in ("symbol", "buy_order", "current_price", "price_as_of",
                                                         "market_value", "pl", "return_pct")}
                                      for r in rows if r["status"] == "OPEN"]})
+
+    @app.get("/api/portfolio/outlook")
+    def api_portfolio_outlook():
+        """Next month's range and sell levels per open position, and per lot against its cost."""
+        pf = wf.portfolio
+        view = pf.view()
+        outlooks = pf.outlooks(view)
+        rows = pf.rows(view, {}, outlooks)
+        return clean({"horizon_days": 21, "symbols": outlooks,
+                      "lots": {f"{r['symbol']}|{r['buy_order']}": {k: r.get(k) for k in (
+                          "limit_vs_cost_pct", "stop_vs_cost_pct", "limit_above_cost")}
+                               for r in rows if r["status"] == "OPEN"}})
 
     @app.get("/api/portfolio/chart-data")
     def api_portfolio_chart_data():

@@ -33,7 +33,8 @@ from asset_selection.monitoring.ledger import (
     write_executions,
 )
 
-from .market import MarketData, normalize_symbol
+from .market import MarketData, MarketDataError, normalize_symbol
+from .outlook import lot_levels, month_outlook
 from .paths import Paths
 
 MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -163,8 +164,38 @@ class Portfolio:
         got = (self.market.quotes if live else self.market.cached_quotes)(list(symbols.values()))
         return {s: got[y] for s, y in symbols.items() if y in got}
 
+    # --------------------------------------------------------------- outlook
+    OUTLOOK_VERSION = 1
+
+    def outlooks(self, view: Optional[LedgerView] = None) -> Dict[str, Dict[str, Any]]:
+        """Next month's range and sell levels per open position (ledger symbol), one per trading day."""
+        view = view or self.view()
+        out: Dict[str, Dict[str, Any]] = {}
+        for symbol in view.open_symbols:
+            y = normalize_symbol(symbol)
+            try:
+                bars = self.market.bars(y)
+            except MarketDataError as exc:
+                out[symbol] = {"status": "error", "error": str(exc)}
+                continue
+            as_of = bars.index[-1].strftime("%Y-%m-%d")
+            path = self.market.cache_dir / "outlook" / f"{y}.json"
+            try:
+                cached = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached = None
+            if cached and cached.get("as_of") == as_of and cached.get("version") == self.OUTLOOK_VERSION:
+                out[symbol] = cached
+                continue
+            result = {**month_outlook(bars, key=y), "version": self.OUTLOOK_VERSION}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(result), encoding="utf-8")
+            out[symbol] = result
+        return out
+
     # ------------------------------------------------------------------ rows
-    def rows(self, view: LedgerView, quotes: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def rows(self, view: LedgerView, quotes: Dict[str, Dict[str, Any]],
+             outlooks: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         names = {s: (self.market.cached_meta(s).get("name") or None) for s in {o.symbol for o in view.operations}}
         out = []
         for op in view.operations:
@@ -188,6 +219,10 @@ class Portfolio:
                                return_pct=((value / op.cost - 1) * 100) if op.cost else None)
                 else:
                     row["pl"] = row["return_pct"] = None
+                ol = (outlooks or {}).get(op.symbol)
+                if ol is not None:
+                    row["outlook"] = ol
+                    row.update(lot_levels(ol, (op.cost or 0.0) / op.shares if op.shares else None))
             out.append(row)
         return out
 
@@ -238,11 +273,18 @@ class Portfolio:
         cols = ["symbol", "name", "status", "shares", "buy_date", "buy_price", "cost", "sell_date", "sell_price",
                 "proceeds", "current_price", "price_as_of", "market_value", "pl", "return_pct", "holding_days",
                 "currency", "buy_order", "sell_order", "note"]
+        outlook_cols = ["next_month_low", "next_month_high", "sell_limit", "sell_limit_vs_cost_pct",
+                        "stop", "stop_vs_cost_pct", "outlook_as_of", "range_held_months", "validated_months"]
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
-        w.writerow(cols)
+        w.writerow(cols + outlook_cols)
         for r in rows:
-            w.writerow([csv_safe(_cell(r.get(c))) for c in cols])
+            ol = r.get("outlook") or {}
+            ok = ol.get("status") == "ok"
+            extra = [ol.get("expected_low"), ol.get("expected_high"), ol.get("sell_limit"),
+                     r.get("limit_vs_cost_pct"), ol.get("stop"), r.get("stop_vs_cost_pct"), ol.get("as_of"),
+                     ol.get("range_held_months"), ol.get("validated_months")] if ok else [None] * len(outlook_cols)
+            w.writerow([csv_safe(_cell(r.get(c))) for c in cols] + [csv_safe(_cell(v)) for v in extra])
         return buf.getvalue()
 
     def executions_csv(self) -> str:

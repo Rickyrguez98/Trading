@@ -9,6 +9,17 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Added — next month's range and sell levels on the portfolio
+- The operations table gets a last column for every lot still held: the
+  expected range for the next month (average simulated high and low), a sell
+  limit reached in about half of the simulated months, and a stop reached in
+  about a quarter of them, each also shown against what that lot cost. Built
+  on the monitor's demeaned block bootstrap (2,000 paths, 21 trading days), so
+  it describes volatility, not direction, and the page says so. Each stock's
+  range is back-tested walk-forward ("range held n of m past months");
+  recent listings are shown as not back-tested. Also in the CSV and at
+  `/api/portfolio/outlook`; computed once per trading day.
+
 ### Added — portfolio from trade confirmations
 - **Portfolio page.** Import any number of trade confirmation PDFs at once
   (GBM's US-dollar account, issued by DriveWealth). Every trade line is read
