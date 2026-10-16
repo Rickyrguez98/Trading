@@ -7,7 +7,7 @@ any interface and is tested without a server.
 from __future__ import annotations
 
 import shutil
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,14 +18,16 @@ from . import commands, status
 from .commands import InvalidRequest
 from .jobs import Job, JobConflict, JobManager
 from .market import (
-    BENCHMARK, MarketData, MarketDataError, chart_payload, clean, generated_at, normalize_symbol, sector_payload,
+    BENCHMARK, DISPLAY_DAYS, MarketData, MarketDataError, chart_payload, clean, generated_at, normalize_symbol,
+    sector_payload,
 )
 from .paths import STRATEGIES, Paths, default_paths
+from .portfolio import Portfolio, PortfolioError
 from .settings import AppSettings, load_settings, save_settings
 
 __all__ = [
-    "InvalidRequest", "Job", "JobConflict", "MarketDataError", "Paths", "STRATEGIES", "WATCHLIST_MAX",
-    "Workflow", "default_paths",
+    "InvalidRequest", "Job", "JobConflict", "MarketDataError", "Paths", "Portfolio", "PortfolioError", "STRATEGIES",
+    "WATCHLIST_MAX", "Workflow", "default_paths",
 ]
 
 ALLOWED_UPLOADS = {".csv", ".pdf"}
@@ -40,6 +42,7 @@ class Workflow:
         self.paths = paths or default_paths()
         self.jobs = jobs or JobManager(self.paths.jobs_dir, cwd=self.paths.root)
         self.market = market or MarketData(self.paths.app_dir / "cache" / "market")
+        self.portfolio = Portfolio(self.paths, self.market)
 
     # -- settings -------------------------------------------------------
     @property
@@ -142,7 +145,14 @@ class Workflow:
         saved = self.settings.watchlist
         if saved is not None:
             return list(saved)
-        return status.default_watchlist(self.paths, self.settings, WATCHLIST_DEFAULT_SIZE)
+        return status.default_watchlist(self.paths, self.settings, WATCHLIST_DEFAULT_SIZE,
+                                        owned=self.owned_symbols(), limit=WATCHLIST_MAX)
+
+    def owned_symbols(self) -> List[str]:
+        """Open positions from your imported trade confirmations, as Yahoo symbols."""
+        if not self.portfolio.ledger_path.exists():
+            return []
+        return [normalize_symbol(s) for s in self.portfolio.view().open_symbols]
 
     def add_to_watchlist(self, raw: str) -> List[str]:
         symbol = _symbol(raw)
@@ -173,21 +183,26 @@ class Workflow:
         save_settings(self.paths, s)
         return list(s.watchlist)
 
-    def market_chart(self, raw: str) -> Dict[str, Any]:
-        """One stock: a year of candles, indicators, Fibonacci levels and statistics."""
+    def market_chart(self, raw: str, since: Optional[date] = None) -> Dict[str, Any]:
+        """One stock: a year of candles (or back to ``since``), indicators, Fibonacci levels, statistics."""
         symbol = _symbol(raw)
-        payload = chart_payload(symbol, self.market.bars(symbol))
+        days = DISPLAY_DAYS
+        start = None
+        if since is not None:
+            days = max(DISPLAY_DAYS, (date.today() - since).days + 30)
+            start = since - timedelta(days=330)          # the SMA200 needs ~200 trading days before
+        payload = chart_payload(symbol, self.market.bars(symbol, start), days=days)
         meta = self.market.meta(symbol, status.ranking_meta(self.paths))
         payload.update(sector=meta.get("sector"), name=status.short_name(meta.get("name")))
         return clean(payload)
 
-    def market_sectors(self) -> Dict[str, Any]:
-        """The watchlist grouped by sector, each against the S&P 500."""
+    def market_sectors(self, symbols: Optional[List[str]] = None) -> Dict[str, Any]:
+        """The watchlist (or the given symbols) grouped by sector, each against the S&P 500."""
         known = status.ranking_meta(self.paths)
         groups: Dict[str, Dict[str, Any]] = {}
         names: Dict[str, Optional[str]] = {}
         errors: Dict[str, str] = {}
-        for symbol in self.watchlist():
+        for symbol in ([_symbol(s) for s in symbols][:WATCHLIST_MAX * 2] if symbols else self.watchlist()):
             try:
                 frame = self.market.bars(symbol)
             except MarketDataError as exc:
@@ -216,7 +231,8 @@ class Workflow:
             "ranking": status.ranking_info(self.paths),
             "plans": status.plan_infos(self.paths),
             "broker": status.broker_status(self.paths, s),
-            "holdings": len(status.holdings_symbols(self.paths, s)),
+            "holdings": len(self.owned_symbols()) or len(status.holdings_symbols(self.paths, s)),
+            "holdings_source": "trade confirmations" if self.owned_symbols() else "holdings file",
             "monitor": status.latest_monitor(self.paths, self.jobs),
             "jobs": self.jobs.list(limit=8),
         }

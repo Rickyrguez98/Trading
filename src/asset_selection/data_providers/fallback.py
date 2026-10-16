@@ -190,6 +190,12 @@ class FallbackNewsProvider(_FallbackMixin, NewsProvider):
         _FallbackMixin.__init__(self, providers, **kw)
         NewsProvider.__init__(self, cache=getattr(providers[0], "cache", None))
 
+    def use_company_names(self, names) -> None:
+        for provider in self.providers:
+            hook = getattr(provider, "use_company_names", None)
+            if hook is not None:
+                hook(names)
+
     def fetch(self, ticker: str, max_age_days: int = 30) -> List[NewsItem]:
         last_exc: Optional[BaseException] = None
         for idx, provider in enumerate(self.providers):

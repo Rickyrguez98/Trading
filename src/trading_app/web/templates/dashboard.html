@@ -33,12 +33,16 @@
       <span class="value">—</span><span class="meta">Three risk levels from the ranking</span>
     {% endif %}
   </a>
-  <a class="kpi" href="/broker">
+  <a class="kpi" href="{{ '/portfolio' if d.holdings_source == 'trade confirmations' else '/broker' }}">
     <span class="label">3 · Holdings</span>
     <span class="value">{{ d.holdings }} position{{ 's' if d.holdings != 1 }}</span>
+    {% if d.holdings_source == 'trade confirmations' %}
+      <span class="meta">from your trade confirmations · <span class="badge gold">portfolio</span></span>
+    {% else %}
     {% for o in d.broker.options if o.selected %}
       <span class="meta">Broker option {{ o.code }} <span class="badge {{ 'ok' if o.ready else 'warn' }}">{{ 'ready' if o.ready else 'not ready' }}</span></span>
     {% endfor %}
+    {% endif %}
   </a>
   <a class="kpi" href="/monitor">
     <span class="label">4 · Monitor</span>
@@ -69,7 +73,7 @@
       <input id="wl-input" name="symbol" maxlength="16" placeholder="Add a ticker: AAPL, BRK.B, WALMEX.MX" aria-label="Ticker to add">
       <button class="btn" type="submit">Add</button>
     </form>
-    <button class="btn ghost small" type="button" id="wl-reset" title="Back to your holdings plus the top of the ranking">Reset</button>
+    <button class="btn ghost small" type="button" id="wl-reset" title="Back to your own stocks plus the top of the ranking">Reset</button>
   </div>
 
   <div class="toggles" id="ind-toggles">

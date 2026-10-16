@@ -57,10 +57,32 @@ gaps; we document them rather than paper over them.
 
 ## News
 
-Three backends, in descending order of reliability. The shipped config chains
-the first two: `news: [finnhub, yahoo_rss]`.
+Four backends. The shipped config chains three of them:
+`news: [newsapi_ai, finnhub, yahoo_rss]` — a provider without its key is
+skipped before any request, so the chain always ends at the keyless feed.
 
-### Default: `finnhub` — documented company-news API (recommended)
+### First in the chain: `newsapi_ai` — NewsAPI.ai / Event Registry (key required)
+- Endpoint: `POST https://eventregistry.org/api/v1/article/getArticles`
+  (`resultType: articles`). The key goes in the JSON body (`apiKey`), so it
+  never appears in a URL, log line or cache key. Put it in `.env` as
+  `NEWSAPI_AI_KEY` (newsapi.ai → Dashboard → "Your API key").
+- Searches English **headlines** for the company's name as the ranking spells
+  it, with the corporate suffixes removed (`Palantir Technologies Inc.` →
+  `Palantir`); falls back to the ticker when no name is known. Last 30 days,
+  wire-story duplicates skipped, newest first, up to 50 articles.
+- **Token budget.** The free plan has 2,000 tokens and a search of the last
+  month costs one; a full selection run makes about 150 searches. Answers are
+  cached for 24 hours and a run stops calling after `NEWSAPI_AI_MAX_CALLS`
+  searches (default 200), after which the chain continues with the next
+  provider and one warning says so.
+- Returns real publishers (`source.title`), so source diversity is genuine.
+- **Verification status:** the request it sends and its handling of answers,
+  error payloads, HTTP errors, a missing key and the budget are tested against
+  a stubbed HTTP layer. Live responses have not been exercised in this
+  repository (that needs a personal key and spends tokens); the field names
+  follow Event Registry's published article model.
+
+### `finnhub` — documented company-news API
 - Endpoint: `GET https://finnhub.io/api/v1/company-news?symbol=<SYM>&from=&to=`
 - **Requires a free key in `FINNHUB_API_KEY`** (https://finnhub.io/register).
   The key is sent in the `X-Finnhub-Token` **header**, never as a query
@@ -112,7 +134,7 @@ providers:
   news: finnhub
 robustness:
   provider_priority_by_data_type:
-    news: [finnhub, yahoo_rss]     # the shipped default
+    news: [newsapi_ai, finnhub, yahoo_rss]     # the shipped default
 ```
 
 ### Deliberately not implemented
@@ -167,6 +189,7 @@ Every provider call goes through a shared throttle
 | Yahoo prices + fundamentals (`yfinance`, shared) | 0.4 s | pause 30 s, 60 s, 120 s, 240 s, 300 s, then continue | wait 10 min, then continue with the same ticker (none is skipped); after 3 such waits in a row with no success (~1 h), stop waiting and report the rest as rate-limited |
 | Yahoo news feed (`yahoo_rss`) | 2 s | pause 5 s | after 2 in a row: paused 10 min, its calls skipped |
 | Finnhub | 1.1 s (free plan: 60/min) | pause 15–60 s | after 4 in a row: paused 5 min |
+| NewsAPI.ai (`newsapi_ai`) | 0.5 s (plan is a token budget) | pause 10–60 s | after 3 in a row: paused 5 min |
 
 A `Retry-After` header is always honoured when the server sends one. Pauses
 are shared, so the health check and every pipeline stage wait out the same

@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block title %}Portfolio{% endblock %}
+{% block content %}
+{% set s = summary %}
+<section class="hero">
+  <div>
+    <div class="eyebrow">My portfolio · from your trade confirmations</div>
+    <h1>Portfolio review</h1>
+    <p class="sub">Every buy and sell read from your broker's confirmation PDFs, matched first in, first out: what
+      each purchase cost, what it was sold for, and what the shares you still hold are worth now. Prices of open
+      positions refresh every five minutes.</p>
+  </div>
+</section>
+
+<details class="card import" {{ 'open' if not rows }}>
+  <summary>{{ 'Import your trade confirmations' if not rows else 'Import more confirmations' }}</summary>
+  <p class="cc-name">Select or drop as many confirmation PDFs as you like (GBM US-dollar account, issued by
+    DriveWealth: <code>Confirm_GBMP_….pdf</code>). Files already imported are recognised and skipped, so you can
+    simply upload the whole folder again each month.</p>
+  <form method="post" action="/portfolio/import" enctype="multipart/form-data" class="dropzone" id="dropzone">
+    <input type="file" name="files" id="pdf-files" accept="application/pdf,.pdf" multiple required>
+    <label for="pdf-files" class="drop-label"><strong>Choose PDFs</strong> or drop them here
+      <span class="cc-name" id="pdf-count"></span></label>
+    <button class="btn" type="submit">Import</button>
+  </form>
+  {% if last_import %}
+  <details class="sub-details">
+    <summary>Last import · {{ last_import.at[:16]|replace('T', ' ') }} UTC · {{ last_import.added }} new,
+      {{ last_import.duplicates }} already imported, {{ last_import.files|length }} file(s)</summary>
+    <div class="table-wrap"><table>
+      <tr><th>File</th><th class="num">Trades</th><th class="num">New</th><th class="num">Skipped</th><th>Result</th></tr>
+      {% for f in last_import.files %}
+      <tr><td>{{ f.name }}</td><td class="num">{{ f.trades }}</td><td class="num">{{ f.added }}</td>
+        <td class="num">{{ f.duplicates }}</td>
+        <td class="wrap">{% if f.error %}<span class="badge bad">not read</span> {{ f.error }}
+          {% elif f.warnings %}<span class="badge warn">check</span> {{ f.warnings|join('; ') }}
+          {% else %}<span class="badge ok">ok</span>{% endif %}</td></tr>
+      {% endfor %}
+    </table></div>
+  </details>
+  {% endif %}
+</details>
+
+{% if rows %}
+<div class="kpis" id="pf-kpis">
+  <div class="kpi">
+    <span class="label">Open positions</span>
+    <span class="value">{{ s.open_positions }}</span>
+    <span class="meta">cost {{ s.cost_open|usd }} · {{ s.open_lots }} lot{{ 's' if s.open_lots != 1 }}</span>
+  </div>
+  <div class="kpi">
+    <span class="label">Market value</span>
+    <span class="value" id="kpi-value">{{ s.market_value|usd if s.market_value is not none else '…' }}</span>
+    <span class="meta" id="kpi-unreal">{% if s.unrealized_pl is not none %}<span class="{{ 'pos' if s.unrealized_pl >= 0 else 'neg' }}">{{ s.unrealized_pl|usd(signed=True) }} · {{ s.unrealized_pct|pct(1, True) }}</span> if sold now{% else %}loading prices…{% endif %}</span>
+  </div>
+  <div class="kpi">
+    <span class="label">Realized P/L</span>
+    <span class="value {{ 'pos' if s.realized_pl >= 0 else 'neg' }}">{{ s.realized_pl|usd(signed=True) }}</span>
+    <span class="meta">{{ s.closed_trades }} closed · {{ s.wins }} gain{{ 's' if s.wins != 1 }}, {{ s.losses }} loss{{ 'es' if s.losses != 1 }}</span>
+  </div>
+  <div class="kpi">
+    <span class="label">Total P/L</span>
+    <span class="value" id="kpi-total">{{ s.total_pl|usd(signed=True) if s.unrealized_pl is not none else '…' }}</span>
+    <span class="meta">realized + open · commissions paid {{ s.commissions|usd }}</span>
+  </div>
+</div>
+<p class="fine" id="quote-status">Prices of open positions: loading…</p>
+
+<section id="markets" data-mode="portfolio">
+  <div class="section-head">
+    <div>
+      <h2>My stocks</h2>
+      <p class="sub">Daily prices since before your first purchase; ▲ marks a buy and ▼ a sale, and the dashed line is
+        your average cost in a position you still hold.</p>
+    </div>
+    <div class="seg" role="group" aria-label="Chart view">
+      <button type="button" data-view="stock" class="on">By stock</button>
+      <button type="button" data-view="sector">By sector</button>
+    </div>
+  </div>
+  <div class="toggles" id="ind-toggles">
+    <label class="tog"><input type="checkbox" data-ind="sma" checked><span class="sw sma50"></span>SMA 50 / 200</label>
+    <label class="tog"><input type="checkbox" data-ind="bb" checked><span class="sw bb"></span>Bollinger bands (20, 2σ)</label>
+    <label class="tog"><input type="checkbox" data-ind="fib" checked><span class="sw fib"></span>Fibonacci retracement</label>
+    <label class="tog"><input type="checkbox" data-ind="vol" checked><span class="sw vol"></span>Volume</label>
+    <label class="tog"><input type="checkbox" data-ind="rsi" checked><span class="sw rsi"></span>RSI (14)</label>
+  </div>
+  <div class="note bad" id="wl-msg" hidden></div>
+  <div class="chart-grid" id="chart-grid"></div>
+</section>
+
+<div class="section-head">
+  <div>
+    <h2>My operations</h2>
+    <p class="sub">One row per purchase lot. A lot sold in parts appears once per sale. Amounts in
+      {{ s.currency }} and include commissions; open lots show today's price and the result if sold now
+      (before the sale's commission).</p>
+  </div>
+  <div class="actions">
+    <a class="btn" href="/portfolio/operations.csv" download>Download CSV</a>
+    <a class="btn ghost" href="/portfolio/executions.csv" download>Raw executions CSV</a>
+  </div>
+</div>
+
+<div class="table-wrap ops"><table id="ops">
+  <thead><tr>
+    <th>Stock</th><th class="num">Shares</th><th>Bought</th><th class="num">Buy price</th>
+    <th>Sold</th><th class="num">Sell / now price</th><th class="num">Gain / loss</th><th class="num">Return</th>
+    <th class="num">Days</th>
+  </tr></thead>
+  <tbody>
+  {% for sym, items in rows|groupby('symbol') %}
+    {% for r in items %}
+    <tr class="{{ r.status|lower }}{{ ' first' if loop.first }}"
+        {% if r.status == 'OPEN' %}data-open="{{ r.symbol }}|{{ r.buy_order }}" data-shares="{{ r.shares }}" data-cost="{{ r.cost }}"{% endif %}>
+      {% if loop.first %}<td class="stock" rowspan="{{ items|length }}"><strong>{{ r.symbol }}</strong><div class="cc-name">{{ r.name }}</div></td>{% endif %}
+      <td class="num">{{ r.shares|qty }}</td>
+      <td>{% if r.status == 'UNMATCHED_SELL' %}<span class="badge warn" title="{{ r.note }}">purchase not imported</span>{% else %}{{ r.buy_date }}{% endif %}</td>
+      <td class="num">{{ r.buy_price|price if r.buy_price is not none else '—' }}
+        {% if r.cost is not none %}<div class="cc-name">cost {{ r.cost|usd }}</div>{% endif %}</td>
+      {% if r.status == 'OPEN' %}
+        <td><span class="badge gold">Open</span></td>
+        <td class="num"><span class="js-price">{{ r.current_price|price if r.current_price is not none else '…' }}</span>
+          <div class="cc-name">value <span class="js-value">{{ r.market_value|usd if r.market_value is not none else '…' }}</span></div></td>
+      {% else %}
+        <td>{{ r.sell_date }}</td>
+        <td class="num">{{ r.sell_price|price }}<div class="cc-name">received {{ r.proceeds|usd }}</div></td>
+      {% endif %}
+      {% set tone = '' if r.pl is none else ('pos' if r.pl >= 0 else 'neg') %}
+      <td class="num js-pl {{ tone }}">{{ r.pl|usd(signed=True) if r.pl is not none else ('?' if r.status == 'UNMATCHED_SELL' else '…') }}</td>
+      <td class="num js-ret {{ tone }}">{{ r.return_pct|pct(2, True) if r.return_pct is not none else '—' }}</td>
+      <td class="num">{{ r.holding_days if r.holding_days is not none else '—' }}</td>
+    </tr>
+    {% endfor %}
+  {% endfor %}
+  </tbody>
+  <tfoot><tr>
+    <td>Total</td><td></td><td></td><td class="num">{{ s.cost_open|usd }}<div class="cc-name">open cost</div></td>
+    <td></td><td class="num" id="tot-value">{{ s.market_value|usd if s.market_value is not none else '…' }}<div class="cc-name">open value</div></td>
+    <td class="num" id="tot-pl"><span class="{{ 'pos' if s.total_pl >= 0 else 'neg' }}">{{ s.total_pl|usd(signed=True) }}</span><div class="cc-name">realized + open</div></td>
+    <td></td><td></td>
+  </tr></tfoot>
+</table></div>
+
+{% if view.warnings %}
+<div class="note warn"><strong>Worth knowing:</strong>
+  <ul class="ev">{% for w in view.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>
+{% endif %}
+
+<div class="grid pf-actions">
+  <div class="card">
+    <h3>Use these positions in the monitor</h3>
+    <p>Writes your {{ s.open_lots }} open lot(s) to <code>{{ holdings_csv }}</code> (broker option B) so step 4 can
+      review them. The current file is backed up first.</p>
+    <form method="post" action="/portfolio/use-as-holdings"><button class="btn ghost">Use as my holdings</button></form>
+  </div>
+  <div class="card">
+    <h3>Start over</h3>
+    <p>Clears the imported history ({{ s.executions }} executions, {{ s.orders }} orders since {{ s.first_trade }}).
+      The file is kept as a dated backup, not deleted.</p>
+    <form method="post" action="/portfolio/clear" onsubmit="return confirm('Clear the imported trade history? A backup copy is kept.')">
+      <button class="btn ghost danger">Clear history</button></form>
+  </div>
+</div>
+{% else %}
+<div class="empty">No trades yet. Import your confirmation PDFs above to see your positions, the result of every
+  sale, live prices and charts of your stocks.</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var input = document.getElementById("pdf-files"), zone = document.getElementById("dropzone"),
+      count = document.getElementById("pdf-count");
+  if (!input) return;
+  function show() { count.textContent = input.files.length ? " · " + input.files.length + " file(s) selected" : ""; }
+  input.addEventListener("change", show);
+  ["dragenter", "dragover"].forEach(function (t) { zone.addEventListener(t, function (e) { e.preventDefault(); zone.classList.add("over"); }); });
+  ["dragleave", "drop"].forEach(function (t) { zone.addEventListener(t, function (e) { e.preventDefault(); zone.classList.remove("over"); }); });
+  zone.addEventListener("drop", function (e) {
+    var dt = new DataTransfer();
+    Array.prototype.forEach.call(e.dataTransfer.files, function (f) { if (/\.pdf$/i.test(f.name)) dt.items.add(f); });
+    input.files = dt.files; show();
+  });
+})();
+</script>
+{% if rows %}
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/portfolio.js"></script>
+{% endif %}
+{% endblock %}

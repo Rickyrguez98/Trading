@@ -1,7 +1,12 @@
 """News providers.
 
-Three backends, in descending order of reliability:
+Four backends, in descending order of reliability:
 
+* ``newsapi_ai`` -- NewsAPI.ai (Event Registry), a **documented commercial
+  API** with a free plan (2,000 tokens; one recent-news search costs one
+  token). Needs a key in ``NEWSAPI_AI_KEY``. Answers are cached for a day and
+  calls are capped per run, so a full run (about 150 searches) cannot drain
+  the plan unnoticed.
 * ``finnhub`` -- a **documented public API** whose terms permit programmatic
   access. Needs a free API key in ``FINNHUB_API_KEY``. This is the only
   backend here that is explicitly licensed for automated use, so it is the
@@ -29,8 +34,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -413,6 +419,166 @@ class FinnhubNewsProvider(NewsProvider):
         self._cache_set(cache_id, [it.__dict__ for it in items])
         return items
 
+
+
+# ---------------------------------------------------------------------------
+# NewsAPI.ai (Event Registry) -- documented API, free plan, requires a key
+# ---------------------------------------------------------------------------
+
+_NAME_SUFFIX = re.compile(
+    r"(\s+-\s+.*$|,?\s+(inc|inc\.|incorporated|corp|corp\.|corporation|co|co\.|company|ltd|ltd\.|limited|plc|"
+    r"n\.v\.|s\.a\.|ag|sa|holdings?|group|class [a-c]|common stock|ordinary shares?|technologies|technology|"
+    r"platforms|systems|enterprises|international|industries|software|financial|the)\.?)$",
+    re.IGNORECASE,
+)
+
+
+def search_name(company_name: Optional[str]) -> Optional[str]:
+    """What a headline calls the company: ``Palantir Technologies Inc. - Common Stock`` -> ``Palantir``."""
+    name = re.sub(r"\s+", " ", str(company_name or "")).strip()
+    for _ in range(6):
+        stripped = _NAME_SUFFIX.sub("", name).strip(" ,.")
+        if not stripped or stripped == name:
+            break
+        name = stripped
+    return name or None
+
+
+class NewsApiAiProvider(NewsProvider):
+    """Company news from NewsAPI.ai / Event Registry (``/api/v1/article/getArticles``).
+
+    Searches English news headlines for the company's name (from the
+    ranking), or for the ticker when no name is known, over the last
+    ``max_age_days`` (at most 31, which keeps every search at one token).
+    Duplicated wire stories are skipped. The key travels in the JSON body of a
+    POST, so it never appears in a URL, a log line or a cache key.
+
+    The free plan is small (2,000 tokens), so: answers are cached for 24 hours,
+    and a run stops calling after ``NEWSAPI_AI_MAX_CALLS`` searches (default
+    200) -- after that this provider reports itself unavailable and a chain
+    falls through to the next news source, rather than spending the plan.
+    """
+
+    name = "newsapi_ai"
+    API_URL = "https://eventregistry.org/api/v1/article/getArticles"
+    ENV_KEY = "NEWSAPI_AI_KEY"
+    ENV_BUDGET = "NEWSAPI_AI_MAX_CALLS"
+    cache_ttl_seconds = 24 * 3600
+    _TIMEOUT = 30
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._warned = set()
+        self.calls = 0
+        self.company_names: Dict[str, str] = {}
+
+    def use_company_names(self, names: Dict[str, Any]) -> None:
+        """Ticker -> company name, so searches use what headlines actually say."""
+        self.company_names.update({str(k).upper(): str(v) for k, v in names.items() if v and str(v) != "nan"})
+
+    def _budget(self) -> int:
+        try:
+            return max(0, int(os.environ.get(self.ENV_BUDGET) or 200))
+        except ValueError:
+            return 200
+
+    def _api_key(self) -> str:
+        key = (os.environ.get(self.ENV_KEY) or "").strip()
+        if not key:
+            if "key" not in self._warned:
+                self._warned.add("key")
+                logger.warning("news provider %r is selected but %s is not set; skipping it.",
+                               self.name, self.ENV_KEY)
+            raise NewsProviderNotConfigured(f"{self.name} news provider requires {self.ENV_KEY} to be set")
+        return key
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
+    def _download(self, keyword: str, max_age_days: int) -> List[Dict[str, Any]]:
+        import requests
+
+        key = self._api_key()
+        today = datetime.now(timezone.utc).date()
+        body = {
+            "apiKey": key,
+            "resultType": "articles",
+            "keyword": keyword,
+            "keywordLoc": "title",
+            "lang": "eng",
+            "dateStart": (today - timedelta(days=min(int(max_age_days), 31))).isoformat(),
+            "dateEnd": today.isoformat(),
+            "forceMaxDataTimeWindow": 31,
+            "isDuplicateFilter": "skipDuplicates",
+            "articlesSortBy": "date",
+            "articlesCount": 50,
+            "articleBodyLen": 300,
+            "dataType": ["news"],
+        }
+        self.rate_limiter.acquire()
+        resp = requests.post(self.API_URL, json=body, headers={"Accept": "application/json"},
+                             timeout=self._TIMEOUT)
+        _raise_for_status(resp)
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"newsapi_ai returned {type(payload).__name__}, expected a JSON object")
+        if payload.get("error"):
+            # Bad key, plan exhausted, malformed query: a provider failure, never "no news".
+            raise RuntimeError(f"newsapi_ai returned an error: {str(payload.get('error'))[:200]}")
+        results = (payload.get("articles") or {}).get("results")
+        if not isinstance(results, list):
+            raise RuntimeError("newsapi_ai answer has no articles.results list")
+        return [row for row in results if isinstance(row, dict)]
+
+    def fetch(self, ticker: str, max_age_days: int = 30) -> List[NewsItem]:
+        ticker = ticker.strip().upper()
+        keyword = search_name(self.company_names.get(ticker)) or ticker
+        cache_id = f"{ticker}:{keyword}:{max_age_days}"
+        cached = self._cache_get(cache_id)
+        if cached is not None:
+            return [NewsItem(**row) for row in cached]
+        self._api_key()                                   # fail fast, before counting a call
+        if self.calls >= self._budget():
+            if "budget" not in self._warned:
+                self._warned.add("budget")
+                logger.warning("newsapi_ai: %d searches this run reached %s; the rest use the next news "
+                               "source (raise the limit to spend more of the plan)", self.calls, self.ENV_BUDGET)
+            raise NewsProviderNotConfigured(f"{self.name}: per-run search budget reached")
+        self.calls += 1
+        raw = get_throttle(self.name).call(self._download, keyword, max_age_days)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        now_iso = self._now_iso()
+        items: List[NewsItem] = []
+        for entry in raw:
+            headline = str(entry.get("title") or "").strip()
+            if not headline:
+                continue
+            published = _parse_iso(entry.get("dateTimePub") or entry.get("dateTime"))
+            if published is not None and published < cutoff:
+                continue
+            source = entry.get("source") or {}
+            items.append(NewsItem(
+                ticker=ticker,
+                headline=headline,
+                summary=str(entry.get("body") or "").strip() or None,
+                source=(str(source.get("title") or source.get("uri") or "").strip() or None)
+                if isinstance(source, dict) else None,
+                url=str(entry.get("url") or "").strip() or None,
+                published_at=published.isoformat() if published else None,
+                retrieved_at=now_iso,
+            ))
+        self._cache_set(cache_id, [it.__dict__ for it in items])
+        return items
+
+
+def _parse_iso(value: Any) -> "datetime | None":
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _raise_for_status(resp: Any) -> None:

@@ -16,6 +16,7 @@ from .fallback import (
 from .fundamentals_provider import YFinanceFundamentalsProvider
 from .news_provider import (
     FinnhubNewsProvider,
+    NewsApiAiProvider,
     NewsProviderNotConfigured,
     YahooRssNewsProvider,
     YFinanceNewsProvider,
@@ -34,6 +35,7 @@ _PRICES_REGISTRY: dict[str, Type[PricesProvider]] = {
 }
 
 _NEWS_REGISTRY: dict[str, Type[NewsProvider]] = {
+    "newsapi_ai": NewsApiAiProvider,     # documented API (Event Registry), needs NEWSAPI_AI_KEY
     "finnhub": FinnhubNewsProvider,      # documented API, needs FINNHUB_API_KEY
     "yahoo_rss": YahooRssNewsProvider,   # keyless, best-effort (see provider docstring)
     "yfinance": YFinanceNewsProvider,    # retired upstream endpoint; returns no news

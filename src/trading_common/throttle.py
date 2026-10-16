@@ -216,6 +216,9 @@ DEFAULT_POLICIES: Dict[str, ThrottlePolicy] = {
     # News is best-effort context: a blocked feed is paused quickly instead of
     # costing ~7s of retries per ticker.
     "yahoo_rss": ThrottlePolicy(base_pause=5.0, max_pause=30.0, give_up_after=2, cooldown=600.0),
+    # NewsAPI.ai: a 429 is rare (the limit is a token budget); pause briefly, then give up quickly.
+    "newsapi_ai": ThrottlePolicy(base_pause=10.0, max_pause=60.0, give_up_after=3, cooldown=300.0,
+                                 max_retry_after=120.0),
     # Finnhub's free plan limits calls per minute, so a pause of a minute clears it.
     "finnhub": ThrottlePolicy(base_pause=15.0, max_pause=60.0, give_up_after=4, cooldown=300.0,
                               max_retry_after=120.0),

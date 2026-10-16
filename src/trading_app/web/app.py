@@ -9,22 +9,24 @@ Nothing here places orders or accepts broker credentials.
 from __future__ import annotations
 
 import importlib.util
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import Undefined
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..services import (
-    STRATEGIES, WATCHLIST_MAX, InvalidRequest, JobConflict, MarketDataError, Workflow, safe_init_holdings, status,
+    STRATEGIES, WATCHLIST_MAX, InvalidRequest, JobConflict, MarketDataError, PortfolioError, Workflow,
+    safe_init_holdings, status,
 )
 from ..services.jobs import Job, selection_progress
+from ..services.market import QUOTE_TTL, clean
 
 HERE = Path(__file__).resolve().parent
 LOCAL_HOSTS = ["127.0.0.1", "localhost", "testserver"]
@@ -39,7 +41,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=LOCAL_HOSTS)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
     templates = Jinja2Templates(directory=str(HERE / "templates"))
-    templates.env.filters.update(money=_money, pct=_pct, num=_num, short=status.short_name)
+    templates.env.filters.update(money=_money, pct=_pct, num=_num, short=status.short_name, usd=_usd, price=_price,
+                                 qty=_qty)
     app.state.workflow = wf
 
     @app.middleware("http")
@@ -71,6 +74,51 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     def dashboard(request: Request):
         now = datetime.now()
         return page(request, "dashboard.html", d=wf.dashboard(), today=f"{now.day} {now:%B %Y}")
+
+    @app.get("/portfolio", response_class=HTMLResponse)
+    def portfolio(request: Request):
+        pf = wf.portfolio
+        view = pf.view()
+        rows = pf.rows(view, pf.quotes(view, live=False))     # cached prices only: the page renders at once
+        return page(request, "portfolio.html", view=view, rows=rows, summary=pf.summary(view, rows),
+                    last_import=pf.last_import(), holdings_csv=wf.settings.holdings_csv)
+
+    @app.post("/portfolio/import")
+    async def portfolio_import(files: List[UploadFile] = File(...)):
+        batch = [(f.filename or "upload.pdf", await f.read()) for f in files if f is not None]
+        try:
+            result = wf.portfolio.import_pdfs(batch)
+        except PortfolioError as exc:
+            return back("/portfolio", error=str(exc))
+        if result.failed and not result.added and not result.duplicates:
+            return back("/portfolio", error=result.message())
+        return back("/portfolio", msg=result.message())
+
+    @app.post("/portfolio/clear")
+    def portfolio_clear():
+        backup = wf.portfolio.clear()
+        return back("/portfolio", msg=f"Trade history cleared; the previous file was kept as {backup.name}"
+                    if backup else "Nothing to clear")
+
+    @app.post("/portfolio/use-as-holdings")
+    def portfolio_holdings():
+        try:
+            n = wf.portfolio.write_holdings(wf.paths.resolve(wf.settings.holdings_csv))
+        except PortfolioError as exc:
+            return back("/portfolio", error=str(exc))
+        return back("/portfolio", msg=f"Holdings file now lists your {n} open lot(s) (the old file was backed up); "
+                                      "the monitor reads it with broker option B")
+
+    @app.get("/portfolio/operations.csv")
+    def portfolio_operations_csv():
+        pf = wf.portfolio
+        view = pf.view()
+        body = pf.operations_csv(pf.rows(view, pf.quotes(view)))
+        return _csv(body, f"portfolio_operations_{date.today():%Y%m%d}.csv")
+
+    @app.get("/portfolio/executions.csv")
+    def portfolio_executions_csv():
+        return _csv(wf.portfolio.executions_csv(), f"trade_executions_{date.today():%Y%m%d}.csv")
 
     @app.get("/selection", response_class=HTMLResponse)
     def selection(request: Request):
@@ -226,17 +274,46 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         return api_watchlist()
 
     @app.get("/api/market/chart/{symbol}")
-    def api_chart(symbol: str):
+    def api_chart(symbol: str, since: Optional[str] = None):
         try:
-            return wf.market_chart(symbol)
+            start = date.fromisoformat(since) if since else None
+        except ValueError:
+            raise HTTPException(400, "since must be a date like 2025-02-05") from None
+        try:
+            return wf.market_chart(symbol, since=start)
         except InvalidRequest as exc:
             raise HTTPException(400, str(exc)) from None
         except MarketDataError as exc:
             raise HTTPException(502, str(exc)) from None
 
     @app.get("/api/market/sectors")
-    def api_sectors():
-        return wf.market_sectors()
+    def api_sectors(symbols: Optional[str] = None):
+        try:
+            return wf.market_sectors([s for s in symbols.split(",") if s.strip()] if symbols else None)
+        except InvalidRequest as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.get("/api/portfolio")
+    def api_portfolio(live: bool = False):
+        pf = wf.portfolio
+        view = pf.view()
+        rows = pf.rows(view, pf.quotes(view, live=live))
+        return clean({"summary": pf.summary(view, rows), "operations": rows, "warnings": view.warnings})
+
+    @app.get("/api/portfolio/quotes")
+    def api_portfolio_quotes():
+        """Live prices for the open positions; Yahoo is asked at most every five minutes."""
+        pf = wf.portfolio
+        view = pf.view()
+        rows = pf.rows(view, pf.quotes(view))
+        return clean({"summary": pf.summary(view, rows), "refresh_seconds": QUOTE_TTL,
+                      "operations": [{k: r[k] for k in ("symbol", "buy_order", "current_price", "price_as_of",
+                                                        "market_value", "pl", "return_pct")}
+                                     for r in rows if r["status"] == "OPEN"]})
+
+    @app.get("/api/portfolio/chart-data")
+    def api_portfolio_chart_data():
+        return wf.portfolio.chart_data()
 
     @app.post("/api/jobs/{kind}", status_code=202)
     def api_start(kind: str, body: Dict[str, Any]):
@@ -274,6 +351,11 @@ def _version() -> str:
         return version("asset-selection")
     except PackageNotFoundError:
         return "dev"
+
+
+def _csv(body: str, filename: str) -> Response:
+    return Response(body, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 def _job_or_404(wf: Workflow, job_id: str) -> Job:
@@ -320,3 +402,28 @@ def _num(x: Any, nd: int = 1) -> str:
     except (TypeError, ValueError):
         return "—"
     return f"{v:,.{nd}f}"
+
+
+def _usd(x: Any, signed: bool = False) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "—"
+    sign = ("+" if v > 0 else "−" if v < 0 else "") if signed else ("−" if v < 0 else "")
+    return f"{sign}${abs(v):,.2f}"
+
+
+def _price(x: Any) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{v:,.4f}" if abs(v) < 10 else f"{v:,.2f}"
+
+
+def _qty(x: Any) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{v:,.8f}".rstrip("0").rstrip(".") if v % 1 else f"{v:,.0f}"

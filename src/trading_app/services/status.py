@@ -263,11 +263,13 @@ def holdings_symbols(paths: Paths, settings: AppSettings) -> List[str]:
     return list(dict.fromkeys(out))
 
 
-def default_watchlist(paths: Paths, settings: AppSettings, size: int = 8) -> List[str]:
-    """What you own first, then the best-ranked stocks eligible for allocation."""
+def default_watchlist(paths: Paths, settings: AppSettings, size: int = 8,
+                      owned: Optional[List[str]] = None, limit: int = 24) -> List[str]:
+    """What you own first (your trade confirmations, else the holdings file),
+    then the best-ranked stocks eligible for allocation."""
     from .market import normalize_symbol
 
-    out = holdings_symbols(paths, settings)
+    out = list(dict.fromkeys(owned or holdings_symbols(paths, settings)))[:limit]
     if paths.ranking_csv.exists() and len(out) < size:
         try:
             df = pd.read_csv(paths.ranking_csv)
