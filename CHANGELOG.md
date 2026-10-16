@@ -9,6 +9,19 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Changed — short term for volatile stocks, long term for steady ones
+- Open lots are split by volatility (55% a year): volatile stocks get a
+  short-term table (1 week, 2 weeks, 1 month, 3 months) and steady ones a
+  long-term table (1, 3, 6, 12 months, plan within 6 months); sold lots move
+  to their own table, and each open table has a subtotal.
+- Short-term stocks: two multi-trade rules -- range trading on weekly bands
+  and trend following on the 20-day average -- are back-tested on the stock's
+  real last two years against holding, with commissions. A rule is
+  recommended only with a lead of at least 5 points over the two years and a
+  positive average month; otherwise a single 1-month limit sell, with both
+  records shown. On the 12 volatile holdings range trading never beat holding;
+  trend following did for 5 of them.
+
 ### Added — prognosis, frozen table, orders spreadsheets, my-stocks analysis
 - **Prognosis column** per lot: "waiting looks worthwhile" or "likely to fall"
   only when a trend passed its back-test, otherwise "no reliable direction"

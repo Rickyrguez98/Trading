@@ -161,7 +161,37 @@ left by fractional rounding are reported as a residue, not as a position.
 the server asks Yahoo at most once per five minutes per stock, however many
 tabs are open. Prices are in the account's currency (USD).
 
-**Forecast columns and the short-term recommendation (open lots only).** For
+**Short term for volatile stocks, long term for steady ones.** Open lots are
+split by how much the stock moves: at least **55% a year** (annualised
+volatility of the last year; the S&P 500 is near 13-20%) puts it in the
+**Short term** table — forecasts for 1 week, 2 weeks, 1 month and 3 months,
+and a plan built on trading it — otherwise it goes to the **Long term**
+table — 1, 3, 6 and 12 months, and a plan within 6 months. Sold lots have
+their own **Closed operations** table. Each open table ends with a subtotal
+(cost, value now, result if sold now).
+
+For short-term stocks two ways to trade many times are tested on the stock's
+**real last two years against simply holding**, with your commission on
+every trade:
+
+| Rule | What it does |
+|---|---|
+| Range trading | Weekly bands around the price (± 0.674 × 60-day daily volatility × √5, a move reached in about half of all weeks): sell at the upper band, buy back at the lower one, bands moved every week. |
+| Trend following | Hold while the price closes above its 20-day average, sell when it closes below, buy back when it closes above again. |
+
+A rule is recommended only if it beat holding over the two years by at least
+5 points **and** on average month by month; with both qualifying, the bigger
+lead wins. It is chosen on the same two years it is judged on, so it is
+labelled "not proven" unless its monthly record beats a coin flip with 95%
+confidence. Otherwise the plan is a single limit sell within a month, and the
+cell shows both rules' records. Measured on 2026-10-16 for the 12 volatile
+holdings: range trading lost to holding for every one of them (it sells into
+rallies that never come back to the buy band); trend following beat holding
+by 5 points or more for 5 (DGXX, EOSE, IREN, LUNR, QUBT) and lost for 5 (IONQ,
+LEU, PLTR, RGTI, SMCI); PATH's lead was under a point and CBRS has too little
+history. Taxes on frequent trades are not included.
+
+**Forecast columns and the plans (open lots only).** For
 each stock you hold, 2,000 possible futures are simulated from its own daily
 moves of the last three years (about six years of prices are fetched so that
 the longer calls can be back-tested). The stock's past trend is kept only in

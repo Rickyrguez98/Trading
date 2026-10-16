@@ -232,6 +232,10 @@ details.import p { margin: 10px 0; }
 .ops td.pg { font-size: 12.5px; line-height: 1.45; }
 .ops td.pg .verdict { font-weight: 700; display: block; }
 .scroll-hint { margin: 4px 0 8px; }
+.table-title { font: 400 19px/1.3 var(--serif); margin: 22px 0 8px; }
+.table-title .cc-name { font: 400 13px var(--sans); }
+.ops + .ops, .table-wrap.ops { margin-bottom: 8px; }
+.ops tfoot td { font-weight: 700; }
 main.wide { max-width: 1880px; }
 .ops th, .ops td { padding: 7px 8px; }
 .ops td.stock { min-width: 120px; max-width: 170px; }
