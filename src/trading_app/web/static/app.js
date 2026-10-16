@@ -1,5 +1,9 @@
-/* Finance Bull dashboard: watchlist charts drawn with TradingView Lightweight Charts v5.
+/* Finance Bull charts, drawn with TradingView Lightweight Charts v5.
  *
+ * Two modes, set by data-mode on #markets:
+ *   watchlist  (dashboard) -- the symbols you follow, add/remove on the page;
+ *   portfolio  (portfolio page) -- the stocks in your trade history, since your
+ *              first purchase, with buy/sell markers and your average cost.
  * The server does the maths (trading_app/services/market.py); this file only
  * draws what /api/market/* returns. Charts load one at a time so a cold cache
  * never sends a burst of requests to Yahoo.
@@ -9,6 +13,7 @@
   var LC = window.LightweightCharts;
   var root = document.getElementById("markets");
   if (!root) return;
+  var mode = root.getAttribute("data-mode") === "portfolio" ? "portfolio" : "watchlist";
   if (!LC) { show("The chart library did not load."); return; }
 
   var store = {
@@ -23,7 +28,8 @@
     data: {},            // symbol -> chart payload (or {error})
     sectors: null,
     charts: [],          // live chart instances, disposed on re-render
-    loading: null
+    loading: null,
+    mine: null           // portfolio mode: {since, markers, avg_cost} per symbol
   };
   var PALETTE = ["#2f6db3", "#c08a2b", "#1e8a5a", "#b3322f", "#7a55b5", "#0f8a8a", "#c0612b", "#5d6679",
                  "#9c3d78", "#3b7d23"];
@@ -131,6 +137,7 @@
     });
   }
   function change(body) {
+    if (mode !== "watchlist") return Promise.resolve();
     show("");
     return api("/api/market/watchlist", { method: "POST", body: JSON.stringify(body) })
       .then(function (res) {
@@ -141,7 +148,7 @@
       })
       .catch(function (e) { show(e.message); });
   }
-  form.addEventListener("submit", function (ev) {
+  if (form) form.addEventListener("submit", function (ev) {
     ev.preventDefault();
     var sym = input.value.trim();
     if (!sym) return;
@@ -156,7 +163,8 @@
       input.focus();
     });
   });
-  document.getElementById("wl-reset").addEventListener("click", function () { change({ reset: true }); });
+  var reset = document.getElementById("wl-reset");
+  if (reset) reset.addEventListener("click", function () { change({ reset: true }); });
 
   // --------------------------------------------------------- view switches
   Array.prototype.forEach.call(root.querySelectorAll(".seg button"), function (b) {
@@ -190,8 +198,9 @@
     disposeCharts();
     grid.textContent = "";
     if (!state.symbols.length) {
-      grid.appendChild(h("div", { cls: "empty", style: "grid-column: 1 / -1" },
-        "Add a ticker above to chart it — US stocks (AAPL), share classes (BRK.B) or Mexican listings (WALMEX.MX)."));
+      grid.appendChild(h("div", { cls: "empty", style: "grid-column: 1 / -1" }, mode === "portfolio"
+        ? "No stocks in your trade history yet."
+        : "Add a ticker above to chart it — US stocks (AAPL), share classes (BRK.B) or Mexican listings (WALMEX.MX)."));
       return;
     }
     if (state.view === "sector") return renderSectors();
@@ -210,7 +219,9 @@
       var sym = state.symbols[i], card = cards[i];
       i++;
       var cached = state.data[sym];
-      var p = cached ? Promise.resolve(cached) : api("/api/market/chart/" + encodeURIComponent(sym))
+      var since = state.mine && state.mine.since[sym];
+      var url = "/api/market/chart/" + encodeURIComponent(sym) + (since ? "?since=" + since : "");
+      var p = cached ? Promise.resolve(cached) : api(url)
         .catch(function (e) { return { symbol: sym, error: e.message }; });
       p.then(function (d) {
         if (!d.error) state.data[sym] = d;
@@ -224,11 +235,13 @@
   function fillStockCard(card, d) {
     card.textContent = "";
     if (d.error) {
-      var rm = h("button", { cls: "btn ghost small", type: "button", text: "Remove " + d.symbol });
-      rm.addEventListener("click", function () { change({ remove: d.symbol }); });
       card.appendChild(h("div", { cls: "cc-head" }, h("div", null, h("div", { cls: "cc-sym", text: d.symbol }))));
       card.appendChild(h("div", { cls: "cc-err" }, d.error));
-      card.appendChild(h("div", null, rm));
+      if (mode === "watchlist") {
+        var rm = h("button", { cls: "btn ghost small", type: "button", text: "Remove " + d.symbol });
+        rm.addEventListener("click", function () { change({ remove: d.symbol }); });
+        card.appendChild(h("div", null, rm));
+      }
       return;
     }
     var s = d.stats, c = colors();
@@ -258,6 +271,7 @@
       priceLineColor: c.muted
     }, 0);
     candles.setData(d.bars);
+    if (state.mine) mineOnChart(candles, d, c, key);
 
     if (state.ind.bb) {
       var bbOpts = { color: alpha(c.bb, 0.9), lineWidth: 1, lineStyle: LC.LineStyle.Dotted, priceLineVisible: false,
@@ -358,7 +372,8 @@
     var wait = h("div", { cls: "cc", style: "grid-column: 1 / -1" }, h("div", { cls: "cc-name", text: "Grouping the watchlist by sector…" }),
                  h("div", { cls: "cc-loading" }));
     grid.appendChild(wait);
-    var p = state.sectors ? Promise.resolve(state.sectors) : api("/api/market/sectors");
+    var url = "/api/market/sectors" + (mode === "portfolio" ? "?symbols=" + encodeURIComponent(state.symbols.join(",")) : "");
+    var p = state.sectors ? Promise.resolve(state.sectors) : api(url);
     p.then(function (res) {
       if (token !== state.loading) return;
       state.sectors = res;
@@ -447,10 +462,41 @@
     return card;
   }
 
+  // ------------------------------------------------------- your own trades
+  function mineOnChart(candles, d, c, key) {
+    var times = d.bars.map(function (b) { return b.time; });
+    var list = (state.mine.markers[d.symbol] || []).map(function (m) {
+      var t = times.find(function (x) { return x >= m.time; });     // a trade day without a bar snaps forward
+      if (!t) return null;
+      var buy = m.side === "BUY";
+      return { time: t, position: buy ? "belowBar" : "aboveBar", shape: buy ? "arrowUp" : "arrowDown",
+               color: buy ? c.up : c.down, text: (buy ? "B " : "S ") + qty(m.shares) + " @ " + num(m.price) };
+    }).filter(Boolean).sort(function (a, b) { return a.time < b.time ? -1 : a.time > b.time ? 1 : 0; });
+    if (list.length && LC.createSeriesMarkers) {
+      LC.createSeriesMarkers(candles, list);
+      key(c.up, "▲ buy / ▼ sell (yours)");
+    }
+    var avg = state.mine.avg_cost[d.symbol];
+    if (avg) {
+      candles.createPriceLine({ price: avg, color: c.gold, lineWidth: 2, lineStyle: LC.LineStyle.LargeDashed,
+                                axisLabelVisible: true, title: "My avg cost" });
+      key(c.gold, "My average cost " + num(avg), true);
+    }
+  }
+  function qty(v) { return Number(v) % 1 ? Number(v).toFixed(4).replace(/0+$/, "") : String(v); }
+
   // ------------------------------------------------------------------ start
-  api("/api/market/watchlist").then(function (res) {
-    state.symbols = res.symbols;
-    renderChips();
-    render();
-  }).catch(function (e) { show(e.message); });
+  if (mode === "portfolio") {
+    api("/api/portfolio/chart-data").then(function (res) {
+      state.mine = res;
+      state.symbols = res.symbols;
+      render();
+    }).catch(function (e) { show(e.message); });
+  } else {
+    api("/api/market/watchlist").then(function (res) {
+      state.symbols = res.symbols;
+      renderChips();
+      render();
+    }).catch(function (e) { show(e.message); });
+  }
 })();

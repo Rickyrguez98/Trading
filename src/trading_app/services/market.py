@@ -41,6 +41,7 @@ SYMBOL_RE = re.compile(r"^\^?[A-Z0-9][A-Z0-9\-]{0,11}(\.[A-Z]{2,3})?$")
 BENCHMARK = "^GSPC"                     # S&P 500, the yardstick in the sector view
 _PACER = RateLimiter(0.4)              # same spacing as the pipelines' yfinance calls
 THROTTLE = "yahoo_charts"
+QUOTE_TTL = 300                         # live prices refresh at most every 5 minutes
 CHART_POLICY = ThrottlePolicy(base_pause=3.0, max_pause=10.0, give_up_after=3, cooldown=120.0)
 
 
@@ -67,30 +68,86 @@ def normalize_symbol(raw: str) -> str:
 
 class MarketData:
     def __init__(self, cache_dir: Path, *, ttl_seconds: int = 6 * 3600, offline: bool = False,
-                 downloader=None, info_downloader=None) -> None:
+                 downloader=None, info_downloader=None, quote_downloader=None,
+                 quote_ttl_seconds: int = QUOTE_TTL) -> None:
         self.cache_dir = Path(cache_dir)
         self.ttl = ttl_seconds
+        self.quote_ttl = quote_ttl_seconds
         self.offline = offline
         self._download = downloader or _yahoo_history
         self._info = info_downloader or _yahoo_info
+        self._quote = quote_downloader or _yahoo_quote
 
-    def bars(self, symbol: str) -> pd.DataFrame:
+    def bars(self, symbol: str, start: Optional[date] = None) -> pd.DataFrame:
+        """Daily bars from ``start`` (default: enough for a year plus the SMA200 warm-up)."""
         symbol = normalize_symbol(symbol)
+        want = min(date.today() - timedelta(days=FETCH_DAYS), start or date.max)
         path = self.cache_dir / "prices" / f"{symbol}.json"
         cached = _read_cache(path, self.ttl if not self.offline else None)
-        if cached is not None:
+        covers = cached is not None and date.fromisoformat(cached.get("requested_from") or "1900-01-01") <= want
+        if cached is not None and (covers or self.offline):
             return _frame(cached)
         if self.offline:
             raise MarketDataError(f"no cached prices for {symbol} (offline)")
-        start = date.today() - timedelta(days=FETCH_DAYS)
         try:
-            df = get_throttle(THROTTLE, CHART_POLICY).call(self._download, symbol, start)
+            df = get_throttle(THROTTLE, CHART_POLICY).call(self._download, symbol, want)
         except Exception as exc:  # noqa: BLE001 - surfaced to the page as a message
             raise MarketDataError(f"{symbol}: {type(exc).__name__}: {exc}") from None
         if df is None or df.empty:
             raise MarketDataError(f"{symbol}: Yahoo returned no prices (check the ticker)")
-        _write_cache(path, _payload(df))
+        _write_cache(path, {**_payload(df), "requested_from": want.isoformat()})
         return df
+
+    def quotes(self, symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Latest price per symbol, refreshed at most every ``quote_ttl`` seconds.
+
+        One small request per stale symbol (the last five days of 5-minute
+        bars), spaced like every other Yahoo call. A symbol Yahoo cannot price
+        comes back with an ``error`` instead of a number.
+        """
+        path = self.cache_dir / "quotes.json"
+        try:
+            book = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            book = {}
+        now = time.time()
+        out: Dict[str, Dict[str, Any]] = {}
+        changed = False
+        for raw in symbols:
+            symbol = normalize_symbol(raw)
+            hit = book.get(symbol)
+            if hit and (self.offline or now - hit.get("fetched", 0) < self.quote_ttl):
+                out[symbol] = hit
+                continue
+            if self.offline:
+                out[symbol] = {"error": "offline: no quote cached"}
+                continue
+            try:
+                q = get_throttle(THROTTLE, CHART_POLICY).call(self._quote, symbol)
+            except Exception as exc:  # noqa: BLE001 - one bad symbol must not blank the table
+                out[symbol] = {**(hit or {}), "error": f"{type(exc).__name__}: {exc}"[:160]}
+                continue
+            if not q or q.get("price") is None:
+                out[symbol] = {**(hit or {}), "error": "Yahoo returned no recent price"}
+                continue
+            book[symbol] = out[symbol] = {**q, "fetched": now}
+            changed = True
+        if changed:
+            _write_cache(path, book)
+        return out
+
+    def cached_quotes(self, symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Whatever quotes are on disk, however old -- never touches the network."""
+        path = self.cache_dir / "quotes.json"
+        try:
+            book = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            return {}
+        return {normalize_symbol(s): book[normalize_symbol(s)] for s in symbols if normalize_symbol(s) in book}
+
+    def cached_meta(self, symbol: str) -> Dict[str, Optional[str]]:
+        """Sector and name if already looked up -- never touches the network."""
+        return _read_cache(self.cache_dir / "meta" / f"{normalize_symbol(symbol)}.json", None) or {}
 
     def meta(self, symbol: str, known: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Optional[str]]:
         """Sector and name: from the ranking when it has the stock, else Yahoo (cached 30 days)."""
@@ -133,6 +190,26 @@ def _yahoo_history(symbol: str, start: date) -> pd.DataFrame:
     except Exception:  # noqa: BLE001 - the currency label is cosmetic
         pass
     return df
+
+
+def _yahoo_quote(symbol: str) -> Dict[str, Any]:
+    """Last regular-session 5-minute close and the previous session's close."""
+    import yfinance as yf
+
+    _PACER.acquire()
+    df = yf.Ticker(symbol).history(period="5d", interval="5m", prepost=False, auto_adjust=False)
+    if df is None or df.empty:
+        return {}
+    close = df["Close"].dropna()
+    if close.empty:
+        return {}
+    last_t = close.index[-1]
+    sessions = pd.Series(close.index.date, index=close.index)
+    earlier = close[sessions < last_t.date()]
+    prev = float(earlier.iloc[-1]) if len(earlier) else None
+    price = float(close.iloc[-1])
+    return {"price": price, "prev_close": prev, "as_of": last_t.isoformat(),
+            "change_pct": (price / prev - 1) * 100 if prev else None}
 
 
 def _yahoo_info(symbol: str) -> Dict[str, Any]:
@@ -303,7 +380,8 @@ def chart_payload(symbol: str, df: pd.DataFrame, *, days: int = DISPLAY_DAYS) ->
         "bb_upper": _series(up, idx), "bb_mid": _series(mid, idx), "bb_lower": _series(low, idx),
         "rsi": _series(rsi(df["close"]), idx),
         "fibonacci": fibonacci(window),
-        "stats": stats(df, window),
+        # Statistics always describe the last year, however far back the chart reaches.
+        "stats": stats(df, df.loc[df.index > df.index[-1] - pd.Timedelta(days=DISPLAY_DAYS)]),
     }
 
 
