@@ -152,7 +152,12 @@ cache:
 
 rate_limits:
   # Minimum seconds between calls per provider, to be polite with free APIs.
+  # On top of this, any "429 Too Many Requests" pauses that provider (honouring
+  # Retry-After when sent) and repeated 429s pause it for a cooldown instead of
+  # retrying every ticker -- see src/trading_common/throttle.py.
   yfinance: 0.4
+  yahoo_rss: 2.0        # the keyless news feed rate-limits hard
+  finnhub: 1.1          # free plan: 60 calls per minute
 
 prices:
   lookback_days: 90

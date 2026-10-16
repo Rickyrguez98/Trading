@@ -10,7 +10,9 @@ import math
 from typing import Any, Dict
 
 import pandas as pd
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from trading_common.throttle import get_throttle, is_rate_limited
 
 from dataclasses import fields as _dc_fields
 
@@ -25,6 +27,11 @@ from .symbols import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _not_rate_limited(exc: BaseException) -> bool:
+    """Quick retries are for transient faults; rate limits go to the throttle."""
+    return not is_rate_limited(exc)
 
 _PRICE_FIELDS = {f.name for f in _dc_fields(PriceSnapshot)}
 
@@ -45,7 +52,8 @@ class YFinancePricesProvider(PricesProvider):
         provider_symbol = to_provider_symbol(ticker.strip().upper(), self.name)
         return f"{provider_symbol}:{lookback_days}"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8),
+           retry=retry_if_exception(_not_rate_limited), reraise=True)
     def _download_history(self, provider_symbol: str, lookback_days: int) -> pd.DataFrame:
         import yfinance as yf
 
@@ -56,6 +64,10 @@ class YFinancePricesProvider(PricesProvider):
         if df is None or df.empty:
             return pd.DataFrame()
         return df
+
+    def _throttled_history(self, provider_symbol: str, lookback_days: int) -> pd.DataFrame:
+        # Yahoo limits prices and fundamentals together: one shared throttle.
+        return get_throttle("yfinance").call(self._download_history, provider_symbol, lookback_days)
 
     @staticmethod
     def _period_for(lookback_days: int) -> str:
@@ -93,7 +105,7 @@ class YFinancePricesProvider(PricesProvider):
             provider_symbol=primary_symbol, data_source="live",
         )
         hist, used_symbol, transport_exc = _run_symbol_ladder(
-            ticker, variants, self.name, self._download_history, lookback_days, snap,
+            ticker, variants, self.name, self._throttled_history, lookback_days, snap,
         )
         snap.provider_symbol = used_symbol
 
