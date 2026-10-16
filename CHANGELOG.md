@@ -9,6 +9,40 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Added — portfolio from trade confirmations
+- **Portfolio page.** Import any number of trade confirmation PDFs at once
+  (GBM's US-dollar account, issued by DriveWealth). Every trade line is read
+  with its own amounts and cross-checked; unreadable lines are reported;
+  re-uploading a file adds nothing. Calibrated on 16 real confirmations
+  (53 executions): all read, no warnings.
+- Executions are merged back into orders (GBM fills whole and fractional
+  shares separately) and sales are matched to purchases first in, first out.
+  One row per purchase lot: buy date and price, cost with commission, sale
+  date and price and what was received, or — for lots still held — the live
+  price and the result if sold now; gains green, losses red. Sales without an
+  imported purchase and fractional rounding residue are flagged, not hidden.
+- Open lots are repriced every five minutes (Yahoo is asked at most once per
+  five minutes per stock); headline tiles show market value, open and
+  realized results and commissions.
+- Charts of every stock traded, starting before the first purchase, with
+  buy/sell markers and the average cost of open positions; sector view of
+  your stocks against the S&P 500.
+- Downloads: the operations table and the raw executions as CSV.
+- "Use as my holdings" writes the open lots to the monitor's holdings file
+  (option B, with a backup), and the dashboard's default watchlist becomes
+  your own open positions.
+- New module `asset_selection.monitoring.confirmations` (PDF reader) and
+  `asset_selection.monitoring.ledger` (orders, FIFO matching, holdings,
+  ledger CSV), both usable without the app.
+
+### Added — NewsAPI.ai news provider
+- `newsapi_ai` (Event Registry) searches headlines by company name; the key is
+  read from `NEWSAPI_AI_KEY` and sent in the request body. It is first in the
+  shipped news chain (`newsapi_ai, finnhub, yahoo_rss`) and skipped at no cost
+  without a key. To protect the 2,000-token free plan, answers are cached for
+  24 hours and a run makes at most `NEWSAPI_AI_MAX_CALLS` searches (default
+  200). Tested against a stubbed HTTP layer; live responses not yet exercised.
+
 ### Added — app dashboard v2 ("Finance Bull")
 - **Market charts on the dashboard.** A year of daily candles for every symbol
   in a watchlist (default: your holdings, then the top eligible stocks of the

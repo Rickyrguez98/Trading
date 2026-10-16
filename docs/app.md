@@ -36,7 +36,8 @@ jobs through the environment; the app never asks for them.
 
 | Page | What you do there |
 |---|---|
-| **Dashboard** | Four headline tiles (ranking size and run status, plans, holdings and broker readiness, latest monitor actions), the **market charts** for your watchlist — one chart per stock or grouped by sector — and recent jobs. |
+| **Dashboard** | Four headline tiles (ranking size and run status, plans, holdings, latest monitor actions), the **market charts** for your watchlist — by default your own stocks — one chart per stock or grouped by sector, and recent jobs. |
+| **Portfolio** | Import your trade confirmation PDFs (any number at once); see every purchase lot with its sale or its live value, your realized and open results, charts of your stocks with your buys and sells marked, and download it all as CSV. See [Portfolio](#portfolio-from-your-trade-confirmations). |
 | **1 · Select** | Start the full-universe selection (replaces the ranking every step reads) or a quick sample run (kept in its own job folder — sample scores are relative to the sample and must never replace the full ranking). Top 25 table. The full run handles Yahoo's rate limits itself (see below). |
 | **2 · Allocate** | Enter an amount and a strategy; see each plan's positions in percent and money. |
 | **3 · Broker** | Pick option A, B or C (saved in `data/app/settings.json`), see what each needs, create your holdings CSV from the template, or replace it with an upload (the old file is backed up). |
@@ -59,8 +60,12 @@ jobs through the environment; the app never asks for them.
 | POST | `/api/jobs/monitor` | `{"option": "B", "target_strategy": "balanced", "cash": 5000, "forecast": "bootstrap"}` |
 | GET | `/api/market/watchlist` | The charted symbols, and whether you customised them |
 | POST | `/api/market/watchlist` | `{"add": "MSFT"}`, `{"remove": "MSFT"}` or `{"reset": true}` |
-| GET | `/api/market/chart/{symbol}` | A year of daily candles, volume, SMA 50/200, Bollinger bands, RSI, Fibonacci levels and statistics |
-| GET | `/api/market/sectors` | The watchlist grouped by sector: rebased lines, equal-weight index, S&P 500, statistics |
+| GET | `/api/market/chart/{symbol}?since=YYYY-MM-DD` | A year of daily candles (or back to `since`), volume, SMA 50/200, Bollinger bands, RSI, Fibonacci levels and statistics |
+| GET | `/api/market/sectors?symbols=A,B` | The watchlist (or the given symbols) grouped by sector: rebased lines, equal-weight index, S&P 500, statistics |
+| GET | `/api/portfolio` | Summary and one row per purchase lot (`?live=true` refreshes prices first) |
+| GET | `/api/portfolio/quotes` | Live prices and results for open lots; Yahoo is asked at most every 5 minutes |
+| GET | `/api/portfolio/chart-data` | Your symbols, first purchase per symbol, buy/sell markers, average cost |
+| GET | `/portfolio/operations.csv`, `/portfolio/executions.csv` | Downloads: the operations table; the raw executions |
 
 Starting a job returns `202` with the job; a second job of the same kind while
 one runs returns `409`; invalid input returns `400`; a chart Yahoo cannot
@@ -113,6 +118,57 @@ instead of the pipelines' 10-minute waits. Charts are drawn with
 works offline and loads nothing from a CDN; its attribution logo stays on the
 charts as the licence asks.
 
+## Portfolio from your trade confirmations
+
+**Importing.** On the **Portfolio** page choose (or drop) your confirmation
+PDFs — as many as you have; the whole folder is fine. Supported today: the
+daily confirmations of GBM's US-dollar account, issued by its clearing firm
+DriveWealth (`Confirm_GBMP_….pdf`). Each trade line is read with its own
+amounts (principal, commission, fees, net), and the amounts are cross-checked;
+a line that looks like a trade but cannot be read is listed in the import
+report rather than skipped silently. Re-uploading a file adds nothing (each
+execution is recognised), so a monthly re-upload of the whole folder is safe.
+The history is kept in `data/app/portfolio/executions.csv` with the account
+number masked to its last four characters and no account-holder name.
+
+**How the rows are built.** GBM fills one order as a whole-share and a
+fractional execution at the same price; those are merged back into the order
+you placed. Sales are matched to purchases **first in, first out**, per stock.
+Each row is one purchase lot and what happened to it:
+
+| Column | Meaning |
+|---|---|
+| Bought, buy price, cost | Trade date, price, and what you paid including the buy commission (pro rata) |
+| Sold, sell price, received | For a sold lot: trade date, price, and what you received net of the sell commission |
+| Sell / now price, value | For a lot you still hold: the latest price and its value now |
+| Gain / loss, return | Received − cost (sold), or value − cost "if sold now" (open, before the sale's commission); green for a gain, red for a loss |
+
+A lot sold in two parts appears twice. A sale with no imported purchase is
+shown as "purchase not imported" and flagged, and a few millionths of a share
+left by fractional rounding are reported as a residue, not as a position.
+
+**Live prices.** Open lots are priced from Yahoo's latest regular-session
+5-minute bar; the page refreshes them every five minutes (with a countdown) and
+the server asks Yahoo at most once per five minutes per stock, however many
+tabs are open. Prices are in the account's currency (USD).
+
+**Charts.** One chart per stock you have traded, starting before your first
+purchase, with ▲ at each buy and ▼ at each sale, and your average cost as a
+dashed line on positions you still hold — plus the same studies as the
+dashboard and a sector view of your stocks against the S&P 500.
+
+**Downloads.** *Download CSV* gives the operations table (including today's
+price for open lots); *Raw executions CSV* gives every imported fill.
+
+**Using it elsewhere.** *Use as my holdings* writes your open lots into the
+monitor's holdings file (broker option B; the old file is backed up), and the
+dashboard's default watchlist becomes your own open positions.
+
+**Limits, stated plainly.** Only the GBM/DriveWealth confirmation layout is
+read today. A stock split after a purchase is not applied to the lot (none of
+the stocks in the confirmations used to build this split since 2025). Results
+are in USD; converting to pesos is not done here.
+
 ## The full selection and Yahoo's rate limits
 
 **Run full selection** runs the same command as the CLI, so it gets the same
@@ -134,15 +190,17 @@ src/trading_app/
 │   ├── jobs.py          #   background jobs: subprocess, log, state on disk
 │   ├── status.py        #   readers: ranking, plans, broker readiness, monitor results
 │   ├── settings.py      #   app preferences (data/app/settings.json)
-│   ├── market.py        #   prices, indicators, Fibonacci, sector index (dashboard charts)
+│   ├── market.py        #   prices, indicators, Fibonacci, sector index, live quotes
+│   ├── portfolio.py     #   confirmation imports, FIFO operations, live values, CSV
 │   └── __init__.py      #   Workflow: one method per user action
 ├── runner.py            # wraps each job command and records its exit code
 ├── web/                 # FastAPI: JSON API + server-rendered pages (Jinja2)
 │   ├── app.py
-│   ├── templates/       #   dashboard, selection, allocation, broker, monitor, job
+│   ├── templates/       #   dashboard, portfolio, selection, allocation, broker, monitor, job
 │   └── static/
 │       ├── style.css    #   navy / ivory / gold theme, light and dark, responsive
-│       ├── app.js       #   draws the dashboard charts from /api/market/*
+│       ├── app.js       #   draws the charts from /api/market/* (dashboard and portfolio)
+│       ├── portfolio.js #   refreshes open-lot prices every five minutes
 │       ├── brand/       #   Finance Bull logo and icons
 │       └── vendor/      #   Lightweight Charts 5.2.1 + licence
 └── cli.py               # trading-app
@@ -181,7 +239,9 @@ browser does not make it attackable:
 
 All under `data/`, which git ignores: `data/app/settings.json` (broker option,
 watchlist), `data/app/jobs/`, `data/app/uploads/`, `data/app/cache/market/`
-(chart prices), and the pipelines' usual outputs.
+(chart prices and quotes), `data/app/portfolio/` (your imported trade history
+and the last import report; "Clear history" moves it to a dated backup), and
+the pipelines' usual outputs.
 
 ## Tests
 
