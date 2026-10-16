@@ -209,8 +209,11 @@ pip install -e ".[dev,pdf,app]"
 trading-app                                                    # opens http://127.0.0.1:8765
 ```
 
-A local web app over the same commands: a dashboard of all four steps, buttons
-to run the full or a sample selection, an allocation form with every plan in
+A local web app, branded **Finance Bull**, over the same commands: a dashboard
+with a year of price charts for your holdings and top-ranked stocks (candles,
+SMA 50/200, Bollinger bands, Fibonacci retracement, volume and RSI — per stock
+or grouped by sector against the S&P 500; add or remove any ticker), the status
+of all four steps, buttons to run the full or a sample selection, an allocation form with every plan in
 percent and money, the broker option picker (with a holdings-file creator and
 uploader), and the monitor with its evidence and outlook — plus a JSON API at
 `/api/docs`. Long runs are background jobs with a live log. It only listens on

@@ -7,6 +7,7 @@ interface never shows a number without its context.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -203,6 +204,89 @@ def latest_monitor(paths: Paths, jobs: JobManager) -> Optional[MonitorView]:
         a = (p.get("recommendation") or {}).get("action", "?")
         actions[a] = actions.get(a, 0) + 1
     return MonitorView(summary=data, source=source, generated_at=data.get("generated_at"), actions=actions)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard charts
+# ---------------------------------------------------------------------------
+
+_NAME_NOISE = re.compile(r"\s+-\s+.*$|\s+(common stock|ordinary shares?|class [a-z] .*|depositary .*)$",
+                         re.IGNORECASE)
+
+
+def short_name(name: Optional[str]) -> Optional[str]:
+    """``NVIDIA Corporation - Common Stock`` -> ``NVIDIA Corporation``."""
+    if not name or not isinstance(name, str):
+        return None
+    return _NAME_NOISE.sub("", name.strip()) or name.strip()
+
+
+def ranking_meta(paths: Paths) -> Dict[str, Dict[str, Any]]:
+    """Sector and name per Yahoo symbol, from the latest ranking."""
+    from .market import normalize_symbol
+
+    if not paths.ranking_csv.exists():
+        return {}
+    try:
+        df = pd.read_csv(paths.ranking_csv, usecols=lambda c: c in ("ticker", "company_name", "sector"))
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for rec in _records(df):
+        try:
+            sym = normalize_symbol(rec.get("ticker"))
+        except ValueError:
+            continue
+        out[sym] = {"sector": rec.get("sector"), "name": short_name(rec.get("company_name"))}
+    return out
+
+
+def holdings_symbols(paths: Paths, settings: AppSettings) -> List[str]:
+    """The Yahoo symbol of every position in the option-B holdings file."""
+    from asset_selection.monitoring.holdings import load_holdings_csv
+
+    from .market import normalize_symbol
+
+    path = paths.resolve(settings.holdings_csv)
+    if path is None or not path.exists():
+        return []
+    try:
+        lots, _ = load_holdings_csv(path)
+    except Exception:  # noqa: BLE001 - an unreadable file just contributes nothing here
+        return []
+    out = []
+    for lot in lots:
+        try:
+            out.append(normalize_symbol(f"{lot.ticker}.MX" if lot.market == "BMV" else lot.ticker))
+        except ValueError:
+            continue
+    return list(dict.fromkeys(out))
+
+
+def default_watchlist(paths: Paths, settings: AppSettings, size: int = 8) -> List[str]:
+    """What you own first, then the best-ranked stocks eligible for allocation."""
+    from .market import normalize_symbol
+
+    out = holdings_symbols(paths, settings)
+    if paths.ranking_csv.exists() and len(out) < size:
+        try:
+            df = pd.read_csv(paths.ranking_csv)
+        except (OSError, ValueError):
+            df = pd.DataFrame()
+        if "rank" in df.columns:
+            df = df.sort_values("rank")
+        if "eligible_for_allocation" in df.columns:
+            df = df[df["eligible_for_allocation"].astype(str).str.lower() == "true"]
+        for t in df.get("ticker", pd.Series(dtype=str)):
+            try:
+                sym = normalize_symbol(t)
+            except ValueError:
+                continue
+            if sym not in out:
+                out.append(sym)
+            if len(out) >= size:
+                break
+    return out
 
 
 def option_labels() -> Dict[str, str]:

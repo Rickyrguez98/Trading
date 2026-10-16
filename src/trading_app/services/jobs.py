@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -120,11 +121,16 @@ class JobManager:
     def running(self, kind: str) -> Optional[Job]:
         return next((j for j in self.list(limit=50) if j.kind == kind and not j.done), None)
 
-    def log_tail(self, job_id: str, lines: int = 40) -> str:
+    def log_text(self, job_id: str, limit: int = 2_000_000) -> str:
         path = self.log_path(job_id)
         if not path.exists():
             return ""
-        data = path.read_bytes()[-200_000:].decode("utf-8", errors="replace")
+        return path.read_bytes()[-limit:].decode("utf-8", errors="replace")
+
+    def log_tail(self, job_id: str, lines: int = 40) -> str:
+        data = self.log_text(job_id, 200_000)
+        if not data:
+            return ""
         # Progress bars rewrite one line with carriage returns: keep the latest frame.
         rows = [seg.rsplit("\r", 1)[-1] for seg in data.split("\n")]
         kept = [r for r in rows if r.strip()]
@@ -135,10 +141,12 @@ class JobManager:
         if job.done:
             return job
         code_file = self.job_dir(job.id) / "exit_code"
+        proc = self._procs.get(job.id)
         if code_file.exists():
             rc: Optional[int] = int(code_file.read_text(encoding="utf-8").strip() or -1)
+            if proc is not None:
+                _reap(proc)                # collect the finished wrapper so it is not left a zombie
         else:
-            proc = self._procs.get(job.id)
             if proc is not None:
                 rc = proc.poll()           # the wrapper ended without writing its file
                 if rc is None:
@@ -156,6 +164,47 @@ class JobManager:
 
     def _save(self, job: Job) -> None:
         (self.job_dir(job.id) / "job.json").write_text(json.dumps(asdict(job), indent=2), encoding="utf-8")
+
+
+def _reap(proc) -> None:
+    """Wait briefly for a wrapper that has written its exit code (it is about to exit)."""
+    wait = getattr(proc, "wait", None)
+    try:
+        if wait is not None:
+            wait(timeout=5)
+        else:
+            proc.poll()
+    except Exception:  # noqa: BLE001 - reaping is housekeeping; the exit code is already recorded
+        pass
+
+
+# tqdm frames look like "Stage 2: prices:  45%|####5     | 2140/4757 [14:01<17:06,  2.54it/s]"
+_BAR = re.compile(r"(?P<name>Stage \d+: [^:\r\n]+?):\s+(?P<pct>\d+)%\|[^|]*\|\s*(?P<n>\d+)/(?P<total>\d+)"
+                  r"\s*\[(?P<elapsed>[\d:]+)(?:<(?P<eta>[\d:?]+))?")
+SELECTION_STAGES = ("Stage 2: prices", "Stage 3: fundamentals", "Stage 4: news+sentiment")
+
+
+def selection_progress(log: str) -> List[Dict[str, object]]:
+    """The latest progress-bar frame of each selection stage, in order."""
+    log = log or ""
+    latest: Dict[str, Dict[str, object]] = {}
+    last_frame = -1
+    for m in _BAR.finditer(log):
+        latest[m.group("name")] = {"name": m.group("name"), "pct": int(m.group("pct")), "n": int(m.group("n")),
+                                   "total": int(m.group("total")), "elapsed": m.group("elapsed"),
+                                   "eta": m.group("eta")}
+        last_frame = m.end()
+    # Paused right now: a rate-limit pause was logged and no progress has been made since.
+    pausing = max(log.rfind("is rate limiting (429); pausing"), log.rfind("keeps answering 429")) > last_frame
+    out = []
+    for name in SELECTION_STAGES:
+        if name in latest:
+            row = dict(latest[name])
+            row["done"] = row["n"] == row["total"]
+            out.append(row)
+    if out and not out[-1]["done"]:
+        out[-1]["pausing"] = pausing
+    return out
 
 
 def _pid_alive(pid: int) -> bool:

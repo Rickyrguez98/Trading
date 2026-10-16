@@ -20,7 +20,11 @@
 <div class="grid">
   <div class="card">
     <h3>Full universe</h3>
-    <p>About 4,800 stocks. Takes a long time (most of it pricing every stock at Yahoo's rate limit). Replaces the ranking every step reads.</p>
+    <p>About 4,800 stocks; plan on roughly 35–40 minutes (the 15 Oct 2026 run spent 32 minutes pricing and
+      3.5 minutes on fundamentals). Replaces the ranking every step reads.</p>
+    <p>Yahoo's limits are handled for you: calls are spaced 0.4 s apart, and if Yahoo answers "Too Many
+      Requests" the run pauses (30 s, then longer, up to 10-minute waits) and continues with the same stock, so
+      every stock is still processed. A blocked news feed is skipped after two tries instead of slowing the run.</p>
     <form method="post" action="/selection/run"><input type="hidden" name="mode" value="full">
       <button class="btn">Run full selection</button></form>
   </div>
@@ -40,7 +44,7 @@
   <tr><th class="num">#</th><th>Ticker</th><th>Company</th><th>Sector</th><th class="num">Score</th>
       <th class="num">Fundamentals</th><th class="num">Sentiment</th><th>Role</th><th>Eligible</th></tr>
   {% for r in rows %}
-  <tr><td class="num">{{ r.rank }}</td><td><strong>{{ r.ticker }}</strong></td><td>{{ (r.company_name or '')[:34] }}</td>
+  <tr><td class="num">{{ r.rank }}</td><td><strong>{{ r.ticker }}</strong></td><td>{{ (r.company_name|short or '')[:34] }}</td>
       <td>{{ r.sector or '—' }}</td><td class="num">{{ r.final_score|num }}</td><td class="num">{{ r.fundamentals_score|num }}</td>
       <td class="num">{{ r.effective_sentiment_score|num }}</td><td>{{ (r.candidate_role or '—')|replace('_', ' ') }}</td>
       <td>{{ 'yes' if r.eligible_for_allocation in (True, 'True', 'true') else 'no' }}</td></tr>
