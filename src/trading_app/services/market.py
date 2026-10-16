@@ -172,6 +172,11 @@ class MarketData:
             return {}
         return {normalize_symbol(s): book[normalize_symbol(s)] for s in symbols if normalize_symbol(s) in book}
 
+    def cached_bars(self, symbol: str) -> Optional[pd.DataFrame]:
+        """The bars on disk, however old -- never touches the network (None if never fetched)."""
+        cached = _read_cache(self.cache_dir / "prices" / f"{normalize_symbol(symbol)}.json", None)
+        return _frame(cached) if cached is not None else None
+
     def cached_meta(self, symbol: str) -> Dict[str, Optional[str]]:
         """Sector and name if already looked up -- never touches the network."""
         return _read_cache(self.cache_dir / "meta" / f"{normalize_symbol(symbol)}.json", None) or {}

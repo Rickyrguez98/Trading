@@ -164,13 +164,13 @@ def client(wf):
 
 def test_portfolio_page_before_and_after_import(client):
     empty = client.get("/portfolio").text
-    assert "Import your trades" in empty and 'id="ops"' not in empty
+    assert "Import your trades" in empty and "ops-table" not in empty
     r = client.post("/portfolio/import", files=[("files", ("b.pdf", BUYS, "application/pdf")),
                                                 ("files", ("s.pdf", SELLS, "application/pdf"))],
                     follow_redirects=False)
     assert r.status_code == 303 and "7%20new" in r.headers["location"]
     page = client.get("/portfolio").text
-    for needle in ('id="ops"', "AAPL", "BRK.B", "purchase not imported", "/static/portfolio.js",
+    for needle in ("ops-table", "AAPL", "BRK.B", "purchase not imported", "/static/portfolio.js",
                    'data-mode="portfolio"', "Download CSV"):
         assert needle in page, needle
     assert page.count('data-open="') == 2
@@ -288,7 +288,8 @@ def test_outlooks_are_computed_once_per_trading_day(wf, monkeypatch):
 
     calls = []
     real = pmod.stock_outlook
-    monkeypatch.setattr(pmod, "stock_outlook", lambda bars, key: calls.append(key) or real(bars, key=key))
+    monkeypatch.setattr(pmod, "stock_outlook",
+                        lambda bars, key, **kw: calls.append(key) or real(bars, key=key, **kw))
     wf.portfolio.import_pdfs([("b.pdf", BUYS)])
     first = wf.portfolio.outlooks()
     again = wf.portfolio.outlooks()
@@ -300,20 +301,23 @@ def test_outlook_api_csv_and_columns(client):
     client.post("/portfolio/import", files=[("files", ("b.pdf", BUYS, "application/pdf")),
                                             ("files", ("s.pdf", SELLS, "application/pdf"))])
     res = client.get("/api/portfolio/outlook").json()
-    assert res["horizons"] == {"21": "1M", "63": "3M", "126": "6M", "252": "1Y"}
+    assert res["horizons"] == {"short": {"5": "1W", "10": "2W", "21": "1M", "63": "3M"},
+                               "long": {"21": "1M", "63": "3M", "126": "6M", "252": "1Y"}}
     assert set(res["symbols"]) == {"AAPL", "BRK.B"} and 0 < res["commission_rate"] < 0.01
     plan = next(v for k, v in res["plans"].items() if k.startswith("AAPL|"))
     assert plan["plan"] in ("limit", "sell_now") and plan["now_vs_cost_pct"] is not None
     rows = list(csv.DictReader(io.StringIO(client.get("/portfolio/operations.csv").text)))
     aapl = next(r for r in rows if r["symbol"] == "AAPL" and r["status"] == "OPEN")
     closed = next(r for r in rows if r["status"] == "CLOSED")
+    assert aapl["style"] == "long" and float(aapl["volatility_pct"]) < 55
     for label in ("1M", "3M", "6M", "1Y"):
         assert aapl[f"trend_{label}"] in ("up", "down", "flat") and float(aapl[f"expected_{label}"]) > 0
         assert float(aapl[f"min_{label}"]) < float(aapl[f"max_{label}"])
     assert aapl["recommendation"] and aapl["outlook_as_of"] == "2026-10-14" and closed["recommendation"] == ""
     page = client.get("/portfolio").text
-    assert page.count('class="hz-group"') == 4 and "Short-term recommendation" in page
+    assert page.count('class="hz-group"') == 4 and "Long term · steadier stocks" in page and "Long-term plan" in page
     assert page.count('data-k="trend"') == 2 * 4 and page.count("js-rec") == 2 and "not financial advice" in page
+    assert "Closed operations" in page
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +417,78 @@ def test_dashboard_upload_box_and_frozen_table(client):
                        files=[("files", ("b.pdf", BUYS, "application/pdf"))], follow_redirects=False)
     assert evil.headers["location"].startswith("/portfolio?")             # no open redirect
     page = client.get("/portfolio").text
-    assert page.count('data-fz="8"') >= 3 and "js-pg" in page and "Prognosis" in page
+    assert page.count('data-fz="7"') >= 3 and "js-pg" in page and "Prognosis" in page
     assert "Fundamentals &amp; news for your stocks" in page and "Analyse my 3 stocks" in page
     sel = client.get("/selection").text
     assert "My stocks only" in sel and 'value="mine"' in sel
+
+
+
+# ---------------------------------------------------------------------------
+# Short term for volatile stocks, long term for steady ones
+# ---------------------------------------------------------------------------
+
+def test_volatility_decides_the_style_and_its_horizons():
+    from trading_app.services.outlook import stock_outlook, style_of
+
+    calm, wild = _noisy(1500, seed=2), _noisy(1500, seed=2)
+    wild["close"] = 100 * np.exp(np.cumsum(np.random.default_rng(5).normal(0, 0.05, 1500)))   # ~80% a year
+    assert style_of(calm)[0] == "long" and style_of(wild)[0] == "short"
+    o = stock_outlook(wild, key="W")
+    assert o["style"] == "short" and set(o["horizons"]) == {"5", "10", "21", "63"}
+    assert set(o["rules"]) == {"range", "trend"} and o["volatility_pct"] > 55
+    assert "rules" not in stock_outlook(calm, key="C")
+
+
+def test_range_rule_wins_in_a_sideways_market_and_loses_in_a_rally():
+    from trading_app.services.outlook import run_swing
+
+    sideways = np.tile([100.0, 103, 106, 103, 100, 97, 94, 97], 4)[:31]
+    final, hold, trades = run_swing(sideways[None, :], 0.02, commission_rate=0.0)
+    assert final[0] > hold[0] and trades[0] >= 2
+    rally = 100 * 1.02 ** np.arange(31)
+    final, hold, _ = run_swing(rally[None, :], 0.01, commission_rate=0.0)
+    assert final[0] < hold[0]                                            # sold early, never bought back
+
+
+def test_trend_rule_steps_aside_in_a_crash():
+    from trading_app.services.outlook import run_trend
+
+    prices = np.r_[np.linspace(100, 120, 40), np.linspace(120, 40, 40)]
+    sma = pd.Series(prices).rolling(20).mean().to_numpy()
+    final, hold, trades = run_trend(prices, sma, commission_rate=0.0025)
+    assert final[0] > 2 * hold[0] and trades[0] >= 1
+
+
+def test_a_rule_is_recommended_only_with_a_real_lead_over_holding():
+    from trading_app.services.outlook import best_rule
+
+    def rule(verdict, rule_pct, hold_pct):
+        return {"status": "ok", "verdict": verdict, "past_2y_rule_pct": rule_pct, "past_2y_hold_pct": hold_pct}
+
+    assert best_rule({"range": rule("helped", 30, 10), "trend": rule("helped", 80, 10)}) == "trend"
+    assert best_rule({"range": rule("helped", 12, 10), "trend": rule("did_not_help", 90, 10)}) is None
+    assert best_rule({"range": rule("too_little_history", 90, 10)}) is None
+
+
+def test_short_term_lots_get_the_rule_when_it_beat_holding(wf, monkeypatch):
+    import trading_app.services.portfolio as pmod
+
+    wf.portfolio.import_files([("b.pdf", BUYS)])
+    real = pmod.stock_outlook
+
+    def fake(bars, key, commission_rate):
+        o = real(bars, key=key, commission_rate=commission_rate)
+        if key == "NVDA":
+            o.update(style="short", best_rule="trend", rules={
+                "trend": {"status": "ok", "verdict": "helped", "average": 100.0, "above_average": True,
+                          "past_2y_rule_pct": 50.0, "past_2y_hold_pct": 10.0, "past_wins": 10, "past_months": 24},
+                "range": {"status": "ok", "verdict": "did_not_help", "sell_at": 110.0, "buy_back_at": 90.0}})
+        return o
+
+    monkeypatch.setattr(pmod, "stock_outlook", fake)
+    plans = wf.portfolio.exit_plans(wf.portfolio.view(), wf.portfolio.outlooks())
+    nvda = next(p for k, p in plans.items() if k.startswith("NVDA|"))
+    aapl = next(p for k, p in plans.items() if k.startswith("AAPL|"))
+    assert nvda["plan"] == "trend" and nvda["single_exit"]["plan"] in ("limit", "sell_now")
+    assert aapl["style"] == "long" and aapl["horizon_label"] == "6 months"

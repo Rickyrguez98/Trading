@@ -6,9 +6,10 @@
  */
 (function () {
   "use strict";
-  var table = document.getElementById("ops");
   var status = document.getElementById("quote-status");
-  if (!table || !status) return;
+  var wraps = Array.prototype.slice.call(document.querySelectorAll(".table-wrap.ops[data-kind]"));
+  if (!wraps.length || !status) return;
+  function openRows() { return document.querySelectorAll("tr[data-open]"); }
   var REFRESH = 300, nextAt = 0, asOf = null, timer = null, busy = false, failed = false;
 
   function usd(v, signed) {
@@ -29,9 +30,10 @@
   function apply(res) {
     var byKey = {};
     (res.operations || []).forEach(function (o) { byKey[o.symbol + "|" + o.buy_order] = o; });
-    Array.prototype.forEach.call(table.querySelectorAll("tr[data-open]"), function (tr) {
+    Array.prototype.forEach.call(openRows(), function (tr) {
       var o = byKey[tr.getAttribute("data-open")];
       if (!o) return;
+      tr.setAttribute("data-value", o.market_value == null ? "" : o.market_value);
       tr.querySelector(".js-price").textContent = price(o.current_price);
       tr.querySelector(".js-value").textContent = o.market_value == null ? "…" : usd(o.market_value);
       var pl = tr.querySelector(".js-pl"), ret = tr.querySelector(".js-ret");
@@ -52,10 +54,27 @@
       if (s.stale_prices) el("kpi-unreal").appendChild(document.createTextNode(" · " + s.stale_prices + " last-known price(s)"));
       el("kpi-total").textContent = usd(s.total_pl, true);
       setTone(el("kpi-total"), s.total_pl);
-      var tv = el("tot-value"), tp = el("tot-pl");
-      if (tv) tv.firstChild.textContent = usd(s.market_value);
-      if (tp) { tp.firstChild.textContent = usd(s.total_pl, true); setTone(tp.firstChild, s.total_pl); }
     }
+    subtotals();
+  }
+
+  // Each table's subtotal: what its lots cost, are worth now and would gain or lose if sold now.
+  function subtotals() {
+    wraps.forEach(function (w) {
+      var cost = 0, value = 0, priced = true;
+      Array.prototype.forEach.call(w.querySelectorAll("tr[data-open]"), function (tr) {
+        cost += parseFloat(tr.getAttribute("data-cost")) || 0;
+        var v = parseFloat(tr.getAttribute("data-value"));
+        if (isNaN(v)) priced = false; else value += v;
+      });
+      var c = w.querySelector(".tf-cost"), v = w.querySelector(".tf-value"),
+          p = w.querySelector(".tf-pl"), r = w.querySelector(".tf-ret");
+      if (c) c.textContent = usd(cost);
+      if (!priced) return;
+      if (v) v.textContent = usd(value);
+      if (p) { p.textContent = usd(value - cost, true); setTone(p, value - cost); }
+      if (r && cost) { r.textContent = pct((value / cost - 1) * 100); setTone(r, value - cost); }
+    });
   }
 
   function label() {
@@ -105,10 +124,45 @@
     td.title = "Share of simulated futures ending above today's price. Track record: " + note + ".";
   }
 
+  function ruleRecord(name, r) {
+    if (!r || r.status !== "ok") return null;
+    var label = name === "range" ? "Range trading" : "Trend following";
+    if (r.verdict === "too_little_history") return label + ": too little history to judge";
+    var two = r.past_2y_rule_pct != null
+      ? " · 2 yrs: " + pct(r.past_2y_rule_pct) + " vs holding " + pct(r.past_2y_hold_pct) + " (" + r.past_2y_trades + " trades)"
+      : "";
+    return label + (r.verdict === "did_not_help" ? " lost to holding" : " beat holding") +
+      ": won " + r.past_wins + "/" + r.past_months + " months" + two;
+  }
+
   function recCell(td, plan, ol) {
     td.textContent = "";
     if (!plan) {
       td.appendChild(el2("small", ol && ol.status === "insufficient_history" ? "not enough price history" : "no outlook"));
+      return;
+    }
+    var rules = plan.rules || {};
+    if (plan.plan === "range") {
+      var sw = rules.range;
+      td.appendChild(el2("b", "Trade the range"));
+      var a1 = document.createElement("div");
+      a1.appendChild(document.createTextNode("Sell at " + money(sw.sell_at) + " "));
+      a1.appendChild(el2("span", pct(plan.sell_vs_cost_pct), toneOf(plan.sell_vs_cost_pct)));
+      td.appendChild(a1);
+      td.appendChild(el2("div", "Buy back at " + money(sw.buy_back_at) + " · bands ±" + sw.band_pct.toFixed(1) +
+                                "%, moved weekly"));
+    } else if (plan.plan === "trend") {
+      var tr = rules.trend;
+      td.appendChild(el2("b", "Follow the trend"));
+      td.appendChild(el2("div", tr.above_average
+        ? "Hold while it closes above " + money(tr.average) + " (20-day average); sell if it closes below"
+        : "It is below its 20-day average (" + money(tr.average) + "): the rule says be out; buy back if it closes above"));
+    }
+    if (plan.plan === "range" || plan.plan === "trend") {
+      var rec = ruleRecord(plan.plan, rules[plan.plan]);
+      td.appendChild(el2("small", rec + ((rules[plan.plan] || {}).verdict === "proven" ? " · ✓ proven" : " · not proven")));
+      td.appendChild(el2("small", "chosen on the same two years it is judged on; more trades also mean more commissions and taxes"));
+      td.title = "A multi-trade rule that beat holding this stock over its real last two years.";
       return;
     }
     if (plan.plan === "sell_now") {
@@ -121,12 +175,19 @@
       td.appendChild(el2("b", "Limit sell " + money(plan.limit)));
       var l = document.createElement("div");
       l.appendChild(el2("span", pct(plan.exit_vs_cost_pct), toneOf(plan.exit_vs_cost_pct)));
-      l.appendChild(document.createTextNode(" vs cost · ~" + Math.round(plan.p_fill * 100) + "% chance in a month"));
+      l.appendChild(document.createTextNode(" vs cost · ~" + Math.round(plan.p_fill * 100) + "% chance within " +
+                                            (plan.horizon_label || "a month")));
       td.appendChild(l);
       var st = document.createElement("div");
       st.appendChild(document.createTextNode("Stop " + money(plan.stop) + " "));
       st.appendChild(el2("span", pct(plan.stop_vs_cost_pct), toneOf(plan.stop_vs_cost_pct)));
       td.appendChild(st);
+    }
+    if (plan.style === "short") {
+      ["range", "trend"].forEach(function (name) {
+        var n = ruleRecord(name, rules[name]);
+        if (n) td.appendChild(el2("small", n));
+      });
     }
     td.appendChild(el2("small", "today " + pct(plan.now_vs_cost_pct) + " vs cost · " + plan.confidence));
     td.title = plan.why;
@@ -146,7 +207,8 @@
     }
     var tone = pg.verdict === "wait" ? "pos" : pg.verdict === "fall" ? "neg" : "flat";
     td.appendChild(el2("span", pg.headline, "verdict trend " + tone));
-    if (pg.lean && pg.lean !== "flat") td.appendChild(el2("small", "the unproven model leans " + pg.lean + " over a year"));
+    if (pg.lean && pg.lean !== "flat") td.appendChild(el2("small", "the unproven model leans " + pg.lean +
+                                                       (ol && ol.style === "short" ? " over a month" : " over a year")));
     var e = document.createElement("div");
     e.appendChild(document.createTextNode("Expected " + money(pg.expected) + " by " + fmtDate(pg.expected_date) + " "));
     e.appendChild(el2("span", pct(pg.expected_vs_cost_pct), toneOf(pg.expected_vs_cost_pct)));
@@ -163,23 +225,25 @@
     td.appendChild(el2("small", pg.basis));
   }
 
-  // Freeze the main columns (desktop) so only the forecasts scroll sideways.
-  var wrap = table.parentElement;
+  // Freeze the main columns (desktop) so only the forecasts scroll sideways, in every table.
   function freeze() {
-    var heads = table.querySelectorAll("thead th.fz");
-    var wide = wrap.clientWidth >= 900;
-    wrap.classList.toggle("frozen", wide);
-    var lefts = [], x = 0;
-    Array.prototype.forEach.call(heads, function (th) { lefts[+th.getAttribute("data-fz")] = x; x += th.offsetWidth; });
-    Array.prototype.forEach.call(table.querySelectorAll(".fz"), function (cell) {
-      cell.style.left = wide ? lefts[+cell.getAttribute("data-fz")] + "px" : "";
+    wraps.forEach(function (wrap) {
+      var wide = wrap.clientWidth >= 900;
+      wrap.classList.toggle("frozen", wide);
+      var lefts = [], x = 0;
+      Array.prototype.forEach.call(wrap.querySelectorAll("thead th.fz"), function (th) {
+        lefts[+th.getAttribute("data-fz")] = x; x += th.offsetWidth;
+      });
+      Array.prototype.forEach.call(wrap.querySelectorAll(".fz"), function (cell) {
+        cell.style.left = wide ? lefts[+cell.getAttribute("data-fz")] + "px" : "";
+      });
     });
   }
   window.addEventListener("resize", function () { clearTimeout(freeze.t); freeze.t = setTimeout(freeze, 120); });
   freeze();
 
   function loadOutlook() {
-    var rows = table.querySelectorAll("tr[data-open]");
+    var rows = openRows();
     if (!rows.length) return;
     fetch("/api/portfolio/outlook").then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -200,7 +264,7 @@
       });
       freeze();                      // cell contents changed: recompute the frozen offsets
     }).catch(function (e) {
-      Array.prototype.forEach.call(table.querySelectorAll("td.fc, td.js-rec, td.js-pg"), function (td) {
+      Array.prototype.forEach.call(document.querySelectorAll("td.fc, td.js-rec, td.js-pg"), function (td) {
         td.textContent = "unavailable (" + e.message + ")";
       });
     });
@@ -210,6 +274,7 @@
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden && nextAt && Date.now() >= nextAt) refresh();     // a tab left in the background catches up
   });
+  subtotals();
   refresh();
   loadOutlook();          // daily numbers: once per page load is enough
 })();

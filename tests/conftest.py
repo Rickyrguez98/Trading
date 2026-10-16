@@ -13,6 +13,23 @@ if str(SRC) not in sys.path:
 import pytest  # noqa: E402
 
 
+_SECRETS = ("NEWSAPI_AI_KEY", "NEWSAPI_AI_MAX_CALLS", "FINNHUB_API_KEY", "IBKR_FLEX_TOKEN", "IBKR_FLEX_QUERY_ID",
+            "ALPHAVANTAGE_API_KEY", "FMP_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_credentials(monkeypatch):
+    """Tests never see your real keys.
+
+    The pipeline modules call ``load_dotenv()`` on import, which would put the
+    keys from your ``.env`` into this process; a test that builds the shipped
+    news chain would then spend real API tokens. Tests that need a key set a
+    fake one themselves.
+    """
+    for name in _SECRETS:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _throttle_state(monkeypatch):
     """Fresh rate-limit state for every test, and no real sleeping.

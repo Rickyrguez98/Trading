@@ -36,7 +36,7 @@ from asset_selection.monitoring.ledger import (
 )
 
 from .market import MarketData, MarketDataError, normalize_symbol
-from .outlook import HORIZONS, exit_plan, month_paths, prognosis, stock_outlook
+from .outlook import ALL_LABELS, STYLES, exit_plan, plan_paths, prognosis, stock_outlook, style_of
 from .paths import Paths
 
 MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -187,7 +187,7 @@ class Portfolio:
         return {s: got[y] for s, y in symbols.items() if y in got}
 
     # --------------------------------------------------------------- outlook
-    OUTLOOK_VERSION = 3
+    OUTLOOK_VERSION = 5
     OUTLOOK_HISTORY_DAYS = 12 * 365         # ~10 years of monthly tests: enough to judge even a 1-year trend
 
     def _long_bars(self, symbol: str):
@@ -213,7 +213,8 @@ class Portfolio:
             if cached and cached.get("as_of") == as_of and cached.get("version") == self.OUTLOOK_VERSION:
                 out[symbol] = cached
                 continue
-            result = {**stock_outlook(bars, key=y), "version": self.OUTLOOK_VERSION}
+            result = {**stock_outlook(bars, key=y, commission_rate=self.commission_rate(view)),
+                      "version": self.OUTLOOK_VERSION}
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(result), encoding="utf-8")
             out[symbol] = result
@@ -231,8 +232,18 @@ class Portfolio:
                                                          cost_per_share=(op.cost or 0.0) / op.shares)
                 for op in view.open_operations if op.shares}
 
+    def styles(self, view: LedgerView) -> Dict[str, Dict[str, Any]]:
+        """Short or long term per open symbol, from the prices already on disk (no network)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for symbol in view.open_symbols:
+            bars = self.market.cached_bars(symbol)
+            style, vol = style_of(bars) if bars is not None and len(bars) > 60 else ("long", None)
+            out[symbol] = {"style": style, "volatility_pct": vol}
+        return out
+
     def exit_plans(self, view: LedgerView, outlooks: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """The best 1-month exit plan per open lot, keyed ``SYMBOL|buy_order``."""
+        """Per open lot, keyed ``SYMBOL|buy_order``: the swing plan where it beat holding in the
+        stock's real past, otherwise the best single limit sell (1 month short term, 6 months long term)."""
         rate = self.commission_rate(view)
         plans: Dict[str, Dict[str, Any]] = {}
         paths_by_symbol: Dict[str, Any] = {}
@@ -240,19 +251,32 @@ class Portfolio:
             ol = outlooks.get(op.symbol) or {}
             if ol.get("status") != "ok" or not op.shares:
                 continue
-            validated = bool(((ol.get("horizons") or {}).get("21") or {}).get("validated"))
+            style = ol.get("style", "long")
+            spec = STYLES[style]
+            validated = bool(((ol.get("horizons") or {}).get(str(spec["plan_days"])) or {}).get("validated"))
             if op.symbol not in paths_by_symbol:
                 try:
-                    paths_by_symbol[op.symbol] = month_paths(self._long_bars(op.symbol),
-                                                             key=normalize_symbol(op.symbol), with_trend=validated)
+                    paths_by_symbol[op.symbol] = plan_paths(self._long_bars(op.symbol), key=normalize_symbol(op.symbol),
+                                                            with_trend=validated, days=spec["plan_days"])
                 except MarketDataError:
                     paths_by_symbol[op.symbol] = None
             paths = paths_by_symbol[op.symbol]
             if paths is None:
                 continue
-            plans[f"{op.symbol}|{op.buy_order}"] = exit_plan(
-                paths, price=ol["last_close"], cost_per_share=(op.cost or 0.0) / op.shares, shares=op.shares,
-                commission_rate=rate, trend_used=validated)
+            cost_per_share = (op.cost or 0.0) / op.shares
+            plan = exit_plan(paths, price=ol["last_close"], cost_per_share=cost_per_share, shares=op.shares,
+                             commission_rate=rate, trend_used=validated, horizon_label=spec["plan_label"])
+            plan["style"] = style
+            if style == "short" and ol.get("rules"):
+                plan["rules"] = ol["rules"]
+                best = ol.get("best_rule")
+                if best:
+                    plan["single_exit"] = {k: plan[k] for k in ("plan", "limit", "p_fill", "stop")}
+                    plan["plan"] = best                       # "range" or "trend"
+                    rng = ol["rules"]["range"]
+                    if best == "range":
+                        plan["sell_vs_cost_pct"] = (rng["sell_at"] * (1 - rate) / cost_per_share - 1) * 100
+            plans[f"{op.symbol}|{op.buy_order}"] = plan
         return plans
 
     # ------------------------------------------------------------------ rows
@@ -341,15 +365,18 @@ class Portfolio:
         cols = ["symbol", "name", "status", "shares", "buy_date", "buy_price", "cost", "sell_date", "sell_price",
                 "proceeds", "current_price", "price_as_of", "market_value", "pl", "return_pct", "holding_days",
                 "currency", "buy_order", "sell_order", "note"]
-        outlook_cols = [f"{k}_{label}" for label in HORIZONS.values()
-                        for k in ("trend", "p_up", "expected", "average", "min", "max", "trend_hits")]
+        outlook_cols = ["style", "volatility_pct"] + [
+            f"{k}_{label}" for label in ALL_LABELS
+            for k in ("trend", "p_up", "expected", "average", "min", "max", "trend_hits")]
+        swing_cols = ["range_sell_at", "range_buy_back_at", "range_verdict", "range_2y_vs_hold",
+                      "trend_average_20d", "trend_verdict", "trend_2y_vs_hold"]
         prognosis_cols = ["prognosis", "prognosis_basis", "expected_price", "expected_date", "expected_vs_cost_pct",
                           "break_even", "break_even_date", "chance_of_halving_1y"]
         plan_cols = ["recommendation", "rec_limit", "rec_fill_chance", "rec_exit_vs_cost_pct", "rec_stop",
                      "rec_stop_chance", "rec_now_vs_cost_pct", "rec_reason", "rec_confidence", "outlook_as_of"]
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
-        w.writerow(cols + prognosis_cols + outlook_cols + plan_cols)
+        w.writerow(cols + prognosis_cols + outlook_cols + plan_cols + swing_cols)
         for r in rows:
             ol = r.get("outlook") or {}
             hz = ol.get("horizons") or {}
@@ -357,14 +384,24 @@ class Portfolio:
             extra: List[Any] = [pg.get("headline"), pg.get("basis"), pg.get("expected"), pg.get("expected_date"),
                                 pg.get("expected_vs_cost_pct"), pg.get("break_even"), pg.get("break_even_date"),
                                 pg.get("p_halve_1y")]
-            for h in HORIZONS:
-                x = hz.get(str(h)) or {}
+            by_label = {x.get("label"): x for x in hz.values()}
+            extra += [ol.get("style"), ol.get("volatility_pct")]
+            for label in ALL_LABELS:
+                x = by_label.get(label) or {}
                 extra += [x.get("trend"), x.get("p_up"), x.get("median"), x.get("average"), x.get("min"),
                           x.get("max"), f"{x['hits']}/{x['tests']}" if x.get("tests") else None]
             plan = r.get("plan") or {}
             extra += [_plan_text(plan) if plan else None, plan.get("limit"), plan.get("p_fill"),
                       plan.get("exit_vs_cost_pct"), plan.get("stop"), plan.get("p_stop"),
                       plan.get("now_vs_cost_pct"), plan.get("why"), plan.get("confidence"), ol.get("as_of")]
+            rules = (ol.get("rules") or {}) if ol.get("style") == "short" else {}
+            rg, tr = rules.get("range") or {}, rules.get("trend") or {}
+
+            def vs(r):
+                return (f"{r['past_2y_rule_pct']:.1f}% vs {r['past_2y_hold_pct']:.1f}%"
+                        if r.get("past_2y_rule_pct") is not None else None)
+            extra += [rg.get("sell_at"), rg.get("buy_back_at"), rg.get("verdict"), vs(rg),
+                      tr.get("average"), tr.get("verdict"), vs(tr)]
             w.writerow([csv_safe(_cell(r.get(c))) for c in cols] + [csv_safe(_cell(v)) for v in extra])
         return buf.getvalue()
 
@@ -375,6 +412,13 @@ class Portfolio:
 
 
 def _plan_text(plan: Dict[str, Any]) -> str:
+    if plan.get("plan") == "range":
+        sw = plan["rules"]["range"]
+        return f"trade the range: sell at {sw['sell_at']:.4g}, buy back at {sw['buy_back_at']:.4g} (weekly bands)"
+    if plan.get("plan") == "trend":
+        tr = plan["rules"]["trend"]
+        return (f"follow the trend: hold while above the 20-day average ({tr['average']:.4g}), "
+                "sell below it, buy back above it")
     if plan.get("plan") == "sell_now":
         return f"sell now at about {plan['price']:.4g}"
     text = f"limit sell at {plan['limit']:.4g}"

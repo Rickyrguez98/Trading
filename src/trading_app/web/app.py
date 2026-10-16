@@ -27,7 +27,10 @@ from ..services import (
 )
 from ..services.jobs import Job, selection_progress
 from ..services.market import QUOTE_TTL, clean
-from ..services.outlook import HORIZONS
+from ..services.outlook import SHORT_TERM_VOL, STYLES
+
+_HORIZON_NAMES = {"1W": "1 week", "2W": "2 weeks", "1M": "1 month", "3M": "3 months", "6M": "6 months",
+                  "1Y": "1 year"}
 
 HERE = Path(__file__).resolve().parent
 LOCAL_HOSTS = ["127.0.0.1", "localhost", "testserver"]
@@ -81,12 +84,21 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         pf = wf.portfolio
         view = pf.view()
         rows = pf.rows(view, pf.quotes(view, live=False))     # cached prices only: the page renders at once
+        styles = pf.styles(view)
+        for r in rows:
+            r.update(styles.get(r["symbol"], {}) if r["status"] == "OPEN" else {})
         running = wf.jobs.running("selection")
+
+        def spans(style):
+            return [(d, _HORIZON_NAMES[lb]) for d, lb in STYLES[style]["horizons"].items()]
+
         return page(request, "portfolio.html", view=view, rows=rows, summary=pf.summary(view, rows),
+                    open_short=[r for r in rows if r["status"] == "OPEN" and r.get("style") == "short"],
+                    open_long=[r for r in rows if r["status"] == "OPEN" and r.get("style") != "short"],
+                    closed=[r for r in rows if r["status"] != "OPEN"],
+                    horizons_short=spans("short"), horizons_long=spans("long"), short_vol=SHORT_TERM_VOL,
                     last_import=pf.last_import(), holdings_csv=wf.settings.holdings_csv,
-                    analysis=wf.my_stocks_analysis(), my_tickers=wf.my_tickers(), running_selection=running,
-                    horizons=[(d, {"1M": "1 month", "3M": "3 months", "6M": "6 months", "1Y": "1 year"}[lb])
-                              for d, lb in HORIZONS.items()])
+                    analysis=wf.my_stocks_analysis(), my_tickers=wf.my_tickers(), running_selection=running)
 
     @app.post("/portfolio/import")
     async def portfolio_import(files: List[UploadFile] = File(...), next: str = Form("/portfolio")):
@@ -326,7 +338,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         pf = wf.portfolio
         view = pf.view()
         outlooks = pf.outlooks(view)
-        return clean({"horizons": {str(h): label for h, label in HORIZONS.items()}, "symbols": outlooks,
+        return clean({"horizons": {style: {str(h): lb for h, lb in spec["horizons"].items()}
+                                   for style, spec in STYLES.items()}, "symbols": outlooks,
                       "plans": pf.exit_plans(view, outlooks), "prognoses": pf.prognoses(view, outlooks),
                       "commission_rate": pf.commission_rate(view)})
 
