@@ -65,7 +65,7 @@ jobs through the environment; the app never asks for them.
 | GET | `/api/portfolio` | Summary and one row per purchase lot (`?live=true` refreshes prices first) |
 | GET | `/api/portfolio/quotes` | Live prices and results for open lots; Yahoo is asked at most every 5 minutes |
 | GET | `/api/portfolio/chart-data` | Your symbols, first purchase per symbol, buy/sell markers, average cost |
-| GET | `/api/portfolio/outlook` | Next month's range and sell levels per open stock, and each lot's levels against its cost |
+| GET | `/api/portfolio/outlook` | Trend, expected, min and max at 1/3/6/12 months per open stock, and each lot's short-term recommendation |
 | GET | `/portfolio/operations.csv`, `/portfolio/executions.csv` | Downloads: the operations table; the raw executions |
 
 Starting a job returns `202` with the job; a second job of the same kind while
@@ -153,28 +153,41 @@ left by fractional rounding are reported as a residue, not as a position.
 the server asks Yahoo at most once per five minutes per stock, however many
 tabs are open. Prices are in the account's currency (USD).
 
-**Next month · sell levels (last column, open lots only).** For each stock
-you hold, the monitor's forecast engine simulates 2,000 possible next months
-(21 trading days) by resampling the stock's own past daily moves in blocks,
-**with the trend removed** — so it has no view on direction, only on how far
-the price usually travels:
+**Forecast columns and the short-term recommendation (open lots only).** For
+each stock you hold, 2,000 possible futures are simulated from its own daily
+moves of the last three years (about six years of prices are fetched so that
+the longer calls can be back-tested). The stock's past trend is kept only in
+proportion to how reliable it is statistically — the average daily move is
+multiplied by `max(0, 1 − 1/t²)`, where `t` is its t-statistic — so a weak
+trend counts for nothing.
 
-| Shown | How it is computed | How to read it |
-|---|---|---|
-| Range | Average of each simulated month's highest and lowest close | The typical top and bottom of the coming month |
-| Sell limit | Level reached at some point in half of the simulated months | A limit sell there has about an even chance of filling within a month |
-| Stop | Level reached in the weakest quarter of the simulated months | A protective exit hit only in the weaker months |
-| % vs cost | Each level against what that lot cost you (with commission) | Red when the limit would still sell at a loss |
-| Range held *n* of *m* | Walk-forward check: past months in which the real price ended inside the model's 80% band | Should be about 8 in 10; fewer means the stock moved more than its history suggested |
+For **1 month, 3 months, 6 months and 1 year**:
 
-Stocks with less than ~300 days of prices (recent listings) get a range but no
-back-test, and say so; under 60 days there is no outlook. Closing prices only:
-intraday swings are wider, so levels are touched somewhat more often than
-stated. Computed once per trading day per stock (`data/app/cache/market/outlook/`)
-and included in the CSV. These are statistical levels from past volatility —
-not a prediction of direction and not financial advice; the project's
-forecast tests found no reliable directional edge (see
-[monitoring.md](us_equities/monitoring.md)).
+| Column | How it is computed |
+|---|---|
+| Trend | ▲ Up when at least 55% of the futures end above today's price, ▼ Down when at most 45% do, → Flat otherwise (and always Flat when no trend survives the shrinkage). The small print is its record in walk-forward tests on the stock's own past: how many periods it called the direction right. **✓** only when that record beats a coin flip with 95% confidence and rests on at least 8 independent periods; 6-month and 1-year calls never have enough (24 overlapping monthly tests of a 1-year call are about two independent years), so they say "too few tests" or "not testable". |
+| Expected | The middle outcome (median) at the horizon. The arithmetic average is in the CSV; for volatile stocks a few extreme futures pull it far up. |
+| Min / Max | The average lowest and highest close reached along the way. |
+
+**Short-term recommendation (1 month).** Sixty sell prices between today's
+and the top of the simulated month are tried; each is scored by its price
+improvement over selling today times its chance of being reached within the
+month. The best one among those reached in at least a quarter of the futures
+is the limit to place — the best trade-off between a higher price and
+actually getting it. A protective stop is placed where the price falls in
+about one month in ten. Both are shown against what that lot cost you, after
+the commission rate you have actually paid. A trend moves this choice only if
+it has a ✓ at one month; otherwise the futures carry no trend and the levels
+come from volatility alone. If no limit adds at least 0.5% over today's price,
+it says sell now.
+
+Computed once per trading day per stock (`data/app/cache/market/outlook/`),
+included in the CSV, and available at `/api/portfolio/outlook`. Closing prices
+only (intraday swings are wider) and a stop is assumed to fill at its price.
+These are statistical estimates from past prices — not a prediction you can
+rely on and not financial advice. On 2026-10-16, one of 20 holdings had a
+trend that passed its test (NVDA, 3 months: right 17 of 24); see also
+[monitoring.md](us_equities/monitoring.md).
 
 **Charts.** One chart per stock you have traded, starting before your first
 purchase, with ▲ at each buy and ▼ at each sale, and your average cost as a

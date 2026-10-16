@@ -218,44 +218,77 @@ def test_portfolio_writes_are_same_origin_only(client):
 # Next month's range and sell levels
 # ---------------------------------------------------------------------------
 
-def _noisy(n=520, seed=1):
+def _noisy(n=520, seed=1, drift=0.0):
     rng = np.random.default_rng(seed)
-    closes = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, n)))
+    closes = 100 * np.exp(np.cumsum(rng.normal(drift, 0.02, n)))
     idx = pd.bdate_range(end=pd.Timestamp("2026-10-14"), periods=n)
     return pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes, "volume": 1e6}, index=idx)
 
 
-def test_month_outlook_levels_mean_what_they_say():
-    from trading_app.services.outlook import lot_levels, month_outlook
+def test_outlook_columns_per_horizon_are_consistent():
+    from trading_app.services.outlook import HORIZONS, stock_outlook
 
-    bars = _noisy()
-    o = month_outlook(bars, key="TEST")
+    bars = _noisy(1500)
+    o = stock_outlook(bars, key="TEST")
+    assert o["status"] == "ok" and o["as_of"] == "2026-10-14" and set(o["horizons"]) == {"21", "63", "126", "252"}
     last = bars["close"].iloc[-1]
-    assert o["status"] == "ok" and o["horizon_days"] == 21 and o["as_of"] == "2026-10-14"
-    assert o["low_p10"] < o["expected_low"] < last < o["expected_high"] < o["high_p90"]
-    assert o["stop"] < last < o["sell_limit"]
-    assert o["sell_limit_touch"] == pytest.approx(0.5, abs=0.01) and o["stop_touch"] == pytest.approx(0.25, abs=0.01)
-    assert o["validated_months"] and o["range_held_months"] <= o["validated_months"]
-    assert month_outlook(bars, key="TEST") == o                              # seeded: same answer every time
-    lv = lot_levels(o, cost_per_share=last)
-    assert lv["limit_vs_cost_pct"] > 0 > lv["stop_vs_cost_pct"] and lv["limit_above_cost"]
-    assert lot_levels(o, cost_per_share=o["sell_limit"] * 2)["limit_above_cost"] is False
+    for h in HORIZONS:
+        x = o["horizons"][str(h)]
+        assert x["min"] < last < x["max"] and x["min"] < x["median"] < x["max"]
+        assert x["trend"] in ("up", "down", "flat") and 0 <= x["p_up"] <= 1
+    widths = [o["horizons"][str(h)]["max"] - o["horizons"][str(h)]["min"] for h in HORIZONS]
+    assert widths == sorted(widths)                                          # longer horizon, wider range
+    assert stock_outlook(bars, key="TEST") == o                              # seeded: same answer every time
+
+
+def test_trends_are_only_validated_with_enough_independent_evidence():
+    from trading_app.services.outlook import stock_outlook
+
+    o = stock_outlook(_noisy(1500), key="T")
+    for h in ("126", "252"):                                                 # 24 overlapping windows: < 8 independent
+        assert o["horizons"][h]["testable"] is False and o["horizons"][h]["validated"] is False
+    assert o["horizons"]["21"]["tests"] and o["horizons"]["21"]["testable"] is True
+    flat = stock_outlook(_noisy(1500, seed=9, drift=0.0), key="F")
+    if flat["trend_per_year_used_pct"] == 0:
+        assert all(x["trend"] == "flat" for x in flat["horizons"].values())  # no drift left -> no direction
 
 
 def test_month_outlook_is_honest_about_short_histories():
-    from trading_app.services.outlook import month_outlook
+    from trading_app.services.outlook import stock_outlook
 
-    assert month_outlook(_noisy(40), key="NEW")["status"] == "insufficient_history"
-    short = month_outlook(_noisy(150), key="IPO")
-    assert short["status"] == "ok" and short["validated_months"] is None    # shown, but not back-tested
+    assert stock_outlook(_noisy(40), key="NEW")["status"] == "insufficient_history"
+    short = stock_outlook(_noisy(150), key="IPO")
+    assert short["status"] == "ok" and short["horizons"]["21"]["tests"] is None   # shown, but not back-tested
+
+
+def test_recommendation_balances_price_and_chance_of_filling():
+    from trading_app.services.outlook import MIN_FILL, exit_plan, month_paths
+
+    bars = _noisy(1500)
+    paths = month_paths(bars, key="T", with_trend=False)
+    price = float(bars["close"].iloc[-1])
+    plan = exit_plan(paths, price=price, cost_per_share=price * 0.8, shares=2, commission_rate=0.0025,
+                     trend_used=False)
+    assert plan["plan"] == "limit" and plan["limit"] > price and plan["p_fill"] >= MIN_FILL
+    assert plan["stop"] < price and plan["p_stop"] == pytest.approx(0.10, abs=0.01)
+    assert plan["exit_vs_cost_pct"] > plan["now_vs_cost_pct"] > 0            # waiting adds to the gain
+    assert plan["confidence"].startswith("no proven trend")
+    # A higher or lower limit than the chosen one scores worse on price x chance.
+    run_max = paths.max(axis=1)
+    def score(level):
+        return (level - price) * float(np.mean(run_max >= level))
+    assert score(plan["limit"]) >= max(score(plan["limit"] * 1.05), score(price + (plan["limit"] - price) * 0.5))
+    flat = exit_plan(np.full((100, 21), price), price=price, cost_per_share=price, shares=1, commission_rate=0,
+                     trend_used=False)
+    assert flat["plan"] == "sell_now"                                        # nothing to wait for
 
 
 def test_outlooks_are_computed_once_per_trading_day(wf, monkeypatch):
     import trading_app.services.portfolio as pmod
 
     calls = []
-    real = pmod.month_outlook
-    monkeypatch.setattr(pmod, "month_outlook", lambda bars, key: calls.append(key) or real(bars, key=key))
+    real = pmod.stock_outlook
+    monkeypatch.setattr(pmod, "stock_outlook", lambda bars, key: calls.append(key) or real(bars, key=key))
     wf.portfolio.import_pdfs([("b.pdf", BUYS)])
     first = wf.portfolio.outlooks()
     again = wf.portfolio.outlooks()
@@ -263,17 +296,21 @@ def test_outlooks_are_computed_once_per_trading_day(wf, monkeypatch):
     assert set(first) == {"AAPL", "BRK.B", "NVDA"} and first["AAPL"]["status"] == "ok"
 
 
-def test_outlook_api_csv_and_column(client):
+def test_outlook_api_csv_and_columns(client):
     client.post("/portfolio/import", files=[("files", ("b.pdf", BUYS, "application/pdf")),
                                             ("files", ("s.pdf", SELLS, "application/pdf"))])
     res = client.get("/api/portfolio/outlook").json()
-    assert res["horizon_days"] == 21 and set(res["symbols"]) == {"AAPL", "BRK.B"}
-    lot = next(v for k, v in res["lots"].items() if k.startswith("AAPL|"))
-    assert set(lot) == {"limit_vs_cost_pct", "stop_vs_cost_pct", "limit_above_cost"}
+    assert res["horizons"] == {"21": "1M", "63": "3M", "126": "6M", "252": "1Y"}
+    assert set(res["symbols"]) == {"AAPL", "BRK.B"} and 0 < res["commission_rate"] < 0.01
+    plan = next(v for k, v in res["plans"].items() if k.startswith("AAPL|"))
+    assert plan["plan"] in ("limit", "sell_now") and plan["now_vs_cost_pct"] is not None
     rows = list(csv.DictReader(io.StringIO(client.get("/portfolio/operations.csv").text)))
     aapl = next(r for r in rows if r["symbol"] == "AAPL" and r["status"] == "OPEN")
     closed = next(r for r in rows if r["status"] == "CLOSED")
-    assert float(aapl["sell_limit"]) > float(aapl["stop"]) > 0 and aapl["outlook_as_of"] == "2026-10-14"
-    assert closed["sell_limit"] == "" and closed["next_month_low"] == ""
+    for label in ("1M", "3M", "6M", "1Y"):
+        assert aapl[f"trend_{label}"] in ("up", "down", "flat") and float(aapl[f"expected_{label}"]) > 0
+        assert float(aapl[f"min_{label}"]) < float(aapl[f"max_{label}"])
+    assert aapl["recommendation"] and aapl["outlook_as_of"] == "2026-10-14" and closed["recommendation"] == ""
     page = client.get("/portfolio").text
-    assert "Next month · sell levels" in page and page.count('js-outlook') == 2 and "not a" in page
+    assert page.count('class="hz-group"') == 4 and "Short-term recommendation" in page
+    assert page.count('data-k="trend"') == 2 * 4 and page.count("js-rec") == 2 and "not financial advice" in page

@@ -27,6 +27,7 @@ from ..services import (
 )
 from ..services.jobs import Job, selection_progress
 from ..services.market import QUOTE_TTL, clean
+from ..services.outlook import HORIZONS
 
 HERE = Path(__file__).resolve().parent
 LOCAL_HOSTS = ["127.0.0.1", "localhost", "testserver"]
@@ -81,7 +82,9 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         view = pf.view()
         rows = pf.rows(view, pf.quotes(view, live=False))     # cached prices only: the page renders at once
         return page(request, "portfolio.html", view=view, rows=rows, summary=pf.summary(view, rows),
-                    last_import=pf.last_import(), holdings_csv=wf.settings.holdings_csv)
+                    last_import=pf.last_import(), holdings_csv=wf.settings.holdings_csv,
+                    horizons=[(d, {"1M": "1 month", "3M": "3 months", "6M": "6 months", "1Y": "1 year"}[lb])
+                              for d, lb in HORIZONS.items()])
 
     @app.post("/portfolio/import")
     async def portfolio_import(files: List[UploadFile] = File(...)):
@@ -113,7 +116,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     def portfolio_operations_csv():
         pf = wf.portfolio
         view = pf.view()
-        body = pf.operations_csv(pf.rows(view, pf.quotes(view), pf.outlooks(view)))
+        outlooks = pf.outlooks(view)
+        body = pf.operations_csv(pf.rows(view, pf.quotes(view), outlooks, pf.exit_plans(view, outlooks)))
         return _csv(body, f"portfolio_operations_{date.today():%Y%m%d}.csv")
 
     @app.get("/portfolio/executions.csv")
@@ -313,15 +317,12 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
 
     @app.get("/api/portfolio/outlook")
     def api_portfolio_outlook():
-        """Next month's range and sell levels per open position, and per lot against its cost."""
+        """1/3/6/12-month outlook per open stock and the best 1-month exit plan per lot."""
         pf = wf.portfolio
         view = pf.view()
         outlooks = pf.outlooks(view)
-        rows = pf.rows(view, {}, outlooks)
-        return clean({"horizon_days": 21, "symbols": outlooks,
-                      "lots": {f"{r['symbol']}|{r['buy_order']}": {k: r.get(k) for k in (
-                          "limit_vs_cost_pct", "stop_vs_cost_pct", "limit_above_cost")}
-                               for r in rows if r["status"] == "OPEN"}})
+        return clean({"horizons": {str(h): label for h, label in HORIZONS.items()}, "symbols": outlooks,
+                      "plans": pf.exit_plans(view, outlooks), "commission_rate": pf.commission_rate(view)})
 
     @app.get("/api/portfolio/chart-data")
     def api_portfolio_chart_data():

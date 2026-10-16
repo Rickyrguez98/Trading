@@ -219,10 +219,18 @@ details.import p { margin: 10px 0; }
 .ops tfoot td { font-weight: 700; background: var(--panel-2); border-top: 2px solid var(--line); vertical-align: top; }
 .ops tfoot .cc-name { font-weight: 400; }
 .pf-actions { margin-top: 18px; }
-.ops th.outlook, .ops td.outlook { min-width: 205px; white-space: normal; border-left: 1px solid var(--line); }
-.ops td.outlook { font-size: 12.5px; line-height: 1.45; }
-.ops td.outlook b { font-weight: 700; }
-.ops .ol-range { font-weight: 600; }
+.ops th.stock-h, .ops td.stock { position: sticky; left: 0; z-index: 2; }
+.ops th.stock-h { background: var(--panel-2); }
+.ops th.hz-group { text-align: center; border-left: 2px solid var(--line); color: var(--ink); }
+.ops th.hz { font-size: 10.5px; }
+.ops .g { border-left: 2px solid var(--line); }
+.ops td.fc { font-size: 12.5px; }
+.ops td.fc small, .ops td.rec small { display: block; color: var(--muted); font-size: 11px; }
+.ops td.fc-closed { color: var(--muted); font-size: 12px; text-align: center; border-left: 2px solid var(--line); }
+.ops th.rec-h, .ops td.rec { min-width: 215px; white-space: normal; border-left: 2px solid var(--gold); }
+.ops td.rec { font-size: 12.5px; line-height: 1.45; }
+.ops td.rec b { font-weight: 700; }
+.trend { font-weight: 700; white-space: nowrap; } .trend.flat { color: var(--muted); }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 
 /* ----------------------------------------------------------- job page */

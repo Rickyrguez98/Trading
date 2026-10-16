@@ -84,7 +84,9 @@ class MarketData:
         want = min(date.today() - timedelta(days=FETCH_DAYS), start or date.max)
         path = self.cache_dir / "prices" / f"{symbol}.json"
         cached = _read_cache(path, self.ttl if not self.offline else None)
-        covers = cached is not None and date.fromisoformat(cached.get("requested_from") or "1900-01-01") <= want
+        # A cache from before "requested_from" existed counts only from the first date it holds.
+        reach = (cached or {}).get("requested_from") or ((cached or {}).get("dates") or ["9999-12-31"])[0]
+        covers = cached is not None and date.fromisoformat(reach) <= want
         if cached is not None and (covers or self.offline):
             return _frame(cached)
         if self.offline:

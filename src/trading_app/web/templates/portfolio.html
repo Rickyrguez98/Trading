@@ -104,9 +104,13 @@
 
 <div class="table-wrap ops"><table id="ops">
   <thead><tr>
-    <th>Stock</th><th class="num">Shares</th><th>Bought</th><th class="num">Buy price</th>
-    <th>Sold</th><th class="num">Sell / now price</th><th class="num">Gain / loss</th><th class="num">Return</th>
-    <th class="num">Days</th><th class="outlook">Next month · sell levels <span class="cc-name">(model)</span></th>
+    <th rowspan="2" class="stock-h">Stock</th><th rowspan="2" class="num">Shares</th><th rowspan="2">Bought</th>
+    <th rowspan="2" class="num">Buy price</th><th rowspan="2">Sold</th><th rowspan="2" class="num">Sell / now price</th>
+    <th rowspan="2" class="num">Gain / loss</th><th rowspan="2" class="num">Return</th><th rowspan="2" class="num">Days</th>
+    {% for days, label in horizons %}<th colspan="4" class="hz-group">{{ label }}</th>{% endfor %}
+    <th rowspan="2" class="rec-h">Short-term recommendation <span class="cc-name">(1 month, model)</span></th>
+  </tr><tr>
+    {% for days, label in horizons %}<th class="hz g">Trend</th><th class="hz num">Expected</th><th class="hz num">Min</th><th class="hz num">Max</th>{% endfor %}
   </tr></thead>
   <tbody>
   {% for sym, items in rows|groupby('symbol') %}
@@ -130,7 +134,12 @@
       <td class="num js-pl {{ tone }}">{{ r.pl|usd(signed=True) if r.pl is not none else ('?' if r.status == 'UNMATCHED_SELL' else '…') }}</td>
       <td class="num js-ret {{ tone }}">{{ r.return_pct|pct(2, True) if r.return_pct is not none else '—' }}</td>
       <td class="num">{{ r.holding_days if r.holding_days is not none else '—' }}</td>
-      <td class="outlook{{ ' js-outlook' if r.status == 'OPEN' }}">{{ '…' if r.status == 'OPEN' else '—' }}</td>
+      {% if r.status == 'OPEN' %}
+        {% for days, label in horizons %}<td class="fc g" data-h="{{ days }}" data-k="trend">…</td><td class="fc num" data-h="{{ days }}" data-k="median">…</td><td class="fc num" data-h="{{ days }}" data-k="min">…</td><td class="fc num" data-h="{{ days }}" data-k="max">…</td>{% endfor %}
+        <td class="rec js-rec">…</td>
+      {% else %}
+        <td class="fc-closed" colspan="{{ horizons|length * 4 + 1 }}">{{ 'sold' if r.status == 'CLOSED' else '' }}</td>
+      {% endif %}
     </tr>
     {% endfor %}
   {% endfor %}
@@ -139,19 +148,32 @@
     <td>Total</td><td></td><td></td><td class="num">{{ s.cost_open|usd }}<div class="cc-name">open cost</div></td>
     <td></td><td class="num" id="tot-value">{{ s.market_value|usd if s.market_value is not none else '…' }}<div class="cc-name">open value</div></td>
     <td class="num" id="tot-pl"><span class="{{ 'pos' if s.total_pl >= 0 else 'neg' }}">{{ s.total_pl|usd(signed=True) }}</span><div class="cc-name">realized + open</div></td>
-    <td></td><td></td><td></td>
+    <td></td><td></td><td colspan="{{ horizons|length * 4 + 1 }}"></td>
   </tr></tfoot>
 </table></div>
 
-<p class="fine" id="outlook-note"><strong>How the last column is made.</strong> For each stock you hold, 2,000
-  possible next months (21 trading days) are simulated by resampling its own past daily moves, with the trend
-  removed: the model has <em>no view on direction</em>, only on how far the price usually travels. The range is the
-  average highest and lowest close of those months. The <strong>sell limit</strong> is the price reached in half of
-  them, so a limit order there has about an even chance of filling within a month; the <strong>stop</strong> is the
-  price reached in the weakest quarter of them. Percentages compare each level with what that lot cost you. "Range
-  held" counts past months in which the real price ended inside the model's 80% band (it should be about 8 in 10).
-  Closing prices only — intraday swings are wider. These are statistical levels from past volatility, not a
-  prediction or financial advice.</p>
+<div class="note" id="outlook-note">
+  <strong>How the forecast columns are made.</strong> For each stock you hold, 2,000 possible futures are simulated
+  from its own daily moves of the last three years. The stock's past trend is kept only in proportion to how
+  statistically reliable it is (a weak trend counts for nothing).
+  <ul class="ev">
+    <li><strong>Trend</strong>: up when at least 55% of the futures end above today's price, down when at most 45% do.
+      The small print is its track record: how many past test periods it called the direction right. <strong>✓</strong>
+      appears only when that record beats a coin flip with 95% confidence; "too few tests" means the history is too short
+      to judge (always the case for 6 months and 1 year).</li>
+    <li><strong>Expected</strong>: the middle outcome (median) at that horizon. The arithmetic average is in the CSV; for
+      volatile stocks it is pulled far up by a few extreme futures. <strong>Min / Max</strong>: the average lowest and
+      highest close along the way.</li>
+    <li><strong>Short-term recommendation</strong>: sixty sell prices are tried over the next month, each scored by its
+      improvement over selling today times its chance of being reached; the best one reached in at least a quarter of
+      the futures is the limit to place. The stop is where the price falls in about one month in ten. A trend is used
+      here only if it has a ✓ at one month; none does today, so these levels come from volatility alone. If no limit
+      adds at least 0.5% over today's price, it says sell now. Percentages compare with what that lot cost you, after
+      commission.</li>
+  </ul>
+  Closing prices only (intraday swings are wider) and a stop is assumed to fill at its price. These are statistical
+  estimates from past prices, not a prediction you can rely on and not financial advice.
+</div>
 
 {% if view.warnings %}
 <div class="note warn"><strong>Worth knowing:</strong>
