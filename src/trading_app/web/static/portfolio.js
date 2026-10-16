@@ -87,47 +87,72 @@
     });
   }
 
-  // ------------------------------------------------- next month (model)
-  function outlookCell(td, ol, lot) {
+  // ------------------------------------------- forecasts and recommendation
+  function el2(tag, text, cls) { var e = document.createElement(tag); if (cls) e.className = cls; e.textContent = text; return e; }
+  function money(v) { return "$" + price(v); }
+
+  function trendCell(td, x) {
     td.textContent = "";
-    function line(cls) { var d = document.createElement("div"); if (cls) d.className = cls; td.appendChild(d); return d; }
-    function add(parent, text, cls, tag) {
-      var e = document.createElement(tag || "span"); if (cls) e.className = cls; e.textContent = text; parent.appendChild(e); return e;
+    var arrow = { up: "▲ Up", down: "▼ Down", flat: "→ Flat" }[x.trend] || "—";
+    var t = el2("span", arrow + " " + Math.round(x.p_up * 100) + "%",
+                "trend " + (x.trend === "up" ? "pos" : x.trend === "down" ? "neg" : "flat"));
+    td.appendChild(t);
+    var note = x.validated ? "✓ right " + x.hits + "/" + x.tests
+             : x.testable ? "right " + x.hits + "/" + x.tests + ", unproven"
+             : x.tests ? "too few tests" : "not testable";
+    td.appendChild(el2("small", note));
+    td.title = "Share of simulated futures ending above today's price. Track record: " + note + ".";
+  }
+
+  function recCell(td, plan, ol) {
+    td.textContent = "";
+    if (!plan) {
+      td.appendChild(el2("small", ol && ol.status === "insufficient_history" ? "not enough price history" : "no outlook"));
+      return;
     }
-    if (!ol || ol.status === "error") { add(line("cc-name"), "no prices: " + ((ol && ol.error) || "unavailable")); return; }
-    if (ol.status !== "ok") { add(line("cc-name"), "not enough price history (" + (ol.history_days || 0) + " days)"); return; }
-    var range = line("ol-range");
-    add(range, "$" + price(ol.expected_low) + " – $" + price(ol.expected_high));
-    var sell = line("ol-sell");
-    add(sell, "Sell limit ");
-    add(sell, "$" + price(ol.sell_limit), "", "b");
-    if (lot && lot.limit_vs_cost_pct != null) add(sell, " " + pct(lot.limit_vs_cost_pct), toneOf(lot.limit_vs_cost_pct));
-    var stop = line("ol-sell");
-    add(stop, "Stop ");
-    add(stop, "$" + price(ol.stop), "", "b");
-    if (lot && lot.stop_vs_cost_pct != null) add(stop, " " + pct(lot.stop_vs_cost_pct), toneOf(lot.stop_vs_cost_pct));
-    var note = line("cc-name");
-    var held = ol.validated_months ? "range held " + ol.range_held_months + " of " + ol.validated_months + " past months"
-                                   : "short history (" + ol.history_days + " days): not back-tested";
-    note.textContent = "fills ~" + Math.round(ol.sell_limit_touch * 100) + "% / hit ~" + Math.round(ol.stop_touch * 100) +
-      "% of months · " + held;
-    if (lot && lot.limit_above_cost === false) add(line("cc-name neg"), "limit is below what this lot cost");
+    if (plan.plan === "sell_now") {
+      td.appendChild(el2("b", "Sell now ≈ " + money(plan.price)));
+      var a = document.createElement("div");
+      a.appendChild(el2("span", pct(plan.now_vs_cost_pct), toneOf(plan.now_vs_cost_pct)));
+      a.appendChild(document.createTextNode(" vs your cost"));
+      td.appendChild(a);
+    } else {
+      td.appendChild(el2("b", "Limit sell " + money(plan.limit)));
+      var l = document.createElement("div");
+      l.appendChild(el2("span", pct(plan.exit_vs_cost_pct), toneOf(plan.exit_vs_cost_pct)));
+      l.appendChild(document.createTextNode(" vs cost · ~" + Math.round(plan.p_fill * 100) + "% chance in a month"));
+      td.appendChild(l);
+      var st = document.createElement("div");
+      st.appendChild(document.createTextNode("Stop " + money(plan.stop) + " "));
+      st.appendChild(el2("span", pct(plan.stop_vs_cost_pct), toneOf(plan.stop_vs_cost_pct)));
+      td.appendChild(st);
+    }
+    td.appendChild(el2("small", "today " + pct(plan.now_vs_cost_pct) + " vs cost · " + plan.confidence));
+    td.title = plan.why;
   }
 
   function loadOutlook() {
-    var cells = table.querySelectorAll("td.js-outlook");
-    if (!cells.length) return;
+    var rows = table.querySelectorAll("tr[data-open]");
+    if (!rows.length) return;
     fetch("/api/portfolio/outlook").then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     }).then(function (res) {
-      Array.prototype.forEach.call(table.querySelectorAll("tr[data-open]"), function (tr) {
-        var key = tr.getAttribute("data-open"), sym = key.split("|")[0];
-        var td = tr.querySelector("td.js-outlook");
-        if (td) outlookCell(td, res.symbols[sym], res.lots[key]);
+      Array.prototype.forEach.call(rows, function (tr) {
+        var key = tr.getAttribute("data-open"), sym = key.split("|")[0], ol = res.symbols[sym];
+        Array.prototype.forEach.call(tr.querySelectorAll("td.fc"), function (td) {
+          var x = ol && ol.status === "ok" ? ol.horizons[td.getAttribute("data-h")] : null;
+          var k = td.getAttribute("data-k");
+          if (!x) { td.textContent = k === "trend" && ol && ol.status === "insufficient_history" ? "short history" : "—"; return; }
+          if (k === "trend") trendCell(td, x); else td.textContent = money(x[k]);
+        });
+        var rec = tr.querySelector("td.js-rec");
+        if (rec) recCell(rec, res.plans[key], ol);
       });
     }).catch(function (e) {
-      Array.prototype.forEach.call(cells, function (td) { td.textContent = "unavailable (" + e.message + ")"; });
+      Array.prototype.forEach.call(table.querySelectorAll("td.fc, td.js-rec"), function (td) {
+        td.textContent = "unavailable (" + e.message + ")";
+      });
     });
   }
 

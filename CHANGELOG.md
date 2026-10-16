@@ -9,6 +9,27 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Changed — forecast by horizon and a short-term recommendation
+- The portfolio's single "next month" column becomes four groups — 1 month,
+  3 months, 6 months, 1 year — each with trend (up / down / flat and the
+  share of simulated futures ending higher), expected (median), min and max,
+  followed by a short-term recommendation per lot.
+- The model keeps each stock's own trend, shrunk by its reliability
+  (`max(0, 1 - 1/t^2)`), and every trend shows its walk-forward record; a ✓
+  needs a better-than-coin-flip record at 95% confidence over at least eight
+  independent periods, so 6- and 12-month calls are marked as not testable.
+- The recommendation tries sixty limit prices and picks the best trade-off
+  between price and the chance of reaching it within a month (at least a 25%
+  chance), with a protective stop hit in about one month in ten; it uses a
+  trend only if that trend is validated at one month.
+- About six years of prices are fetched for this so the longer calls can be
+  tested; the CSV carries every new column.
+
+### Fixed
+- A cached price history written before its start date was recorded was
+  treated as covering any period, so a longer history was never fetched for
+  it; it now counts only from the first date it holds.
+
 ### Added — next month's range and sell levels on the portfolio
 - The operations table gets a last column for every lot still held: the
   expected range for the next month (average simulated high and low), a sell

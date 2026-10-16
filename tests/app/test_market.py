@@ -423,3 +423,19 @@ def test_job_page_shows_stage_progress_and_highlights_pauses(client, wf):
     assert '<span class="hl">' in page and "nothing is skipped" in page
     api = client.get(f"/api/jobs/{job.id}").json()
     assert api["progress"][1]["pausing"] is True
+
+
+def test_an_old_cache_without_its_start_date_is_refetched_when_more_history_is_needed(tmp_path):
+    from datetime import date
+
+    y = FakeYahoo({"AAPL": _trend(n=600)})
+    md = MarketData(tmp_path, downloader=y.history)
+    md.bars("AAPL")
+    path = tmp_path / "prices" / "AAPL.json"
+    payload = json.loads(path.read_text())
+    payload.pop("requested_from")                                          # written by an older version
+    path.write_text(json.dumps(payload))
+    md.bars("AAPL")                                                        # the default window is covered
+    assert len(y.calls) == 1
+    md.bars("AAPL", start=date(2015, 1, 2))                                # six years back is not
+    assert len(y.calls) == 2
