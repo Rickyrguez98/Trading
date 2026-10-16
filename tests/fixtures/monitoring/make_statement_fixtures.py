@@ -1,7 +1,7 @@
 """Regenerate the synthetic statement PDFs used by test_monitoring_pdf.py.
 
 These are SYNTHETIC: their layout imitates the vocabulary of a GBM "estado de
-cuenta" and a DriveWealth account statement, but they are not copies of real
+cuenta", a DriveWealth account statement and DriveWealth trade confirmations, but they are not copies of real
 statements and contain no real account data. A real statement may lay things
 out differently; the parser's report is built to make that visible.
 
@@ -109,6 +109,67 @@ def drivewealth_statement(path: Path) -> None:
     pdf.output(str(path))
 
 
+CONFIRM_HEAD = [
+    "Transaction GBM",
+    "Insurgentes Sur 0000 - Floor 0 (synthetic)",
+    "Confirmation",
+    "Account Number:GBMP-001-SYN00042 Account Name: SYNTHETIC TEST ACCOUNT",
+]
+CONFIRM_COLUMNS = ("Symbol Security A/CType Action Execution Time Quantity Price Trade Date "
+                   "Settle Date Capacity")
+
+
+def _money(v: float) -> str:
+    return f"(${-v:,.2f})" if v < 0 else f"${v:,.2f}"
+
+
+def _trade(pdf: FPDF, line: str, principal: float, commission: float, net: float) -> None:
+    pdf.set_font("Helvetica", size=8)
+    for text in (line, f"Principal Amount {_money(principal)}", "Interest", f"Commission {_money(commission)}",
+                 "Transaction Fee $0.00", "Other Fees / Credits $0.00", f"Net Amount {_money(net)}"):
+        pdf.cell(0, 5, text, new_x="LMARGIN", new_y="NEXT")
+
+
+def _confirm_page(pdf: FPDF, date_line: str = "") -> None:
+    pdf.add_page()
+    for text in CONFIRM_HEAD:
+        _line(pdf, text)
+    if date_line:
+        _line(pdf, f"Confirmation Date : {date_line}")
+    _line(pdf, CONFIRM_COLUMNS, 8)
+
+
+def drivewealth_confirmation_buys(path: Path) -> None:
+    """Three orders on one day, one of them filled as whole + fractional executions, across two pages."""
+    pdf = FPDF(orientation="P", unit="mm", format="Letter")
+    pdf.set_auto_page_break(False)
+    _confirm_page(pdf, "3/2/2026")
+    _trade(pdf, "NVDA NVIDIA CORPORATION COM M Buy 9:31:05 AM 0.5 180.00 3/2/2026 3/3/2026 Principal",
+           90.00, 0.22, 90.22)
+    pdf.add_page()
+    _line(pdf, "Transaction Terms")
+    _line(pdf, "1. This trade confirmation is synthetic test data.")
+    _confirm_page(pdf)
+    _trade(pdf, "AAPL APPLE INC COM M Buy 10:02:11 AM 2 250.00 3/2/2026 3/3/2026 Agency", 500.00, 0.00, 500.00)
+    _trade(pdf, "AAPL APPLE INC COM M Buy 10:02:12 AM 0.4 250.00 3/2/2026 3/3/2026 Principal", 100.00, 0.24, 100.24)
+    _trade(pdf, "BRK.B BERKSHIRE HATHAWAY INC DEL CL B NEW M Buy 10:05:40 AM 0.1 500.00 3/2/2026 3/3/2026 "
+                "Riskless Principal", 50.00, 0.12, 50.12)
+    pdf.output(str(path))
+
+
+def drivewealth_confirmation_sells(path: Path) -> None:
+    """A partial sale, a full sale at a loss, and a sale with no known purchase."""
+    pdf = FPDF(orientation="P", unit="mm", format="Letter")
+    pdf.set_auto_page_break(False)
+    _confirm_page(pdf, "4/15/2026")
+    _trade(pdf, "AAPL APPLE INC COM M Sell 3:58:00 PM -1 275.00 4/15/2026 4/16/2026 Agency", -275.00, 0.00, -275.00)
+    _trade(pdf, "NVDA NVIDIA CORPORATION COM M Sell 11:15:30 AM -0.5 170.00 4/15/2026 4/16/2026 Principal",
+           -85.00, 0.20, -84.80)
+    _trade(pdf, "TSLA TESLA INC COM M Sell 12:00:00 PM -0.25 400.00 4/15/2026 4/16/2026 Principal",
+           -100.00, 0.24, -99.76)
+    pdf.output(str(path))
+
+
 def no_holdings(path: Path) -> None:
     pdf = _pdf()
     _line(pdf, "GBM Casa de Bolsa - ESTADO DE CUENTA", 11, bold=True)
@@ -121,4 +182,6 @@ if __name__ == "__main__":
     gbm_multipage(HERE / "gbm_multipage.pdf")
     drivewealth_statement(HERE / "drivewealth_statement.pdf")
     no_holdings(HERE / "no_holdings.pdf")
+    drivewealth_confirmation_buys(HERE / "confirmation_buys.pdf")
+    drivewealth_confirmation_sells(HERE / "confirmation_sells.pdf")
     print("fixtures written to", HERE)
