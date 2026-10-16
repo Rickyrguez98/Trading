@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,16 @@ FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
 SYMBOL_RE = re.compile(r"^\^?[A-Z0-9][A-Z0-9\-]{0,11}(\.[A-Z]{2,3})?$")
 BENCHMARK = "^GSPC"                     # S&P 500, the yardstick in the sector view
 _PACER = RateLimiter(0.4)              # same spacing as the pipelines' yfinance calls
+# One Yahoo request at a time from the app: the page's charts, live prices and
+# forecasts run in parallel threads, and overlapping yfinance calls both burst
+# past Yahoo's limits and share one cookie/crumb session.
+_YF_LOCK = threading.Lock()
+QUIET_SECONDS = 300                    # after Yahoo goes silent, use last known prices this long
+EMPTY_RUN = 3                          # this many empty answers in a row = Yahoo is not answering
+# yfinance logs "possibly delisted; no price data found" whenever Yahoo answers
+# empty -- which is also what a block looks like. The app reports that itself,
+# once and correctly, so the misleading per-ticker line is silenced.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 THROTTLE = "yahoo_charts"
 QUOTE_TTL = 300                         # live prices refresh at most every 5 minutes
 CHART_POLICY = ThrottlePolicy(base_pause=3.0, max_pause=10.0, give_up_after=3, cooldown=120.0)
@@ -77,6 +88,7 @@ class MarketData:
         self._download = downloader or _yahoo_history
         self._info = info_downloader or _yahoo_info
         self._quote = quote_downloader or _yahoo_quote
+        self.quiet_until = 0.0              # Yahoo stopped answering: no quote requests before this time
 
     def bars(self, symbol: str, start: Optional[date] = None) -> pd.DataFrame:
         """Daily bars from ``start`` (default: enough for a year plus the SMA200 warm-up)."""
@@ -115,6 +127,7 @@ class MarketData:
         now = time.time()
         out: Dict[str, Dict[str, Any]] = {}
         changed = False
+        empty_run = 0
         for raw in symbols:
             symbol = normalize_symbol(raw)
             hit = book.get(symbol)
@@ -124,14 +137,26 @@ class MarketData:
             if self.offline:
                 out[symbol] = {"error": "offline: no quote cached"}
                 continue
+            if time.time() < self.quiet_until:
+                # Yahoo stopped answering moments ago: keep the last known price, ask again later.
+                out[symbol] = {**(hit or {}), "error": "Yahoo is not answering (rate limit); last known price",
+                               "stale": True}
+                continue
             try:
                 q = get_throttle(THROTTLE, CHART_POLICY).call(self._quote, symbol)
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not blank the table
-                out[symbol] = {**(hit or {}), "error": f"{type(exc).__name__}: {exc}"[:160]}
+                out[symbol] = {**(hit or {}), "error": f"{type(exc).__name__}: {exc}"[:160], "stale": True}
                 continue
             if not q or q.get("price") is None:
-                out[symbol] = {**(hit or {}), "error": "Yahoo returned no recent price"}
+                out[symbol] = {**(hit or {}), "error": "Yahoo returned no recent price", "stale": True}
+                empty_run += 1
+                if empty_run >= EMPTY_RUN:
+                    self.quiet_until = time.time() + QUIET_SECONDS
+                    logger.warning("Yahoo returned no prices for %d symbols in a row (it does this when it rate "
+                                   "limits); using last known prices and asking again in %d s",
+                                   empty_run, QUIET_SECONDS)
                 continue
+            empty_run = 0
             book[symbol] = out[symbol] = {**q, "fetched": now}
             changed = True
         if changed:
@@ -179,8 +204,9 @@ class MarketData:
 def _yahoo_history(symbol: str, start: date) -> pd.DataFrame:
     import yfinance as yf
 
-    _PACER.acquire()
-    df = yf.Ticker(symbol).history(start=start.isoformat(), auto_adjust=True)
+    with _YF_LOCK:
+        _PACER.acquire()
+        df = yf.Ticker(symbol).history(start=start.isoformat(), auto_adjust=True)
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
@@ -188,7 +214,8 @@ def _yahoo_history(symbol: str, start: date) -> pd.DataFrame:
     df.index = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
     df = df.dropna(subset=["close"])
     try:
-        df.attrs["currency"] = (yf.Ticker(symbol).history_metadata or {}).get("currency")
+        with _YF_LOCK:
+            df.attrs["currency"] = (yf.Ticker(symbol).history_metadata or {}).get("currency")
     except Exception:  # noqa: BLE001 - the currency label is cosmetic
         pass
     return df
@@ -198,8 +225,9 @@ def _yahoo_quote(symbol: str) -> Dict[str, Any]:
     """Last regular-session 5-minute close and the previous session's close."""
     import yfinance as yf
 
-    _PACER.acquire()
-    df = yf.Ticker(symbol).history(period="5d", interval="5m", prepost=False, auto_adjust=False)
+    with _YF_LOCK:
+        _PACER.acquire()
+        df = yf.Ticker(symbol).history(period="5d", interval="5m", prepost=False, auto_adjust=False)
     if df is None or df.empty:
         return {}
     close = df["Close"].dropna()
@@ -217,8 +245,9 @@ def _yahoo_quote(symbol: str) -> Dict[str, Any]:
 def _yahoo_info(symbol: str) -> Dict[str, Any]:
     import yfinance as yf
 
-    _PACER.acquire()
-    return dict(yf.Ticker(symbol).get_info() or {})
+    with _YF_LOCK:
+        _PACER.acquire()
+        return dict(yf.Ticker(symbol).get_info() or {})
 
 
 def _payload(df: pd.DataFrame) -> Dict[str, Any]:

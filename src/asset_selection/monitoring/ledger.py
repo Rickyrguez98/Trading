@@ -367,6 +367,117 @@ def merge_new(existing: Sequence[Execution], incoming: Sequence[Execution]) -> T
 
 
 # ---------------------------------------------------------------------------
+# Orders from a spreadsheet (CSV or Excel)
+# ---------------------------------------------------------------------------
+
+_COLUMNS = {
+    "symbol": ("symbol", "ticker", "emisora", "simbolo", "instrument", "instrumento", "stock", "accion"),
+    "side": ("side", "action", "accion_tipo", "type", "tipo", "operation", "operacion", "tipo_de_operacion",
+             "movimiento", "buy_sell", "compra_venta"),
+    "quantity": ("quantity", "qty", "shares", "titulos", "cantidad", "acciones", "units", "numero_de_titulos"),
+    "price": ("price", "precio", "execution_price", "precio_de_ejecucion", "precio_unitario", "fill_price"),
+    "date": ("trade_date", "date", "fecha", "fecha_de_operacion", "fecha_operacion", "executed", "execution_date"),
+    "time": ("exec_time", "time", "hora", "execution_time"),
+    "commission": ("commission", "comision", "commissions", "fee", "fees", "comisiones"),
+    "net_amount": ("net_amount", "net", "importe_neto", "total", "importe", "amount", "monto"),
+    "currency": ("currency", "moneda", "divisa"),
+}
+_BUY = {"buy", "compra", "b", "purchase", "bought", "c"}
+_SELL = {"sell", "venta", "s", "sale", "sold", "v"}
+
+
+class OrdersTableError(ValueError):
+    """A spreadsheet that cannot be read as a list of orders."""
+
+
+def _key(label) -> str:
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(label)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+def executions_from_table(df, *, source: str = "orders.csv", broker: str = "GBM (DriveWealth)"
+                          ) -> Tuple[List[Execution], List[str]]:
+    """Orders from a spreadsheet: one row per fill or order, English or Spanish headers.
+
+    Needs a symbol, a date, a quantity and a price; the side comes from a
+    buy/sell column (compra/venta) or, without one, from the sign of the
+    quantity. Commission and net amount are optional. Returns the executions
+    and one note per row that could not be read. Only USD orders are taken
+    (the ledger is one account in one currency); others are reported.
+    """
+    import pandas as pd
+
+    cols = {_key(c): c for c in df.columns}
+    found = {field: next((cols[k] for k in names if k in cols), None) for field, names in _COLUMNS.items()}
+    missing = [f for f in ("symbol", "date", "quantity", "price") if found[f] is None]
+    if missing:
+        raise OrdersTableError(
+            f"{source}: missing column(s) {', '.join(missing)}; found {', '.join(map(str, df.columns))}. "
+            "Expected something like: date, symbol, side (buy/sell), quantity, price, commission")
+    raw_dates = df[found["date"]].astype(str).str.strip()
+    parts = raw_dates.str.extract(r"^(\d{1,2})[/.-](\d{1,2})[/.-]\d{2,4}")
+    dayfirst = bool((pd.to_numeric(parts[0], errors="coerce") > 12).any()) or (
+        not (pd.to_numeric(parts[1], errors="coerce") > 12).any() and _key(found["date"]).startswith("fecha"))
+    mixed = {"format": "mixed"} if int(pd.__version__.split(".")[0]) >= 2 else {}   # pandas 1.x parses per value
+    dates = pd.to_datetime(raw_dates, errors="coerce", dayfirst=dayfirst, **mixed)
+
+    out: List[Execution] = []
+    notes: List[str] = []
+    for i, row in enumerate(df.to_dict("records")):
+        where = f"{source} row {i + 2}"
+        symbol = re.sub(r"[\s*]+", "", str(row.get(found["symbol"]) or "")).upper()
+        qty = _number(row.get(found["quantity"]))
+        price = _number(row.get(found["price"]))
+        when = dates.iloc[i]
+        if not symbol or symbol == "NAN" or qty in (None, 0) or price in (None, 0) or pd.isna(when):
+            if any(str(v).strip() not in ("", "nan", "None") for v in row.values()):
+                notes.append(f"{where}: skipped (needs symbol, date, quantity and price)")
+            continue
+        side_raw = _key(row.get(found["side"])) if found["side"] else ""
+        side = BUY if side_raw in _BUY or side_raw.startswith("compra") or side_raw.startswith("buy") else (
+            SELL if side_raw in _SELL or side_raw.startswith("venta") or side_raw.startswith("sell") else None)
+        if side is None:
+            if found["side"] and side_raw:
+                notes.append(f"{where}: skipped (side {row.get(found['side'])!r} is neither buy nor sell)")
+                continue
+            side = SELL if qty < 0 else BUY
+        currency = str(row.get(found["currency"]) or "USD").strip().upper() if found["currency"] else "USD"
+        if currency not in ("USD", "US$", "DLS", "NAN", ""):
+            notes.append(f"{where}: skipped ({currency} orders are not supported; this ledger is in USD)")
+            continue
+        qty, price = abs(qty), abs(price)
+        principal = round(qty * price, 2)
+        commission = abs(_number(row.get(found["commission"])) or 0.0) if found["commission"] else 0.0
+        net = abs(_number(row.get(found["net_amount"])) or 0.0) if found["net_amount"] else 0.0
+        if not net:
+            net = principal + commission if side == BUY else principal - commission
+        exec_time = str(row.get(found["time"]) or "").strip().upper() if found["time"] else None
+        out.append(Execution(
+            symbol=symbol, side=side, quantity=qty, price=price, trade_date=when.date(),
+            exec_time=exec_time if exec_time and exec_time != "NAN" else None,
+            description=symbol, principal=principal, commission=commission, net_amount=net,
+            currency="USD", broker=broker, source=where,
+        ))
+    return out, notes
+
+
+def _number(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return None if value != value else float(value)        # NaN check
+    text = str(value).strip().replace("$", "").replace(",", "")
+    negative = text.startswith("(") and text.endswith(")")
+    try:
+        number = float(text.strip("()"))
+    except ValueError:
+        return None
+    return -number if negative else number
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

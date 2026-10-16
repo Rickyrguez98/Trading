@@ -59,14 +59,35 @@ class Workflow:
     def start_selection(self, mode: str = "full", limit: Optional[int] = None) -> Job:
         job_id = JobManager.new_id()
         job_dir = self.jobs.job_dir(job_id)
-        argv = commands.selection_command(self.paths, mode=mode, limit=limit, job_dir=job_dir)
+        tickers = self.my_tickers() if mode == "mine" else None
+        argv = commands.selection_command(self.paths, mode=mode, limit=limit, job_dir=job_dir, tickers=tickers)
         outputs = ({"ranking": str(self.paths.ranking_csv), "summary": str(self.paths.selection_summary)}
                    if mode == "full" else
                    {"ranking": str(job_dir / "processed" / "asset_selection_results.csv"),
                     "summary": str(job_dir / "reports" / "asset_selection_summary.json")})
-        title = "Full-universe stock selection" if mode == "full" else f"Sample selection ({limit or 50} tickers)"
+        title = {"full": "Full-universe stock selection",
+                 "mine": f"My stocks only ({len(tickers or [])} tickers)"}.get(
+            mode, f"Sample selection ({limit or 50} tickers)")
         return self.jobs.start("selection", title, argv, outputs=outputs,
-                               params={"mode": mode, "limit": limit}, job_id=job_id)
+                               params={"mode": mode, "limit": limit, "tickers": tickers}, job_id=job_id)
+
+    def my_tickers(self) -> List[str]:
+        """US tickers you hold: open positions from your trade history, else the holdings file."""
+        if self.portfolio.ledger_path.exists():
+            symbols = self.portfolio.view().open_symbols
+        else:
+            symbols = [s for s in status.holdings_symbols(self.paths, self.settings) if not s.endswith(".MX")]
+        return [s.replace("-", ".") for s in symbols]
+
+    def my_stocks_analysis(self) -> Optional[Dict[str, Any]]:
+        """The latest finished my-stocks run: fundamentals, news and scores for what you hold."""
+        for job in self.jobs.list(limit=50):
+            if job.kind == "selection" and (job.params or {}).get("mode") == "mine" and job.state == "succeeded":
+                rows = status.top_ranking(self.paths, 500, csv=Path(job.outputs.get("ranking", "")),
+                                          columns=status.ANALYSIS_COLUMNS)
+                if rows:
+                    return {"job": job, "rows": rows}
+        return None
 
     # -- step 2 ---------------------------------------------------------
     def start_allocation(self, amount: float, strategy: Optional[str] = None, offline: bool = False,

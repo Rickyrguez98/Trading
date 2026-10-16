@@ -25,8 +25,10 @@ from asset_selection.monitoring.confirmations import ConfirmationParseError, par
 from asset_selection.monitoring.ledger import (
     BUY,
     LedgerView,
+    OrdersTableError,
     consolidate,
     csv_safe,
+    executions_from_table,
     holdings_csv_text,
     merge_new,
     read_executions,
@@ -34,7 +36,7 @@ from asset_selection.monitoring.ledger import (
 )
 
 from .market import MarketData, MarketDataError, normalize_symbol
-from .outlook import HORIZONS, exit_plan, month_paths, stock_outlook
+from .outlook import HORIZONS, exit_plan, month_paths, prognosis, stock_outlook
 from .paths import Paths
 
 MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -91,8 +93,13 @@ class Portfolio:
         return self.ledger_path.exists() and bool(read_executions(self.ledger_path))
 
     def import_pdfs(self, files: Sequence[Tuple[str, bytes]]) -> ImportResult:
+        """Kept for callers of the first version; reads PDFs, CSV and Excel alike."""
+        return self.import_files(files)
+
+    def import_files(self, files: Sequence[Tuple[str, bytes]]) -> ImportResult:
+        """Trade confirmation PDFs and order spreadsheets (CSV, Excel), any number at once."""
         if not files:
-            raise PortfolioError("choose one or more confirmation PDFs")
+            raise PortfolioError("choose one or more confirmation PDFs or order spreadsheets")
         if len(files) > MAX_FILES:
             raise PortfolioError(f"upload at most {MAX_FILES} files at a time")
         existing = read_executions(self.ledger_path)
@@ -104,16 +111,31 @@ class Portfolio:
             if not data or len(data) > MAX_PDF_BYTES:
                 res.error = "empty or larger than 10 MB"
                 continue
-            if not data.startswith(b"%PDF"):
-                res.error = "not a PDF"
-                continue
+            suffix = Path(res.name).suffix.lower()
             try:
-                executions, report = parse_confirmation_pdf(io.BytesIO(data), name=res.name)
-            except ConfirmationParseError as exc:
+                if data.startswith(b"%PDF"):
+                    executions, report = parse_confirmation_pdf(io.BytesIO(data), name=res.name)
+                    notes = report.warnings + [f"not read: {line}" for line in report.unreadable_lines]
+                elif suffix in (".csv", ".txt"):
+                    executions, notes = executions_from_table(_read_csv(data), source=res.name)
+                elif suffix in (".xlsx", ".xlsm") and data.startswith(b"PK"):
+                    import pandas as pd
+
+                    executions, notes = executions_from_table(pd.read_excel(io.BytesIO(data)), source=res.name)
+                else:
+                    res.error = "not a PDF, CSV or Excel (.xlsx) file"
+                    continue
+            except (ConfirmationParseError, OrdersTableError) as exc:
                 res.error = str(exc)
                 continue
+            except Exception as exc:  # noqa: BLE001 - a broken spreadsheet is reported, not fatal
+                res.error = f"cannot read the file ({type(exc).__name__})"
+                continue
+            if not executions:
+                res.error = "no orders found in this file" + (f" ({notes[0]})" if notes else "")
+                continue
             res.trades = len(executions)
-            res.warnings = report.warnings + [f"not read: {line}" for line in report.unreadable_lines]
+            res.warnings = notes
             added, dupes = merge_new(existing + new_rows, executions)
             res.added, res.duplicates = len(added), dupes
             new_rows.extend(added)
@@ -165,8 +187,8 @@ class Portfolio:
         return {s: got[y] for s, y in symbols.items() if y in got}
 
     # --------------------------------------------------------------- outlook
-    OUTLOOK_VERSION = 2
-    OUTLOOK_HISTORY_DAYS = 6 * 365          # enough past to back-test even the 1-year trend
+    OUTLOOK_VERSION = 3
+    OUTLOOK_HISTORY_DAYS = 12 * 365         # ~10 years of monthly tests: enough to judge even a 1-year trend
 
     def _long_bars(self, symbol: str):
         return self.market.bars(normalize_symbol(symbol), start=date.today() - timedelta(days=self.OUTLOOK_HISTORY_DAYS))
@@ -202,6 +224,13 @@ class Portfolio:
         traded = sum(o.principal for o in view.orders)
         return (sum(o.commission + o.fees for o in view.orders) / traded) if traded else 0.0
 
+    def prognoses(self, view: LedgerView, outlooks: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Main verdict per open lot (wait / likely to fall / no reliable direction), keyed ``SYMBOL|buy_order``."""
+        rate = self.commission_rate(view)
+        return {f"{op.symbol}|{op.buy_order}": prognosis(outlooks.get(op.symbol), commission_rate=rate,
+                                                         cost_per_share=(op.cost or 0.0) / op.shares)
+                for op in view.open_operations if op.shares}
+
     def exit_plans(self, view: LedgerView, outlooks: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """The best 1-month exit plan per open lot, keyed ``SYMBOL|buy_order``."""
         rate = self.commission_rate(view)
@@ -229,7 +258,8 @@ class Portfolio:
     # ------------------------------------------------------------------ rows
     def rows(self, view: LedgerView, quotes: Dict[str, Dict[str, Any]],
              outlooks: Optional[Dict[str, Dict[str, Any]]] = None,
-             plans: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+             plans: Optional[Dict[str, Dict[str, Any]]] = None,
+             prognoses: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         names = {s: (self.market.cached_meta(s).get("name") or None) for s in {o.symbol for o in view.operations}}
         out = []
         for op in view.operations:
@@ -249,6 +279,7 @@ class Portfolio:
                 if price is not None:
                     value = price * op.shares
                     row.update(current_price=price, price_as_of=q.get("as_of"), market_value=value,
+                               price_stale=bool(q.get("stale")),
                                pl=value - (op.cost or 0.0),
                                return_pct=((value / op.cost - 1) * 100) if op.cost else None)
                 else:
@@ -257,6 +288,8 @@ class Portfolio:
                     row["outlook"] = outlooks[op.symbol]
                 if plans and f"{op.symbol}|{op.buy_order}" in plans:
                     row["plan"] = plans[f"{op.symbol}|{op.buy_order}"]
+                if prognoses and f"{op.symbol}|{op.buy_order}" in prognoses:
+                    row["prognosis"] = prognoses[f"{op.symbol}|{op.buy_order}"]
             out.append(row)
         return out
 
@@ -272,6 +305,7 @@ class Portfolio:
         return {
             "currency": (view.orders[0].currency if view.orders else "USD"),
             "open_positions": len(view.open_symbols), "open_lots": len(open_rows),
+            "stale_prices": sum(1 for r in open_rows if r.get("price_stale")),
             "cost_open": cost_open, "market_value": value if priced else None,
             "unpriced": len(open_rows) - len(priced),
             "unrealized_pl": unreal if priced else None,
@@ -309,15 +343,20 @@ class Portfolio:
                 "currency", "buy_order", "sell_order", "note"]
         outlook_cols = [f"{k}_{label}" for label in HORIZONS.values()
                         for k in ("trend", "p_up", "expected", "average", "min", "max", "trend_hits")]
+        prognosis_cols = ["prognosis", "prognosis_basis", "expected_price", "expected_date", "expected_vs_cost_pct",
+                          "break_even", "break_even_date", "chance_of_halving_1y"]
         plan_cols = ["recommendation", "rec_limit", "rec_fill_chance", "rec_exit_vs_cost_pct", "rec_stop",
                      "rec_stop_chance", "rec_now_vs_cost_pct", "rec_reason", "rec_confidence", "outlook_as_of"]
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
-        w.writerow(cols + outlook_cols + plan_cols)
+        w.writerow(cols + prognosis_cols + outlook_cols + plan_cols)
         for r in rows:
             ol = r.get("outlook") or {}
             hz = ol.get("horizons") or {}
-            extra: List[Any] = []
+            pg = r.get("prognosis") or {}
+            extra: List[Any] = [pg.get("headline"), pg.get("basis"), pg.get("expected"), pg.get("expected_date"),
+                                pg.get("expected_vs_cost_pct"), pg.get("break_even"), pg.get("break_even_date"),
+                                pg.get("p_halve_1y")]
             for h in HORIZONS:
                 x = hz.get(str(h)) or {}
                 extra += [x.get("trend"), x.get("p_up"), x.get("median"), x.get("average"), x.get("min"),
@@ -340,6 +379,20 @@ def _plan_text(plan: Dict[str, Any]) -> str:
         return f"sell now at about {plan['price']:.4g}"
     text = f"limit sell at {plan['limit']:.4g}"
     return text + (f" with stop at {plan['stop']:.4g}" if plan.get("stop") is not None else "")
+
+
+def _read_csv(data: bytes):
+    """A CSV export in UTF-8 (with or without BOM) or Latin-1, comma or semicolon separated."""
+    import pandas as pd
+
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    sep = ";" if text.splitlines()[0].count(";") > text.splitlines()[0].count(",") else ","
+    return pd.read_csv(io.StringIO(text), sep=sep, dtype=str, keep_default_na=False)
 
 
 def _iso(d: Optional[date]) -> Optional[str]:

@@ -12,6 +12,18 @@
   <img class="hero-logo" src="/static/brand/logo-full.webp" alt="Finance Bull" width="230" height="160">
 </section>
 
+<form class="card upload-top" method="post" action="/portfolio/import" enctype="multipart/form-data">
+  <div class="upload-copy">
+    <h3>Load your trades</h3>
+    <p>Trade confirmation PDFs from your broker, or a spreadsheet of your orders (CSV or Excel: date, ticker,
+      buy/sell, quantity, price). As many files as you like — ones already loaded are skipped.</p>
+  </div>
+  <input type="hidden" name="next" value="/">
+  <input type="file" name="files" multiple required accept=".pdf,.csv,.xlsx,application/pdf,text/csv">
+  <button class="btn" type="submit">Upload</button>
+  <a class="btn ghost" href="/portfolio">Open portfolio</a>
+</form>
+
 <div class="kpis">
   <a class="kpi" href="/selection">
     <span class="label">1 · Stock selection</span>

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Portfolio{% endblock %}
+{% block main_class %}wide{% endblock %}
 {% block content %}
 {% set s = summary %}
 <section class="hero">
@@ -13,12 +14,14 @@
 </section>
 
 <details class="card import" {{ 'open' if not rows }}>
-  <summary>{{ 'Import your trade confirmations' if not rows else 'Import more confirmations' }}</summary>
-  <p class="cc-name">Select or drop as many confirmation PDFs as you like (GBM US-dollar account, issued by
-    DriveWealth: <code>Confirm_GBMP_….pdf</code>). Files already imported are recognised and skipped, so you can
-    simply upload the whole folder again each month.</p>
+  <summary>{{ 'Import your trades' if not rows else 'Import more trades' }}</summary>
+  <p class="cc-name">Select or drop as many files as you like: trade confirmation PDFs (GBM US-dollar account,
+    issued by DriveWealth: <code>Confirm_GBMP_….pdf</code>) or a spreadsheet of your orders (CSV or Excel) with a
+    date, ticker, buy/sell, quantity and price per row — Spanish headers (fecha, emisora, compra/venta, títulos,
+    precio, comisión) work too. Files already imported are recognised and skipped, so you can simply upload the
+    whole folder again each month.</p>
   <form method="post" action="/portfolio/import" enctype="multipart/form-data" class="dropzone" id="dropzone">
-    <input type="file" name="files" id="pdf-files" accept="application/pdf,.pdf" multiple required>
+    <input type="file" name="files" id="pdf-files" accept=".pdf,.csv,.xlsx,application/pdf,text/csv" multiple required>
     <label for="pdf-files" class="drop-label"><strong>Choose PDFs</strong> or drop them here
       <span class="cc-name" id="pdf-count"></span></label>
     <button class="btn" type="submit">Import</button>
@@ -102,11 +105,16 @@
   </div>
 </div>
 
+<p class="fine scroll-hint">The first columns stay in place; scroll the table sideways for the prognosis and the
+  1-month to 1-year forecasts.</p>
 <div class="table-wrap ops"><table id="ops">
   <thead><tr>
-    <th rowspan="2" class="stock-h">Stock</th><th rowspan="2" class="num">Shares</th><th rowspan="2">Bought</th>
-    <th rowspan="2" class="num">Buy price</th><th rowspan="2">Sold</th><th rowspan="2" class="num">Sell / now price</th>
-    <th rowspan="2" class="num">Gain / loss</th><th rowspan="2" class="num">Return</th><th rowspan="2" class="num">Days</th>
+    <th rowspan="2" class="stock-h fz" data-fz="0">Stock</th><th rowspan="2" class="num fz" data-fz="1">Shares</th>
+    <th rowspan="2" class="fz" data-fz="2">Bought</th><th rowspan="2" class="num fz" data-fz="3">Buy price</th>
+    <th rowspan="2" class="fz" data-fz="4">Sold</th><th rowspan="2" class="num fz" data-fz="5">Sell / now price</th>
+    <th rowspan="2" class="num fz" data-fz="6">Gain / loss</th><th rowspan="2" class="num fz" data-fz="7">Return</th>
+    <th rowspan="2" class="num fz last" data-fz="8">Days</th>
+    <th rowspan="2" class="pg-h">Prognosis <span class="cc-name">(model)</span></th>
     {% for days, label in horizons %}<th colspan="4" class="hz-group">{{ label }}</th>{% endfor %}
     <th rowspan="2" class="rec-h">Short-term recommendation <span class="cc-name">(1 month, model)</span></th>
   </tr><tr>
@@ -117,38 +125,40 @@
     {% for r in items %}
     <tr class="{{ r.status|lower }}{{ ' first' if loop.first }}"
         {% if r.status == 'OPEN' %}data-open="{{ r.symbol }}|{{ r.buy_order }}" data-shares="{{ r.shares }}" data-cost="{{ r.cost }}"{% endif %}>
-      {% if loop.first %}<td class="stock" rowspan="{{ items|length }}"><strong>{{ r.symbol }}</strong><div class="cc-name">{{ r.name }}</div></td>{% endif %}
-      <td class="num">{{ r.shares|qty }}</td>
-      <td>{% if r.status == 'UNMATCHED_SELL' %}<span class="badge warn" title="{{ r.note }}">purchase not imported</span>{% else %}{{ r.buy_date }}{% endif %}</td>
-      <td class="num">{{ r.buy_price|price if r.buy_price is not none else '—' }}
+      {% if loop.first %}<td class="stock fz" data-fz="0" rowspan="{{ items|length }}"><strong>{{ r.symbol }}</strong><div class="cc-name">{{ r.name }}</div></td>{% endif %}
+      <td class="num fz" data-fz="1">{{ r.shares|qty }}</td>
+      <td class="fz" data-fz="2">{% if r.status == 'UNMATCHED_SELL' %}<span class="badge warn" title="{{ r.note }}">purchase not imported</span>{% else %}{{ r.buy_date }}{% endif %}</td>
+      <td class="num fz" data-fz="3">{{ r.buy_price|price if r.buy_price is not none else '—' }}
         {% if r.cost is not none %}<div class="cc-name">cost {{ r.cost|usd }}</div>{% endif %}</td>
       {% if r.status == 'OPEN' %}
-        <td><span class="badge gold">Open</span></td>
-        <td class="num"><span class="js-price">{{ r.current_price|price if r.current_price is not none else '…' }}</span>
+        <td class="fz" data-fz="4"><span class="badge gold">Open</span></td>
+        <td class="num fz" data-fz="5"><span class="js-price">{{ r.current_price|price if r.current_price is not none else '…' }}</span>
           <div class="cc-name">value <span class="js-value">{{ r.market_value|usd if r.market_value is not none else '…' }}</span></div></td>
       {% else %}
-        <td>{{ r.sell_date }}</td>
-        <td class="num">{{ r.sell_price|price }}<div class="cc-name">received {{ r.proceeds|usd }}</div></td>
+        <td class="fz" data-fz="4">{{ r.sell_date }}</td>
+        <td class="num fz" data-fz="5">{{ r.sell_price|price }}<div class="cc-name">received {{ r.proceeds|usd }}</div></td>
       {% endif %}
       {% set tone = '' if r.pl is none else ('pos' if r.pl >= 0 else 'neg') %}
-      <td class="num js-pl {{ tone }}">{{ r.pl|usd(signed=True) if r.pl is not none else ('?' if r.status == 'UNMATCHED_SELL' else '…') }}</td>
-      <td class="num js-ret {{ tone }}">{{ r.return_pct|pct(2, True) if r.return_pct is not none else '—' }}</td>
-      <td class="num">{{ r.holding_days if r.holding_days is not none else '—' }}</td>
+      <td class="num js-pl fz {{ tone }}" data-fz="6">{{ r.pl|usd(signed=True) if r.pl is not none else ('?' if r.status == 'UNMATCHED_SELL' else '…') }}</td>
+      <td class="num js-ret fz {{ tone }}" data-fz="7">{{ r.return_pct|pct(2, True) if r.return_pct is not none else '—' }}</td>
+      <td class="num fz last" data-fz="8">{{ r.holding_days if r.holding_days is not none else '—' }}</td>
       {% if r.status == 'OPEN' %}
+        <td class="pg js-pg">…</td>
         {% for days, label in horizons %}<td class="fc g" data-h="{{ days }}" data-k="trend">…</td><td class="fc num" data-h="{{ days }}" data-k="median">…</td><td class="fc num" data-h="{{ days }}" data-k="min">…</td><td class="fc num" data-h="{{ days }}" data-k="max">…</td>{% endfor %}
         <td class="rec js-rec">…</td>
       {% else %}
-        <td class="fc-closed" colspan="{{ horizons|length * 4 + 1 }}">{{ 'sold' if r.status == 'CLOSED' else '' }}</td>
+        <td class="fc-closed" colspan="{{ horizons|length * 4 + 2 }}">{{ 'sold' if r.status == 'CLOSED' else '' }}</td>
       {% endif %}
     </tr>
     {% endfor %}
   {% endfor %}
   </tbody>
   <tfoot><tr>
-    <td>Total</td><td></td><td></td><td class="num">{{ s.cost_open|usd }}<div class="cc-name">open cost</div></td>
-    <td></td><td class="num" id="tot-value">{{ s.market_value|usd if s.market_value is not none else '…' }}<div class="cc-name">open value</div></td>
-    <td class="num" id="tot-pl"><span class="{{ 'pos' if s.total_pl >= 0 else 'neg' }}">{{ s.total_pl|usd(signed=True) }}</span><div class="cc-name">realized + open</div></td>
-    <td></td><td></td><td colspan="{{ horizons|length * 4 + 1 }}"></td>
+    <td class="fz" data-fz="0">Total</td><td class="fz" data-fz="1"></td><td class="fz" data-fz="2"></td>
+    <td class="num fz" data-fz="3">{{ s.cost_open|usd }}<div class="cc-name">open cost</div></td>
+    <td class="fz" data-fz="4"></td><td class="num fz" id="tot-value" data-fz="5">{{ s.market_value|usd if s.market_value is not none else '…' }}<div class="cc-name">open value</div></td>
+    <td class="num fz" id="tot-pl" data-fz="6"><span class="{{ 'pos' if s.total_pl >= 0 else 'neg' }}">{{ s.total_pl|usd(signed=True) }}</span><div class="cc-name">realized + open</div></td>
+    <td class="fz" data-fz="7"></td><td class="fz last" data-fz="8"></td><td colspan="{{ horizons|length * 4 + 2 }}"></td>
   </tr></tfoot>
 </table></div>
 
@@ -157,18 +167,23 @@
   from its own daily moves of the last three years. The stock's past trend is kept only in proportion to how
   statistically reliable it is (a weak trend counts for nothing).
   <ul class="ev">
+    <li><strong>Prognosis</strong>: the overall verdict. "Waiting looks worthwhile" or "likely to fall" appears only
+      when a trend has passed its back-test (✓); otherwise it says there is no reliable direction and shows which way
+      the unproven model leans. It gives the expected price and the date for it, when the middle scenario gets back to
+      your break-even price (for lots at a loss), and the chance the price halves within a year.</li>
     <li><strong>Trend</strong>: up when at least 55% of the futures end above today's price, down when at most 45% do.
-      The small print is its track record: how many past test periods it called the direction right. <strong>✓</strong>
-      appears only when that record beats a coin flip with 95% confidence; "too few tests" means the history is too short
-      to judge (always the case for 6 months and 1 year).</li>
+      The small print is its track record over up to ten years of monthly tests. <strong>✓</strong> appears only when
+      that record beats a coin flip with 95% confidence, counting overlapping tests only as the independent evidence
+      they really are. "Needs N yrs" means the stock does not have the years of prices that horizon needs to be
+      judged (a 1-year call needs about ten).</li>
     <li><strong>Expected</strong>: the middle outcome (median) at that horizon. The arithmetic average is in the CSV; for
       volatile stocks it is pulled far up by a few extreme futures. <strong>Min / Max</strong>: the average lowest and
       highest close along the way.</li>
     <li><strong>Short-term recommendation</strong>: sixty sell prices are tried over the next month, each scored by its
       improvement over selling today times its chance of being reached; the best one reached in at least a quarter of
       the futures is the limit to place. The stop is where the price falls in about one month in ten. A trend is used
-      here only if it has a ✓ at one month; none does today, so these levels come from volatility alone. If no limit
-      adds at least 0.5% over today's price, it says sell now. Percentages compare with what that lot cost you, after
+      here only if it has a ✓ at one month; otherwise these levels come from volatility alone. If no limit adds at
+      least 0.5% over today's price, it says sell now. Percentages compare with what that lot cost you, after
       commission.</li>
   </ul>
   Closing prices only (intraday swings are wider) and a stop is assumed to fill at its price. These are statistical
@@ -179,6 +194,48 @@
 <div class="note warn"><strong>Worth knowing:</strong>
   <ul class="ev">{% for w in view.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>
 {% endif %}
+
+<section class="analysis" id="analysis">
+  <div class="section-head">
+    <div>
+      <h2>Fundamentals &amp; news for your stocks</h2>
+      <p class="sub">The stock-selection analysis run on only the {{ my_tickers|length }} stocks you hold: about
+        {{ my_tickers|length }} price, fundamentals and news requests instead of ~4,800, so it is quick and stays far from
+        rate limits. Scores compare your stocks with each other, not with the whole market.</p>
+    </div>
+    <div class="actions">
+      {% if running_selection %}
+        <a class="btn ghost" href="/jobs/{{ running_selection.id }}">A selection run is in progress…</a>
+      {% else %}
+        <form method="post" action="/selection/run"><input type="hidden" name="mode" value="mine">
+          <button class="btn" {{ 'disabled' if not my_tickers }}>Analyse my {{ my_tickers|length }} stocks</button></form>
+      {% endif %}
+    </div>
+  </div>
+  {% if analysis %}
+    {% set ar = analysis.rows %}
+    <p class="fine">From the run of {{ analysis.job.created_at[:16]|replace('T', ' ') }} UTC ·
+      <a href="/jobs/{{ analysis.job.id }}">details</a></p>
+    <div class="table-wrap"><table>
+      <tr><th>Stock</th><th>Sector</th><th class="num">Score</th><th class="num">Fundamentals</th>
+        <th class="num">News sentiment</th><th class="num">Articles</th><th>Role</th><th>Flags</th></tr>
+      {% for r in ar %}
+      <tr><td><strong>{{ r.ticker }}</strong><div class="cc-name">{{ (r.company_name|short or '')[:32] }}</div></td>
+        <td>{{ r.sector or '—' }}</td><td class="num">{{ r.final_score|num }}</td><td class="num">{{ r.fundamentals_score|num }}</td>
+        <td class="num">{{ r.effective_sentiment_score|num }}</td><td class="num">{{ r.article_count|num(0) }}</td>
+        <td>{{ (r.candidate_role or '—')|replace('_', ' ') }}</td>
+        <td class="wrap cc-name">{{ (r.flags or '')|replace('[', '')|replace(']', '')|replace("'", '')|truncate(80) }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% if ar and (ar|map(attribute='article_count')|map('float')|sum) == 0 %}
+      <div class="note warn">No news articles were found for any of your stocks. Add your NewsAPI.ai key to
+        <code>.env</code> as <code>NEWSAPI_AI_KEY=…</code> and run this again: without a key the only news source left is
+        Yahoo's feed, which blocks this network.</div>
+    {% endif %}
+  {% else %}
+    <div class="empty">Not run yet. "Analyse my stocks" fetches fundamentals and news for just your holdings.</div>
+  {% endif %}
+</section>
 
 <div class="grid pf-actions">
   <div class="card">
@@ -212,7 +269,7 @@
   ["dragleave", "drop"].forEach(function (t) { zone.addEventListener(t, function (e) { e.preventDefault(); zone.classList.remove("over"); }); });
   zone.addEventListener("drop", function (e) {
     var dt = new DataTransfer();
-    Array.prototype.forEach.call(e.dataTransfer.files, function (f) { if (/\.pdf$/i.test(f.name)) dt.items.add(f); });
+    Array.prototype.forEach.call(e.dataTransfer.files, function (f) { if (/\.(pdf|csv|xlsx)$/i.test(f.name)) dt.items.add(f); });
     input.files = dt.files; show();
   });
 })();

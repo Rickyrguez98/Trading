@@ -29,7 +29,7 @@
     <button class="theme-btn" id="theme-btn" type="button" title="Switch light / dark">Theme</button>
   </div>
 </header>
-<main>
+<main class="{% block main_class %}{% endblock %}">
   {% if msg %}<div class="note ok">{{ msg }}</div>{% endif %}
   {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
   {% block content %}{% endblock %}

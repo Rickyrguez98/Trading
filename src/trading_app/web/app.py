@@ -81,21 +81,24 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         pf = wf.portfolio
         view = pf.view()
         rows = pf.rows(view, pf.quotes(view, live=False))     # cached prices only: the page renders at once
+        running = wf.jobs.running("selection")
         return page(request, "portfolio.html", view=view, rows=rows, summary=pf.summary(view, rows),
                     last_import=pf.last_import(), holdings_csv=wf.settings.holdings_csv,
+                    analysis=wf.my_stocks_analysis(), my_tickers=wf.my_tickers(), running_selection=running,
                     horizons=[(d, {"1M": "1 month", "3M": "3 months", "6M": "6 months", "1Y": "1 year"}[lb])
                               for d, lb in HORIZONS.items()])
 
     @app.post("/portfolio/import")
-    async def portfolio_import(files: List[UploadFile] = File(...)):
+    async def portfolio_import(files: List[UploadFile] = File(...), next: str = Form("/portfolio")):
+        target = next if next in ("/", "/portfolio") else "/portfolio"
         batch = [(f.filename or "upload.pdf", await f.read()) for f in files if f is not None]
         try:
-            result = wf.portfolio.import_pdfs(batch)
+            result = wf.portfolio.import_files(batch)
         except PortfolioError as exc:
-            return back("/portfolio", error=str(exc))
+            return back(target, error=str(exc))
         if result.failed and not result.added and not result.duplicates:
-            return back("/portfolio", error=result.message())
-        return back("/portfolio", msg=result.message())
+            return back(target, error=result.message())
+        return back(target, msg=result.message())
 
     @app.post("/portfolio/clear")
     def portfolio_clear():
@@ -117,7 +120,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         pf = wf.portfolio
         view = pf.view()
         outlooks = pf.outlooks(view)
-        body = pf.operations_csv(pf.rows(view, pf.quotes(view), outlooks, pf.exit_plans(view, outlooks)))
+        body = pf.operations_csv(pf.rows(view, pf.quotes(view), outlooks, pf.exit_plans(view, outlooks),
+                                         pf.prognoses(view, outlooks)))
         return _csv(body, f"portfolio_operations_{date.today():%Y%m%d}.csv")
 
     @app.get("/portfolio/executions.csv")
@@ -127,7 +131,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
     @app.get("/selection", response_class=HTMLResponse)
     def selection(request: Request):
         return page(request, "selection.html", ranking=status.ranking_info(wf.paths),
-                    rows=status.top_ranking(wf.paths, 25), running=wf.jobs.running("selection"))
+                    rows=status.top_ranking(wf.paths, 25), running=wf.jobs.running("selection"),
+                    my_tickers=wf.my_tickers())
 
     @app.post("/selection/run")
     def selection_run(mode: str = Form("full"), limit: int = Form(50)):
@@ -322,7 +327,8 @@ def create_app(workflow: Optional[Workflow] = None) -> FastAPI:
         view = pf.view()
         outlooks = pf.outlooks(view)
         return clean({"horizons": {str(h): label for h, label in HORIZONS.items()}, "symbols": outlooks,
-                      "plans": pf.exit_plans(view, outlooks), "commission_rate": pf.commission_rate(view)})
+                      "plans": pf.exit_plans(view, outlooks), "prognoses": pf.prognoses(view, outlooks),
+                      "commission_rate": pf.commission_rate(view)})
 
     @app.get("/api/portfolio/chart-data")
     def api_portfolio_chart_data():

@@ -7,6 +7,7 @@ validated here; the result is an argument list, never a shell string.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -17,6 +18,7 @@ SELECTION_MODULE = "asset_selection.pipelines.run_asset_selection"
 ALLOCATION_MODULE = "asset_selection.pipelines.run_portfolio_allocation"
 MONITOR_MODULE = "asset_selection.pipelines.run_portfolio_monitor"
 MAX_SAMPLE = 500
+TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,6}([.\-][A-Z])?$")
 
 
 class InvalidRequest(ValueError):
@@ -28,7 +30,7 @@ def _py(module: str) -> List[str]:
 
 
 def selection_command(paths: Paths, *, mode: str, limit: Optional[int] = None,
-                      job_dir: Optional[Path] = None) -> List[str]:
+                      job_dir: Optional[Path] = None, tickers: Optional[List[str]] = None) -> List[str]:
     """Full run -> the canonical ranking. Sample run -> the job folder only.
 
     Fundamentals scores are relative to the set scored together, so a sample
@@ -37,8 +39,18 @@ def selection_command(paths: Paths, *, mode: str, limit: Optional[int] = None,
     argv = _py(SELECTION_MODULE) + ["--config", str(paths.selection_config), "--top", "20"]
     if mode == "full":
         return argv
+    if mode == "mine":
+        # Only your stocks: ~20 price, fundamentals and news requests instead of ~4,800. Scores are
+        # relative to this small set, so like a sample it never replaces the full ranking.
+        clean = [t for t in (str(x).strip().upper() for x in (tickers or [])) if TICKER_RE.match(t)]
+        if not clean:
+            raise InvalidRequest("no stocks of yours to analyse: import your trade confirmations or orders first")
+        if job_dir is None:
+            raise InvalidRequest("a my-stocks run needs its own job folder")
+        return argv + ["--tickers", *clean[:MAX_SAMPLE], "--no-provider-health-check",
+                       "--output-dir", str(job_dir / "reports"), "--processed-dir", str(job_dir / "processed")]
     if mode != "sample":
-        raise InvalidRequest("mode must be 'full' or 'sample'")
+        raise InvalidRequest("mode must be 'full', 'sample' or 'mine'")
     try:
         n = int(limit or 50)
     except (TypeError, ValueError):

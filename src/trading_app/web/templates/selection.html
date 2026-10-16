@@ -29,6 +29,15 @@
       <button class="btn">Run full selection</button></form>
   </div>
   <div class="card">
+    <h3>My stocks only</h3>
+    <p>Fundamentals, news and scores for just the stocks you hold — about {{ my_tickers|length }} requests to
+      each data source instead of ~4,800, so it finishes in a minute or two and stays far from rate limits.
+      Scores compare your stocks with each other; the results appear on the Portfolio page and never replace the
+      full ranking.</p>
+    <form method="post" action="/selection/run"><input type="hidden" name="mode" value="mine">
+      <button class="btn ghost" {{ 'disabled' if not my_tickers }}>Analyse my {{ my_tickers|length }} stocks</button></form>
+  </div>
+  <div class="card">
     <h3>Quick sample</h3>
     <p>A small test run. Its results stay in the job folder and never replace the full ranking (scores are relative to the set scored together).</p>
     <form method="post" action="/selection/run" class="inline"><input type="hidden" name="mode" value="sample">
