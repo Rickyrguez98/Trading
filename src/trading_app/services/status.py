@@ -89,7 +89,14 @@ def ranking_info(paths: Paths, max_age_days: int = 30) -> RankingInfo:
     return info
 
 
-def top_ranking(paths: Paths, n: int = 25, csv: Optional[Path] = None) -> List[Dict[str, Any]]:
+ANALYSIS_COLUMNS = [
+    "rank", "ticker", "company_name", "sector", "final_score", "fundamentals_score", "effective_sentiment_score",
+    "article_count", "unique_article_count", "sentiment_model_used", "risk_penalty", "candidate_role", "flags",
+]
+
+
+def top_ranking(paths: Paths, n: int = 25, csv: Optional[Path] = None,
+                columns: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     path = csv or paths.ranking_csv
     if not path.exists():
         return []
@@ -97,7 +104,7 @@ def top_ranking(paths: Paths, n: int = 25, csv: Optional[Path] = None) -> List[D
     if "rank" in df.columns:
         df = df.sort_values("rank")
     # Every expected column, even if an older ranking lacks some: missing -> None.
-    return _records(df.reindex(columns=RANKING_COLUMNS).head(int(n)))
+    return _records(df.reindex(columns=columns or RANKING_COLUMNS).head(int(n)))
 
 
 # ---------------------------------------------------------------------------

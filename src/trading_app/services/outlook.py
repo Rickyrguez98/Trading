@@ -18,12 +18,14 @@ little or nothing and a strong one counts nearly in full.
   horizon.
 
 **Honesty.** Every trend is back-tested walk-forward on the stock's own past
-(no look-ahead: each test month uses only prices before it): how often the
-predicted direction was right, and whether that is better than a coin flip
-with 95% confidence. Overlapping windows carry little independent evidence
-(24 monthly tests of a 1-year call are about two independent years), so a
-horizon with fewer than eight independent windows is reported as "not
-testable" rather than validated.
+(no look-ahead: each test month uses only prices before it), starting from
+every month the history allows (up to ten years of tests): how often the
+predicted direction was right, and whether that beats a coin flip with 95%
+confidence. Overlapping windows carry less evidence than their count
+suggests -- monthly tests of a 1-year call overlap by eleven months -- so the
+confidence interval uses the number of *independent* windows, and a horizon
+with fewer than eight is reported as "not testable" together with how many
+years of prices it would need.
 
 **Short-term recommendation (1 month).** For each lot, sixty sell prices
 between today's and the top of the simulated month are tried; each scores
@@ -54,6 +56,9 @@ HORIZONS: Dict[int, str] = {21: "1M", 63: "3M", 126: "6M", 252: "1Y"}
 MIN_DAYS = 60                # fewer daily closes than this: no outlook at all
 UP, DOWN = 0.55, 0.45        # P(up) thresholds for calling a trend
 MIN_INDEPENDENT = 8.0        # independent test windows needed before a trend can count as validated
+STEP = 21                    # one walk-forward test per month
+MAX_TESTS = 120              # at most ten years of monthly tests
+WARMUP = 253                 # the random-walk baseline needs a year of returns before the first test
 STOP_TOUCH = 0.10            # protective stop: reached in about one simulated month in ten
 MIN_IMPROVEMENT = 0.005      # a limit must add at least 0.5% over selling now to be worth waiting for
 MIN_FILL = 0.25              # a limit reached in fewer than a quarter of months is not a usable plan
@@ -87,8 +92,29 @@ class TrendBootstrap(BootstrapForecaster):
         return super().paths(context, horizon, key=key, salt=salt)
 
 
-def _cfg(horizons, n_paths: int = 2000) -> ForecastConfig:
-    return ForecastConfig(horizons=list(horizons), n_paths=n_paths)
+def _cfg(horizons, n_paths: int = 2000, tests: int = 24) -> ForecastConfig:
+    return ForecastConfig(horizons=list(horizons), n_paths=n_paths, validation_origins=tests,
+                          validation_step=STEP)
+
+
+def tests_possible(history_days: int, horizon: int) -> int:
+    """How many monthly walk-forward tests a history of this length allows."""
+    return max(0, min(MAX_TESTS, (history_days - WARMUP - horizon) // STEP + 1))
+
+
+def years_needed(horizon: int) -> float:
+    """Years of daily prices needed for MIN_INDEPENDENT independent tests at this horizon."""
+    tests = math.ceil(MIN_INDEPENDENT * max(horizon, STEP) / STEP)
+    return (WARMUP + horizon + STEP * (tests - 1)) / 252.0
+
+
+def wilson_low(p: float, n: float, z: float = 1.96) -> float:
+    """Lower end of the Wilson interval for a success rate ``p`` over ``n`` (possibly fractional) trials."""
+    if n <= 0:
+        return 0.0
+    centre = p + z * z / (2 * n)
+    spread = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (centre - spread) / (1 + z * z / n)
 
 
 def stock_outlook(bars: pd.DataFrame, *, key: str) -> Dict[str, Any]:
@@ -111,6 +137,9 @@ def stock_outlook(bars: pd.DataFrame, *, key: str) -> Dict[str, Any]:
         "trend_t_stat": t,
         "horizons": {},
     }
+    out["p_halve_1y"] = float(np.mean(paths.min(axis=1) <= 0.5 * p0))
+    out["median_path"] = [round(float(v), 4) for v in np.median(paths, axis=0)]
+    start = pd.Timestamp(as_of)
     check = TrendBootstrap(_cfg([21], n_paths=500))              # lighter model for the back-tests
     for h, label in HORIZONS.items():
         end = paths[:, h - 1]
@@ -121,20 +150,26 @@ def stock_outlook(bars: pd.DataFrame, *, key: str) -> Dict[str, Any]:
             "trend": "flat" if used == 0 else "up" if p_up >= UP else "down" if p_up <= DOWN else "flat",
             "average": float(end.mean()), "median": float(np.median(end)),
             "min": float(paths[:, :h].min(axis=1).mean()), "max": float(paths[:, :h].max(axis=1).mean()),
-            "tests": None, "hits": None, "hit_rate": None, "independent_windows": None,
+            "date": (start + pd.offsets.BDay(h)).strftime("%Y-%m-%d"),
+            "tests": None, "hits": None, "hit_rate": None, "independent_windows": None, "confidence_low": None,
             "testable": False, "validated": False, "range_held": None,
+            "years_needed": round(years_needed(h), 1), "years_available": round(closes.size / 252.0, 1),
         }
-        try:
-            rep = walk_forward_skill(closes, _cfg([h], n_paths=500), check, key=key).get(h)
-        except Exception:  # noqa: BLE001 - an untested trend is shown as untested
-            rep = None
+        n_tests = tests_possible(int(closes.size), h)
+        rep = None
+        if n_tests >= 8:
+            try:
+                rep = walk_forward_skill(closes, _cfg([h], n_paths=500, tests=n_tests), check, key=key).get(h)
+            except Exception:  # noqa: BLE001 - an untested trend is shown as untested
+                rep = None
         if rep is not None and rep.hit_rate is not None:
-            indep = float(rep.effective_windows or 0)
-            ci_low = (rep.hit_rate_ci or [0, 0])[0]
+            # Overlapping windows: judge the hit rate on the independent ones, not the raw count.
+            indep = min(float(rep.n_origins), rep.n_origins * STEP / float(h))
+            low = wilson_low(float(rep.hit_rate), indep)
             row.update(tests=int(rep.n_origins), hits=int(round(rep.hit_rate * rep.n_origins)),
-                       hit_rate=float(rep.hit_rate), independent_windows=indep,
+                       hit_rate=float(rep.hit_rate), independent_windows=round(indep, 1), confidence_low=low,
                        testable=indep >= MIN_INDEPENDENT,
-                       validated=bool(indep >= MIN_INDEPENDENT and ci_low > 0.5 and row["trend"] != "flat"),
+                       validated=bool(indep >= MIN_INDEPENDENT and low > 0.5 and row["trend"] != "flat"),
                        range_held=rep.coverage_80)
         out["horizons"][str(h)] = row
     return out
@@ -185,4 +220,41 @@ def exit_plan(paths: np.ndarray, *, price: float, cost_per_share: float, shares:
                 if sell_now else
                 "best trade-off between a higher price and the chance of reaching it within a month"),
         "confidence": "uses a validated trend" if trend_used else "no proven trend: volatility only",
+    }
+
+
+def prognosis(outlook: Optional[Dict[str, Any]], *, cost_per_share: float,
+              commission_rate: float) -> Dict[str, Any]:
+    """The main verdict for one lot: is waiting worth it, the expected price and date, the risk."""
+    if not outlook or outlook.get("status") != "ok" or not cost_per_share:
+        return {}
+    hz = outlook["horizons"]
+    keep = 1.0 - commission_rate
+    p0 = outlook["last_close"]
+    proven = [x for x in hz.values() if x.get("validated")]
+    main = max(proven, key=lambda x: x["confidence_low"]) if proven else hz[str(max(HORIZONS))]
+    if proven and main["trend"] == "up":
+        verdict, headline = "wait", "Waiting looks worthwhile: likely to rise"
+    elif proven and main["trend"] == "down":
+        verdict, headline = "fall", "Likely to fall: selling sooner loses less"
+    else:
+        verdict, headline = "unclear", "No reliable direction"
+    break_even = cost_per_share / keep
+    path = outlook.get("median_path") or []
+    be_day = None
+    if p0 < break_even:
+        be_day = next((i + 1 for i, v in enumerate(path) if v >= break_even), None)
+    as_of = pd.Timestamp(outlook["as_of"])
+    return {
+        "verdict": verdict, "headline": headline,
+        "basis": (f"{main['label']} trend right {main['hits']} of {main['tests']} times"
+                  if proven else "no trend passed its back-test"),
+        "lean": None if proven else hz[str(max(HORIZONS))]["trend"],
+        "horizon": main["label"], "expected": main["median"], "expected_date": main["date"],
+        "expected_vs_cost_pct": (main["median"] * keep / cost_per_share - 1) * 100,
+        "now_vs_cost_pct": (p0 * keep / cost_per_share - 1) * 100,
+        "break_even": break_even,
+        "in_profit": p0 >= break_even,
+        "break_even_date": (as_of + pd.offsets.BDay(be_day)).strftime("%Y-%m-%d") if be_day else None,
+        "p_halve_1y": outlook.get("p_halve_1y"),
     }

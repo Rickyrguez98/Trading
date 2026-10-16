@@ -9,6 +9,34 @@ this counter; releases before 0.0.12 were never tracked in this file.
 
 ## [Unreleased]
 
+### Added — prognosis, frozen table, orders spreadsheets, my-stocks analysis
+- **Prognosis column** per lot: "waiting looks worthwhile" or "likely to fall"
+  only when a trend passed its back-test, otherwise "no reliable direction"
+  with the unproven lean; the expected price and its date, when the middle
+  scenario reaches break-even, and the chance of halving within a year.
+- **Frozen main columns** on the portfolio table (stock to days held); the
+  prognosis and the 1-month to 1-year forecasts scroll sideways beneath them.
+  The portfolio page uses the full window width.
+- **Orders from a spreadsheet** (CSV or Excel), English or Spanish headers,
+  day-first dates, sign-based sides; and an upload box for trades at the top
+  of the dashboard.
+- **My stocks only**: run the selection pipeline (fundamentals, news, scores)
+  on just your holdings, shown on the Portfolio page.
+
+### Changed
+- Forecast back-tests use up to ten years of monthly tests (about twelve years
+  of prices), so 3-, 6- and 12-month calls can be judged for stocks with the
+  history; stocks without it say how many years they would need.
+- The validation confidence interval now counts overlapping tests as the
+  independent evidence they are (it treated 24 monthly tests of a 3-month
+  call as 24 independent ones, overstating certainty).
+
+### Fixed
+- Live prices: the app now sends Yahoo one request at a time, and when Yahoo
+  answers empty three times in a row (a rate limit, reported by yfinance as
+  "possibly delisted") it pauses for five minutes and shows the last known
+  prices instead of retrying every stock every five minutes.
+
 ### Changed — forecast by horizon and a short-term recommendation
 - The portfolio's single "next month" column becomes four groups — 1 month,
   3 months, 6 months, 1 year — each with trend (up / down / flat and the

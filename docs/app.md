@@ -36,9 +36,9 @@ jobs through the environment; the app never asks for them.
 
 | Page | What you do there |
 |---|---|
-| **Dashboard** | Four headline tiles (ranking size and run status, plans, holdings, latest monitor actions), the **market charts** for your watchlist — by default your own stocks — one chart per stock or grouped by sector, and recent jobs. |
+| **Dashboard** | An upload box for your trades (confirmation PDFs or an orders spreadsheet), four headline tiles (ranking size and run status, plans, holdings, latest monitor actions), the **market charts** for your watchlist — by default your own stocks — one chart per stock or grouped by sector, and recent jobs. |
 | **Portfolio** | Import your trade confirmation PDFs (any number at once); see every purchase lot with its sale or its live value, your realized and open results, charts of your stocks with your buys and sells marked, and download it all as CSV. See [Portfolio](#portfolio-from-your-trade-confirmations). |
-| **1 · Select** | Start the full-universe selection (replaces the ranking every step reads) or a quick sample run (kept in its own job folder — sample scores are relative to the sample and must never replace the full ranking). Top 25 table. The full run handles Yahoo's rate limits itself (see below). |
+| **1 · Select** | Start the full-universe selection (replaces the ranking every step reads), a **my stocks only** run (fundamentals and news for just your holdings, a few dozen requests) or a quick sample run (kept in its own job folder — sample scores are relative to the sample and must never replace the full ranking). Top 25 table. The full run handles Yahoo's rate limits itself (see below). |
 | **2 · Allocate** | Enter an amount and a strategy; see each plan's positions in percent and money. |
 | **3 · Broker** | Pick option A, B or C (saved in `data/app/settings.json`), see what each needs, create your holdings CSV from the template, or replace it with an upload (the old file is backed up). |
 | **4 · Monitor** | Run the monitor with the chosen option (upload a statement PDF for A), an optional target plan and new cash; read the actions, the evidence for each and the outlook. |
@@ -121,8 +121,16 @@ charts as the licence asks.
 
 ## Portfolio from your trade confirmations
 
-**Importing.** On the **Portfolio** page choose (or drop) your confirmation
-PDFs — as many as you have; the whole folder is fine. Supported today: the
+**Importing.** On the **Portfolio** page (or the upload box at the top of the
+dashboard) choose or drop your files — as many as you have; the whole folder
+is fine. Two kinds are read: broker **trade confirmation PDFs**, and a
+**spreadsheet of your orders** (CSV or Excel `.xlsx`) with one row per order
+or fill: a date, a ticker, buy/sell (or a negative quantity for a sale), a
+quantity and a price, optionally the commission and net amount. English or
+Spanish headers work (`fecha, emisora, operación, títulos, precio, comisión`),
+dates like `14/10/2025` are read day-first when the header is Spanish or a
+day is over 12, and only USD orders are taken (others are listed as skipped).
+The app's own "Raw executions CSV" can be read back the same way. For the PDFs: Supported today: the
 daily confirmations of GBM's US-dollar account, issued by its clearing firm
 DriveWealth (`Confirm_GBMP_….pdf`). Each trade line is read with its own
 amounts (principal, commission, fees, net), and the amounts are cross-checked;
@@ -161,11 +169,23 @@ proportion to how reliable it is statistically — the average daily move is
 multiplied by `max(0, 1 − 1/t²)`, where `t` is its t-statistic — so a weak
 trend counts for nothing.
 
+The table keeps its first columns (stock to days held) **frozen** on a
+desktop-width screen; the prognosis and the forecasts scroll sideways beneath
+them. On a phone only the stock column stays.
+
+**Prognosis.** The verdict for each lot: "waiting looks worthwhile — likely
+to rise" or "likely to fall — selling sooner loses less" appears **only when a
+trend has passed its back-test** (✓); otherwise "no reliable direction", with
+the way the unproven model leans. It also gives the expected (median) price
+and the date for it, when the middle scenario gets back to the lot's
+break-even price if it is at a loss ("not within a year" when it does not),
+and the chance the price halves within a year.
+
 For **1 month, 3 months, 6 months and 1 year**:
 
 | Column | How it is computed |
 |---|---|
-| Trend | ▲ Up when at least 55% of the futures end above today's price, ▼ Down when at most 45% do, → Flat otherwise (and always Flat when no trend survives the shrinkage). The small print is its record in walk-forward tests on the stock's own past: how many periods it called the direction right. **✓** only when that record beats a coin flip with 95% confidence and rests on at least 8 independent periods; 6-month and 1-year calls never have enough (24 overlapping monthly tests of a 1-year call are about two independent years), so they say "too few tests" or "not testable". |
+| Trend | ▲ Up when at least 55% of the futures end above today's price, ▼ Down when at most 45% do, → Flat otherwise (and always Flat when no trend survives the shrinkage). The small print is its record in walk-forward tests on the stock's own past — one test per month, up to ten years of them (about twelve years of prices are fetched). **✓** only when that record beats a coin flip with 95% confidence, where the confidence interval counts overlapping tests only as the independent evidence they are (120 monthly tests of a 1-year call are 10 independent years), and only with at least 8 independent periods. A stock without that much history says how many years the horizon needs ("needs 10 yrs of prices (has 3)"): about 1.7 for 1 month, 3.2 for 3 months, 5.4 for 6 months and 9.9 for 1 year. |
 | Expected | The middle outcome (median) at the horizon. The arithmetic average is in the CSV; for volatile stocks a few extreme futures pull it far up. |
 | Min / Max | The average lowest and highest close reached along the way. |
 
@@ -185,9 +205,27 @@ Computed once per trading day per stock (`data/app/cache/market/outlook/`),
 included in the CSV, and available at `/api/portfolio/outlook`. Closing prices
 only (intraday swings are wider) and a stop is assumed to fill at its price.
 These are statistical estimates from past prices — not a prediction you can
-rely on and not financial advice. On 2026-10-16, one of 20 holdings had a
-trend that passed its test (NVDA, 3 months: right 17 of 24); see also
-[monitoring.md](us_equities/monitoring.md).
+rely on and not financial advice. A validated record is evidence that a
+stock's trend persisted in the past decade, which is exactly the kind of
+history (a long bull run, a stock you bought because it rose) that need not
+continue. On 2026-10-16, two of 20 holdings had validated trends (NVDA and
+AVGO, at every horizon); see also [monitoring.md](us_equities/monitoring.md).
+
+**Fundamentals & news for your stocks.** "Analyse my stocks" (Portfolio or
+Selection page) runs the stock-selection pipeline on only the tickers you
+hold, without the pre-run health check: a few dozen requests to each data
+source instead of ~4,800, so it finishes in a minute or two and stays clear of
+rate limits. Its results — score, fundamentals, news sentiment, number of
+articles, role and flags — are shown on the Portfolio page. Scores there
+compare your stocks with each other, so the run never replaces the full
+ranking. News needs `NEWSAPI_AI_KEY` in `.env`: without it the only remaining
+news source is Yahoo's feed, which blocks many networks, and the page says so.
+
+**Yahoo's limits in the app.** All Yahoo requests from the app go one at a
+time, 0.4 s apart; when Yahoo answers empty three times in a row (it does this
+when it rate-limits, and yfinance then prints a misleading "possibly
+delisted"), live prices pause for five minutes and the last known prices are
+shown and marked.
 
 **Charts.** One chart per stock you have traded, starting before your first
 purchase, with ▲ at each buy and ▼ at each sale, and your average cost as a

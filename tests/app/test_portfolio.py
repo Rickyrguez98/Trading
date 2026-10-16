@@ -73,7 +73,7 @@ def test_import_many_pdfs_dedupes_and_reports_bad_files(wf):
                                     ("statement.pdf", (FIX / "drivewealth_statement.pdf").read_bytes())])
     assert (res.added, res.duplicates) == (7, 0)
     assert [f.error is None for f in res.files] == [True, True, False, False]
-    assert "not a PDF" in res.files[2].error and "trade confirmation" in res.files[3].error
+    assert "missing column" in res.files[2].error and "trade confirmation" in res.files[3].error
     again = wf.portfolio.import_pdfs([("buys-copy.pdf", BUYS)])
     assert (again.added, again.duplicates) == (0, 4)
     assert "Read 1 of 1 file(s): 4 trade(s), 0 new, 4 already imported" == again.message()
@@ -164,7 +164,7 @@ def client(wf):
 
 def test_portfolio_page_before_and_after_import(client):
     empty = client.get("/portfolio").text
-    assert "Import your trade confirmations" in empty and 'id="ops"' not in empty
+    assert "Import your trades" in empty and 'id="ops"' not in empty
     r = client.post("/portfolio/import", files=[("files", ("b.pdf", BUYS, "application/pdf")),
                                                 ("files", ("s.pdf", SELLS, "application/pdf"))],
                     follow_redirects=False)
@@ -244,8 +244,8 @@ def test_outlook_columns_per_horizon_are_consistent():
 def test_trends_are_only_validated_with_enough_independent_evidence():
     from trading_app.services.outlook import stock_outlook
 
-    o = stock_outlook(_noisy(1500), key="T")
-    for h in ("126", "252"):                                                 # 24 overlapping windows: < 8 independent
+    o = stock_outlook(_noisy(700), key="T")                                  # under three years of prices
+    for h in ("126", "252"):                                                 # too few independent windows
         assert o["horizons"][h]["testable"] is False and o["horizons"][h]["validated"] is False
     assert o["horizons"]["21"]["tests"] and o["horizons"]["21"]["testable"] is True
     flat = stock_outlook(_noisy(1500, seed=9, drift=0.0), key="F")
@@ -314,3 +314,106 @@ def test_outlook_api_csv_and_columns(client):
     page = client.get("/portfolio").text
     assert page.count('class="hz-group"') == 4 and "Short-term recommendation" in page
     assert page.count('data-k="trend"') == 2 * 4 and page.count("js-rec") == 2 and "not financial advice" in page
+
+
+# ---------------------------------------------------------------------------
+# Prognosis, validation strength, spreadsheet imports, my-stocks analysis
+# ---------------------------------------------------------------------------
+
+def test_overlapping_tests_count_as_the_evidence_they_are():
+    from trading_app.services.outlook import tests_possible, wilson_low, years_needed
+
+    assert tests_possible(3024, 21) == 120 and tests_possible(500, 252) == 0
+    assert years_needed(21) < years_needed(63) < years_needed(252) == pytest.approx(9.9, abs=0.1)
+    # 75 of 120 right is convincing over 120 independent months, not over 10 independent years.
+    assert wilson_low(75 / 120, 120) > 0.5 > wilson_low(75 / 120, 10)
+
+
+def test_prognosis_follows_only_validated_trends():
+    from trading_app.services.outlook import prognosis
+
+    base = {"status": "ok", "as_of": "2026-10-14", "last_close": 100.0, "p_halve_1y": 0.05,
+            "median_path": [100 + 0.2 * i for i in range(252)]}
+
+    def hz(validated, trend):
+        return {str(h): {"label": lb, "days": h, "trend": trend, "median": 100 + h / 10, "date": "2027-01-01",
+                         "validated": validated and h == 126, "confidence_low": 0.6, "hits": 90, "tests": 120}
+                for h, lb in ((21, "1M"), (63, "3M"), (126, "6M"), (252, "1Y"))}
+
+    up = prognosis({**base, "horizons": hz(True, "up")}, cost_per_share=120.0, commission_rate=0.0)
+    assert up["verdict"] == "wait" and up["horizon"] == "6M" and "right 90 of 120" in up["basis"]
+    assert up["break_even_date"] is not None and not up["in_profit"]   # the rising middle path reaches 120
+    down = prognosis({**base, "horizons": hz(True, "down")}, cost_per_share=80.0, commission_rate=0.0)
+    assert down["verdict"] == "fall" and down["in_profit"]
+    unclear = prognosis({**base, "horizons": hz(False, "up")}, cost_per_share=80.0, commission_rate=0.0)
+    assert unclear["verdict"] == "unclear" and unclear["lean"] == "up" and unclear["horizon"] == "1Y"
+
+
+def test_outlook_carries_dates_tail_risk_and_history_needs():
+    from trading_app.services.outlook import stock_outlook
+
+    o = stock_outlook(_noisy(400), key="T")
+    assert len(o["median_path"]) == 252 and 0 <= o["p_halve_1y"] <= 1
+    one_year = o["horizons"]["252"]
+    assert one_year["date"] > o["as_of"] and one_year["testable"] is False
+    assert one_year["years_needed"] > one_year["years_available"]
+
+
+def test_import_orders_from_csv_and_excel(wf):
+    import pandas as pd
+
+    csv_bytes = "Fecha;Emisora;Operación;Títulos;Precio\n14/10/2025;IREN;Compra;1;62.61\n".encode("latin-1")
+    buf = io.BytesIO()
+    pd.DataFrame({"Date": ["2025-10-09"], "Symbol": ["GOOGL"], "Side": ["Buy"], "Quantity": [0.27870134],
+                  "Price": [243.3788], "Commission": [0.16]}).to_excel(buf, index=False)
+    res = wf.portfolio.import_files([("ordenes.csv", csv_bytes), ("orders.xlsx", buf.getvalue()),
+                                     ("notes.docx", b"PK\x03\x04junk")])
+    assert (res.added, [f.error is None for f in res.files]) == (2, [True, True, False])
+    assert {o.symbol for o in wf.portfolio.view().open_operations} == {"IREN", "GOOGL"}
+
+
+def test_my_stocks_run_and_its_results(wf):
+    class Running:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    wf.jobs._popen = lambda argv, **kw: Running()
+    wf.portfolio.import_files([("b.pdf", BUYS)])
+    assert wf.my_tickers() == ["AAPL", "BRK.B", "NVDA"]
+    job = wf.start_selection("mine")
+    argv = job.argv
+    assert argv[argv.index("--tickers") + 1: argv.index("--tickers") + 4] == ["AAPL", "BRK.B", "NVDA"]
+    assert "--no-provider-health-check" in argv and str(wf.jobs.job_dir(job.id)) in " ".join(argv)
+    assert wf.my_stocks_analysis() is None                               # not finished yet
+    out = Path(job.outputs["ranking"])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"rank": [1], "ticker": ["NVDA"], "final_score": [70.0], "fundamentals_score": [65.0],
+                  "effective_sentiment_score": [55.0], "article_count": [12]}).to_csv(out, index=False)
+    (wf.jobs.job_dir(job.id) / "exit_code").write_text("0")
+    analysis = wf.my_stocks_analysis()
+    assert analysis["rows"][0]["ticker"] == "NVDA" and analysis["rows"][0]["article_count"] == 12
+
+
+def test_quotes_pause_when_yahoo_goes_silent(wf):
+    wf.fake.prices = {}                                                    # Yahoo answers empty for everything
+    got = wf.market.quotes(["AAA", "BBB", "CCC", "DDD", "EEE"])
+    assert wf.fake.quote_calls == ["AAA", "BBB", "CCC"]                   # stops after three empty answers
+    assert all(q.get("stale") for q in got.values()) and wf.market.quiet_until > time.time()
+
+
+def test_dashboard_upload_box_and_frozen_table(client):
+    dash = client.get("/").text
+    assert 'action="/portfolio/import"' in dash and 'name="next" value="/"' in dash
+    r = client.post("/portfolio/import", data={"next": "/"},
+                    files=[("files", ("b.pdf", BUYS, "application/pdf"))], follow_redirects=False)
+    assert r.headers["location"].startswith("/?msg=")
+    evil = client.post("/portfolio/import", data={"next": "https://evil.example"},
+                       files=[("files", ("b.pdf", BUYS, "application/pdf"))], follow_redirects=False)
+    assert evil.headers["location"].startswith("/portfolio?")             # no open redirect
+    page = client.get("/portfolio").text
+    assert page.count('data-fz="8"') >= 3 and "js-pg" in page and "Prognosis" in page
+    assert "Fundamentals &amp; news for your stocks" in page and "Analyse my 3 stocks" in page
+    sel = client.get("/selection").text
+    assert "My stocks only" in sel and 'value="mine"' in sel

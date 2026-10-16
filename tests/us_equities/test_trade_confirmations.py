@@ -192,3 +192,54 @@ def test_open_lots_become_a_holdings_file_the_monitor_reads(tmp_path):
 ])
 def test_security_names_lose_the_share_class_jargon(raw, name):
     assert security_name(raw) == name
+
+
+# ---------------------------------------------------------------------------
+# Orders from a spreadsheet
+# ---------------------------------------------------------------------------
+
+def test_spanish_orders_sheet_with_day_first_dates():
+    import pandas as pd
+
+    from asset_selection.monitoring.ledger import executions_from_table
+
+    df = pd.DataFrame({"Fecha": ["14/10/2025", "01/02/2026"], "Emisora": ["ASTS", "ASTS *"],
+                       "Operación": ["Compra", "Venta"], "Títulos": ["0.9", "0.9"],
+                       "Precio": ["89.12", "104.42"], "Comisión": ["0.19", "0.23"]})
+    ex, notes = executions_from_table(df, source="mis_ordenes.csv")
+    assert notes == [] and [(e.symbol, e.side, e.trade_date) for e in ex] == [
+        ("ASTS", BUY, date(2025, 10, 14)), ("ASTS", SELL, date(2026, 2, 1))]   # 01/02 is 1 February
+    assert ex[0].net_amount == pytest.approx(0.9 * 89.12 + 0.19, abs=0.01)
+    assert ex[1].net_amount == pytest.approx(0.9 * 104.42 - 0.23, abs=0.01)
+
+
+def test_english_sheet_side_from_quantity_sign_and_skipped_rows():
+    import pandas as pd
+
+    from asset_selection.monitoring.ledger import OrdersTableError, executions_from_table
+
+    df = pd.DataFrame({"Date": ["10/14/2025", "05/22/2026", "05/23/2026", ""], "Ticker": ["NVDA", "NVDA", "AMX", ""],
+                       "Quantity": ["2", "-1", "5", ""], "Price": ["180", "200", "17", ""],
+                       "Currency": ["USD", "USD", "MXN", ""]})
+    ex, notes = executions_from_table(df, source="orders.csv")
+    assert [(e.side, e.quantity) for e in ex] == [(BUY, 2.0), (SELL, 1.0)]
+    assert len(notes) == 1 and "MXN" in notes[0]                       # one currency per ledger; reported
+    with pytest.raises(OrdersTableError, match="missing column"):
+        executions_from_table(pd.DataFrame({"Ticker": ["X"], "Amount": [1]}), source="bad.csv")
+
+
+def test_our_own_executions_export_reads_back():
+    import pandas as pd
+
+    from asset_selection.monitoring.ledger import executions_from_table
+
+    path = Path("tests/fixtures/monitoring/_tmp_exec.csv")
+    try:
+        original = [_ex("NVDA", BUY, 0.5, 180.0, "2026-03-02", commission=0.22),
+                    _ex("NVDA", SELL, 0.5, 190.0, "2026-04-02", commission=0.2)]
+        write_executions(path, original)
+        again, notes = executions_from_table(pd.read_csv(path, dtype=str, keep_default_na=False), source="x.csv")
+        assert notes == [] and [(e.side, e.quantity, e.price, e.trade_date) for e in again] == [
+            (e.side, e.quantity, e.price, e.trade_date) for e in original]
+    finally:
+        path.unlink(missing_ok=True)

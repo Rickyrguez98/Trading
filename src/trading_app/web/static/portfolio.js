@@ -49,6 +49,7 @@
       span.textContent = usd(s.unrealized_pl, true) + " · " + pct(s.unrealized_pct);
       el("kpi-unreal").appendChild(span);
       el("kpi-unreal").appendChild(document.createTextNode(" if sold now" + (s.unpriced ? " (" + s.unpriced + " lot(s) unpriced)" : "")));
+      if (s.stale_prices) el("kpi-unreal").appendChild(document.createTextNode(" · " + s.stale_prices + " last-known price(s)"));
       el("kpi-total").textContent = usd(s.total_pl, true);
       setTone(el("kpi-total"), s.total_pl);
       var tv = el("tot-value"), tp = el("tot-pl");
@@ -99,7 +100,7 @@
     td.appendChild(t);
     var note = x.validated ? "✓ right " + x.hits + "/" + x.tests
              : x.testable ? "right " + x.hits + "/" + x.tests + ", unproven"
-             : x.tests ? "too few tests" : "not testable";
+             : "needs " + Math.round(x.years_needed) + " yrs of prices (has " + Math.round(x.years_available) + ")";
     td.appendChild(el2("small", note));
     td.title = "Share of simulated futures ending above today's price. Track record: " + note + ".";
   }
@@ -131,6 +132,52 @@
     td.title = plan.why;
   }
 
+  function fmtDate(iso) {
+    if (!iso) return "";
+    var d = new Date(iso + "T12:00:00");
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  }
+
+  function prognosisCell(td, pg, ol) {
+    td.textContent = "";
+    if (!pg || !pg.verdict) {
+      td.appendChild(el2("small", ol && ol.status === "insufficient_history" ? "not enough price history" : "no outlook"));
+      return;
+    }
+    var tone = pg.verdict === "wait" ? "pos" : pg.verdict === "fall" ? "neg" : "flat";
+    td.appendChild(el2("span", pg.headline, "verdict trend " + tone));
+    if (pg.lean && pg.lean !== "flat") td.appendChild(el2("small", "the unproven model leans " + pg.lean + " over a year"));
+    var e = document.createElement("div");
+    e.appendChild(document.createTextNode("Expected " + money(pg.expected) + " by " + fmtDate(pg.expected_date) + " "));
+    e.appendChild(el2("span", pct(pg.expected_vs_cost_pct), toneOf(pg.expected_vs_cost_pct)));
+    td.appendChild(e);
+    var b = document.createElement("div");
+    if (pg.in_profit) {
+      b.textContent = "Above your break-even (" + money(pg.break_even) + ")";
+    } else {
+      b.textContent = "Break-even " + money(pg.break_even) + ": " +
+        (pg.break_even_date ? "by " + fmtDate(pg.break_even_date) + " (middle scenario)" : "not within a year (middle scenario)");
+    }
+    td.appendChild(b);
+    if (pg.p_halve_1y != null) td.appendChild(el2("small", "Chance of halving within a year: " + Math.round(pg.p_halve_1y * 100) + "%"));
+    td.appendChild(el2("small", pg.basis));
+  }
+
+  // Freeze the main columns (desktop) so only the forecasts scroll sideways.
+  var wrap = table.parentElement;
+  function freeze() {
+    var heads = table.querySelectorAll("thead th.fz");
+    var wide = wrap.clientWidth >= 900;
+    wrap.classList.toggle("frozen", wide);
+    var lefts = [], x = 0;
+    Array.prototype.forEach.call(heads, function (th) { lefts[+th.getAttribute("data-fz")] = x; x += th.offsetWidth; });
+    Array.prototype.forEach.call(table.querySelectorAll(".fz"), function (cell) {
+      cell.style.left = wide ? lefts[+cell.getAttribute("data-fz")] + "px" : "";
+    });
+  }
+  window.addEventListener("resize", function () { clearTimeout(freeze.t); freeze.t = setTimeout(freeze, 120); });
+  freeze();
+
   function loadOutlook() {
     var rows = table.querySelectorAll("tr[data-open]");
     if (!rows.length) return;
@@ -148,9 +195,12 @@
         });
         var rec = tr.querySelector("td.js-rec");
         if (rec) recCell(rec, res.plans[key], ol);
+        var pgc = tr.querySelector("td.js-pg");
+        if (pgc) prognosisCell(pgc, (res.prognoses || {})[key], ol);
       });
+      freeze();                      // cell contents changed: recompute the frozen offsets
     }).catch(function (e) {
-      Array.prototype.forEach.call(table.querySelectorAll("td.fc, td.js-rec"), function (td) {
+      Array.prototype.forEach.call(table.querySelectorAll("td.fc, td.js-rec, td.js-pg"), function (td) {
         td.textContent = "unavailable (" + e.message + ")";
       });
     });
