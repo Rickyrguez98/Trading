@@ -760,6 +760,10 @@ def _stage4_sentiment(
     scfg = config.sentiment
 
     rows: List[Dict[str, Any]] = []
+    # Providers that search by company name (newsapi_ai) get the names from stage 3.
+    name_hook = getattr(news_provider, "use_company_names", None)
+    if name_hook is not None and "company_name" in df.columns:
+        name_hook(dict(zip(df["ticker"], df["company_name"])))
     iterator = _progress(df["ticker"].tolist(), desc="Stage 4: news+sentiment")
     for ticker in iterator:
         try:

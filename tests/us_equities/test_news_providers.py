@@ -187,7 +187,7 @@ def _build_news(cfg):
     )
 
 
-def test_shipped_config_chains_a_keyless_fallback_behind_finnhub():
+def test_shipped_config_chains_a_keyless_fallback_behind_the_keyed_apis():
     """Without a key, sentiment must still have a route to real articles."""
     from asset_selection.config import load_config
     from asset_selection.data_providers.fallback import FallbackNewsProvider
@@ -195,7 +195,7 @@ def test_shipped_config_chains_a_keyless_fallback_behind_finnhub():
     provider = _build_news(load_config("configs/us_equities/default.yaml"))
     assert isinstance(provider, FallbackNewsProvider)
     assert [type(p).__name__ for p in provider.providers] == [
-        "FinnhubNewsProvider", "YahooRssNewsProvider",
+        "NewsApiAiProvider", "FinnhubNewsProvider", "YahooRssNewsProvider",
     ]
 
 

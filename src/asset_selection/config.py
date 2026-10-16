@@ -430,7 +430,7 @@ class AppConfig:
     # Minimum seconds between calls per provider. Finnhub's free plan allows
     # 60 calls a minute; the Yahoo news feed rate-limits aggressively.
     rate_limits: Dict[str, float] = field(
-        default_factory=lambda: {"yfinance": 0.4, "yahoo_rss": 2.0, "finnhub": 1.1}
+        default_factory=lambda: {"yfinance": 0.4, "yahoo_rss": 2.0, "finnhub": 1.1, "newsapi_ai": 0.5}
     )
     prices: PricesConfig = field(default_factory=PricesConfig)
     sentiment: SentimentConfig = field(default_factory=SentimentConfig)
@@ -506,7 +506,7 @@ def _from_dict(raw: Dict[str, Any]) -> AppConfig:
         providers=ProvidersConfig(**_filtered(ProvidersConfig, section("providers"))),
         robustness=RobustnessConfig(**_filtered(RobustnessConfig, section("robustness"))),
         cache=CacheConfig(**_filtered(CacheConfig, section("cache"))),
-        rate_limits={**{"yfinance": 0.4, "yahoo_rss": 2.0, "finnhub": 1.1},
+        rate_limits={**{"yfinance": 0.4, "yahoo_rss": 2.0, "finnhub": 1.1, "newsapi_ai": 0.5},
                      **dict(section("rate_limits") or {})},
         prices=PricesConfig(**_filtered(PricesConfig, section("prices"))),
         sentiment=SentimentConfig(**_filtered(SentimentConfig, section("sentiment"))),
